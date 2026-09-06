@@ -24,7 +24,8 @@ htmlcov/
 
 # Variables de entorno y credenciales
 .env
-.env.*
+.env*
+!.env.example
 *.pem
 *.key
 id_*
