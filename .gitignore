@@ -1,0 +1,32 @@
+# Carpeta de reportes históricos, capturas y scripts de prueba
+.reportes/
+
+# Entornos virtuales de Python
+env/
+venv/
+.venv/
+
+# Archivos compilados y temporales
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Variables de entorno y credenciales
+.env
+.env.*
+*.pem
+*.key
+id_*
+
+# Logs y temporales
+*.log
+*.pid
+*.sqlite3
+*.db
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
