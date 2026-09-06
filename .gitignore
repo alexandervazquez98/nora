@@ -1,5 +1,6 @@
 # Carpeta de reportes históricos, capturas y scripts de prueba
 .reportes/
+.atl/
 
 # Entornos virtuales de Python
 env/
@@ -11,6 +12,15 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.so
+
+# Toolchain caches and build artefacts
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+*.egg-info/
 
 # Variables de entorno y credenciales
 .env
