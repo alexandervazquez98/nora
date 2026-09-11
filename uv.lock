@@ -1304,6 +1304,8 @@ dependencies = [
     { name = "fastmcp" },
     { name = "google-genai" },
     { name = "lmstudio" },
+    { name = "puresnmp" },
+    { name = "puresnmp-crypto" },
     { name = "pydantic-settings" },
 ]
 
@@ -1315,6 +1317,7 @@ dev = [
     { name = "pytest-cov" },
     { name = "pytest-timeout" },
     { name = "ruff" },
+    { name = "snmpsim" },
 ]
 
 [package.metadata]
@@ -1322,6 +1325,8 @@ requires-dist = [
     { name = "fastmcp", specifier = ">=3.2,<4" },
     { name = "google-genai", specifier = ">=1,<3" },
     { name = "lmstudio", specifier = ">=1,<2" },
+    { name = "puresnmp", specifier = "==2.0.1" },
+    { name = "puresnmp-crypto", specifier = ">=1.0" },
     { name = "pydantic-settings", specifier = ">=2" },
 ]
 
@@ -1333,6 +1338,7 @@ dev = [
     { name = "pytest-cov", specifier = ">=5" },
     { name = "pytest-timeout", specifier = ">=2.4" },
     { name = "ruff", specifier = ">=0.6" },
+    { name = "snmpsim", specifier = ">=1.0" },
 ]
 
 [[package]]
@@ -1402,6 +1408,30 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/f9/e2/3e91f31a7d2b083fe6ef3fa267035b518369d9511ffab804f839851d2779/pluggy-1.6.0.tar.gz", hash = "sha256:7dcc130b76258d33b90f61b658791dede3486c3e6bfb003ee5c9bfb396dd22f3", size = 69412, upload-time = "2025-05-15T12:30:07.975Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/54/20/4d324d65cc6d9205fabedc306948156824eb9f0ee1633355a8f7ec5c66bf/pluggy-1.6.0-py3-none-any.whl", hash = "sha256:e920276dd6813095e9377c0bc5566d94c932c33b27a3e3945d8389c374dd4746", size = 20538, upload-time = "2025-05-15T12:30:06.134Z" },
+]
+
+[[package]]
+name = "puresnmp"
+version = "2.0.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "x690" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/4e/1a/c0d94ab9c7577d61c3597096dd446e789c9c98cf39d222298f4404429041/puresnmp-2.0.1.tar.gz", hash = "sha256:08a147249a6ff92d3f463b77e21b9221ca7a836ff7401e0b8dfe47135ed4cf56", size = 64103, upload-time = "2024-07-25T16:00:11.319Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/18/62/38184153bb6bc802c51adda22bcc3c06216650ca7c690b0135d717d9e86c/puresnmp-2.0.1-py3-none-any.whl", hash = "sha256:9d6413531d33225900883df8ac3131ddac34f13eae6ac6a6ffeee7ae81d309b1", size = 62134, upload-time = "2024-07-25T16:00:09.156Z" },
+]
+
+[[package]]
+name = "puresnmp-crypto"
+version = "1.0.1.post1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cryptography" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/be/13/11e91090012e3eed30dbf56d9b8ed5242757dd74ea2c26b185c7f72dc420/puresnmp_crypto-1.0.1.post1.tar.gz", hash = "sha256:3a202871b8aad70d8e429c1de3239e897388f4e2e67a9f6eb292bf00ccffa631", size = 3743, upload-time = "2024-07-25T14:46:54.566Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a0/3b/28427f6d22e87238c4a9a2e623d8dc391f9b9c715704018239ed2a1b9ef3/puresnmp_crypto-1.0.1.post1-py3-none-any.whl", hash = "sha256:d906105d1b9391deb7895b91bb4f170b08174847977cb4e8ea99a8a147f11efc", size = 4139, upload-time = "2024-07-25T14:46:53.264Z" },
 ]
 
 [[package]]
@@ -1598,6 +1628,18 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/e8/52/d87eba7cb129b81563019d1679026e7a112ef76855d6159d24754dbd2a51/pyperclip-1.11.0.tar.gz", hash = "sha256:244035963e4428530d9e3a6101a1ef97209c6825edab1567beac148ccc1db1b6", size = 12185, upload-time = "2025-09-26T14:40:37.245Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/df/80/fc9d01d5ed37ba4c42ca2b55b4339ae6e200b456be3a1aaddf4a9fa99b8c/pyperclip-1.11.0-py3-none-any.whl", hash = "sha256:299403e9ff44581cb9ba2ffeed69c7aa96a008622ad0c46cb575ca75b5b84273", size = 11063, upload-time = "2025-09-26T14:40:36.069Z" },
+]
+
+[[package]]
+name = "pysnmp"
+version = "7.1.29"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pyasn1" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/41/29/57f468577d8362986719590a9fbfde4056e4934cf6d711f9a8bac8a60250/pysnmp-7.1.29.tar.gz", hash = "sha256:d0da6726c4d35b1e57027c98e2065928656b0cc5d3ce5a60b3535e1825cc60ee", size = 268583, upload-time = "2026-08-21T03:57:23.32Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a5/75/ee4c64b903786caa9294382bae895ccddb0b05c6f89ea0c8d21bce6dd9b1/pysnmp-7.1.29-py3-none-any.whl", hash = "sha256:6d08124574c474853870f20d728b54335b42fb1e68068bbb486ec077b3d052cf", size = 355548, upload-time = "2026-08-21T03:57:21.091Z" },
 ]
 
 [[package]]
@@ -1933,6 +1975,18 @@ wheels = [
 ]
 
 [[package]]
+name = "snmpsim"
+version = "1.2.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pysnmp" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/2b/bb/2d0f5289a28a44e9dc3b767af7987ce81421cdaf8098d3211fbd8f2146b9/snmpsim-1.2.2.tar.gz", hash = "sha256:392ff37e29f788ec54669d5bd7d091b0d7100fd865428a6dde904176ea68d2d9", size = 244988, upload-time = "2026-04-26T22:47:01.201Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/89/c9/9cc00719787dc69812950a2a355c903aa9d94bc506dd80a8683398e3ca40/snmpsim-1.2.2-py3-none-any.whl", hash = "sha256:db4a0f64f6a61f38c24cc5fc55573c454ea11494c914088840fae8bad677fdd1", size = 226850, upload-time = "2026-04-26T22:46:59.895Z" },
+]
+
+[[package]]
 name = "sortedcontainers"
 version = "2.4.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1965,6 +2019,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/b5/b4/205b0d5241d934e8add0c38aa924c4f9fb7330834ff11e5444db964ec3f9/starlette-1.6.0.tar.gz", hash = "sha256:d4e3ac5e546444960c710297a3c9fc3f7ebae1b7e963f3d36173b49da535be9b", size = 2716969, upload-time = "2026-08-08T18:27:57.512Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/c8/cb/6a6a47d5b464bd08695d254f3da6e7986cc70c9fa5d778eda57538edfe56/starlette-1.6.0-py3-none-any.whl", hash = "sha256:a86dd39d14bb45f85a3d18525215a9ef0cfd1f192ac793220e72598c90335f0c", size = 75969, upload-time = "2026-08-08T18:27:56.196Z" },
+]
+
+[[package]]
+name = "t61codec"
+version = "1.0.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/4d/3d/58386307e57294005c8fe2e7b29d97f9094efcb122ab1ff4a368816b45fa/t61codec-1.0.1.tar.gz", hash = "sha256:4d854f40017ef39e699291a57a9891c74630facb370b94238284eb9a475ae23f", size = 5713, upload-time = "2019-12-08T17:04:12.906Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/01/de/47bfc18604861278a97a8381262da4b6a9b98b9f645695ebaf3f22de2558/t61codec-1.0.1-py2.py3-none-any.whl", hash = "sha256:4dae780d65086a10ff822b14ecebb762defe478645a248b74980ced87c85f723", size = 6006, upload-time = "2019-12-08T17:04:07.574Z" },
 ]
 
 [[package]]
@@ -2201,4 +2264,16 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/c7/79/12135bdf8b9c9367b8701c2c19a14c913c120b882d50b014ca0d38083c2c/wsproto-1.3.2.tar.gz", hash = "sha256:b86885dcf294e15204919950f666e06ffc6c7c114ca900b060d6e16293528294", size = 50116, upload-time = "2025-11-20T18:18:01.871Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/a4/f5/10b68b7b1544245097b2a1b8238f66f2fc6dcaeb24ba5d917f52bd2eed4f/wsproto-1.3.2-py3-none-any.whl", hash = "sha256:61eea322cdf56e8cc904bd3ad7573359a242ba65688716b0710a5eb12beab584", size = 24405, upload-time = "2025-11-20T18:18:00.454Z" },
+]
+
+[[package]]
+name = "x690"
+version = "1.0.0.post1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "t61codec" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/78/5c/7fee7f6251575259453839f100301a0eaae6260b73762aa55de84573eee2/x690-1.0.0.post1.tar.gz", hash = "sha256:3a2a8a4e479079188aa6e847814981286b8f1c19569898fa3fe573ee0ce05349", size = 27995, upload-time = "2022-09-30T05:16:15.607Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/25/83/5da9e721caaba8654140bc991ac34e86d6bf3ad2db99ec5c77d3f88b015f/x690-1.0.0.post1-py3-none-any.whl", hash = "sha256:de754c27c9a46e6ede08036a804478ecd79591ecbe92df6f97b34adee55e9d64", size = 29376, upload-time = "2022-09-30T05:16:14.184Z" },
 ]
