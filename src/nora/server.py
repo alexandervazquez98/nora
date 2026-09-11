@@ -18,12 +18,20 @@ from __future__ import annotations
 import logging
 import sys
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 from fastmcp import FastMCP
+from fastmcp.server.middleware import Middleware
 
 from nora import __version__
 from nora.config import Settings
+from nora.core.session_journal import (
+    SessionJournal,
+    SessionJournalError,
+    get_journal,
+    init_session_journal,
+)
 from nora.llm import LLMProvider
 from nora.sanitizer import Sanitizer
 
@@ -132,10 +140,202 @@ def nora_health() -> dict[str, Any]:
     return nora_health_impl(settings, provider)
 
 
+# ---------------------------------------------------------------------------
+# SessionJournal explicit recall tools (R7, R9-S2, R14, R16).
+#
+# Three `@mcp.tool`s registered on the global `mcp` instance. They share
+# the module-level `_journal` singleton (set up by `init_session_journal`).
+# ---------------------------------------------------------------------------
+
+
+def _state_to_payload(state: Any) -> dict[str, Any]:
+    """Serialise `SessionState` (or compatible model) to a JSON-safe dict."""
+    import json
+
+    payload: dict[str, Any] = json.loads(json.dumps(state.model_dump(mode="json")))
+    return payload
+
+
+@mcp.tool
+def nora_session_get_state(include_rotated: bool = False) -> dict[str, Any]:
+    """Return the current `SessionState` as a JSON-safe dict.
+
+    On a missing canonical file, this call CREATES one with the empty
+    default state (R7-S2). When `include_rotated` is True, NDJSON steps
+    are merged into `trace` in `step` order (R16-S1).
+
+    Idempotent: consecutive calls return equivalent state (R7-S1).
+    """
+    journal = get_journal()
+    state = journal.get_state(include_rotated=include_rotated)
+    return _state_to_payload(state)
+
+
+@mcp.tool
+def nora_session_set_focus(device_id: str) -> dict[str, Any]:
+    """Record `device_id` as the active focus and append to `devices_reviewed`.
+
+    Idempotent on the same device id (R7-S4). Advances `last_updated`
+    (R14). The state is persisted atomically.
+    """
+    journal = get_journal()
+    state = journal.set_focus(device_id)
+    return _state_to_payload(state)
+
+
+@mcp.tool
+def nora_session_resume(session_id: str) -> dict[str, Any]:
+    """Load the named session as the active session.
+
+    R7-S5 / R9-S2 — the previously-active session is NOT mutated. The
+    in-memory `_session_id` is replaced; subsequent tool calls land on
+    the resumed session's canonical file.
+
+    R7-S6 — raises `SessionNotFoundError` if the named file is missing.
+    """
+    journal = get_journal()
+    state = journal.resume(session_id)
+    return _state_to_payload(state)
+
+
+@mcp.tool
+def nora_session_summarize() -> str:
+    """Return a non-empty Markdown digest of the current session.
+
+    Covers `focus_device_id`, `devices_reviewed`, and the last 10 step
+    summaries (R17). Pure projection — does NOT mutate the canonical
+    file or record a step.
+    """
+    journal = get_journal()
+    return journal.summarize()
+
+
+# ---------------------------------------------------------------------------
+# Auto-trace middleware (Phase 2 — SessionJournal)
+#
+# Wraps every `@mcp.tool` invocation in the FastMCP dispatcher. Records
+# exactly one `SessionStep` per call, AFTER the tool body returns (or
+# raises) — the recording is durability-backed so a crash between the
+# tool body and the middleware returning leaves either old or new content
+# on disk, never a torn mix (R3).
+#
+# The middleware is registered exactly once via `register_auto_trace_middleware`,
+# typically called from `__main__.py` after `init_session_journal(...)`.
+# Tests that need the middleware call it explicitly.
+# ---------------------------------------------------------------------------
+
+
+class _AutoTraceMiddleware(Middleware):
+    """Records every `@mcp.tool` call into the module-level `_journal` singleton.
+
+    R3 — `record_step` (atomic JSON write) returns BEFORE this middleware
+    returns, so the on-disk state is one step ahead of the in-flight tool.
+
+    R12 — the middleware never mutates `result`. On a tool body exception
+    the middleware records with `outcome="error"` then RE-RAISES so the
+    JSON-RPC error surface is preserved.
+    """
+
+    def __init__(self, journal: SessionJournal) -> None:
+        self._journal = journal
+
+    async def on_call_tool(self, context: Any, call_next: Any) -> Any:
+        # Lazy import keeps `server.py` importable in environments without
+        # the auto-trace test setup (e.g., tests that don't exercise it).
+        ts = datetime.now(timezone.utc)
+        start = time.monotonic()
+        message = context.message
+        tool = getattr(message, "name", "<unknown>")
+        args = getattr(message, "arguments", None) or {}
+
+        try:
+            result = await call_next(context)
+        except Exception as exc:
+            duration_ms = int((time.monotonic() - start) * 1000)
+            sanitized = self._journal._sanitizer.sanitize(str(exc)).text
+            try:
+                self._journal.record_step(
+                    tool=tool,
+                    input_args=args,
+                    result_summary=sanitized,
+                    duration_ms=duration_ms,
+                    outcome="error",
+                    ts=ts,
+                )
+            except SessionJournalError as log_exc:  # pragma: no cover - defensive
+                logger.warning("auto-trace failed to record error step: %s", log_exc)
+            raise
+
+        duration_ms = int((time.monotonic() - start) * 1000)
+        summary = _derive_summary(result)
+        try:
+            self._journal.record_step(
+                tool=tool,
+                input_args=args,
+                result_summary=summary,
+                duration_ms=duration_ms,
+                outcome="success",
+                ts=ts,
+            )
+        except SessionJournalError as log_exc:  # pragma: no cover - defensive
+            logger.warning("auto-trace failed to record success step: %s", log_exc)
+        return result
+
+
+def _derive_summary(result: Any) -> str:
+    """Return a short string summary for `result`.
+
+    Strings pass through (truncated to 256 chars). Other values are
+    `repr()`d. The summary is later sanitized on write, so private IPv4 /
+    MAC / hostname literals in the string get masked before persistence.
+    """
+    if isinstance(result, str):
+        return result[:256]
+    return repr(result)[:256]
+
+
+_auto_trace_registered: bool = False
+
+
+def register_auto_trace_middleware(journal: SessionJournal | None = None) -> None:
+    """Register the `_AutoTraceMiddleware` against the global `mcp` instance.
+
+    Idempotent: a second call is a no-op (the same middleware stays
+    registered for the lifetime of the process). Pass `journal` to use a
+    non-default journal; otherwise `get_journal()` is consulted lazily
+    on every tool call (so swapping the module-level singleton also swaps
+    the journal the middleware writes to).
+    """
+    global _auto_trace_registered
+    if _auto_trace_registered:
+        return
+    middleware = _AutoTraceMiddleware(journal or get_journal())
+    mcp.add_middleware(middleware)
+    _auto_trace_registered = True
+    logger.info("auto-trace middleware registered")
+
+
+def unregister_auto_trace_middleware() -> None:
+    """Test-only hook — remove the auto-trace middleware from the global mcp.
+
+    Resets the `_auto_trace_registered` flag so a subsequent call to
+    `register_auto_trace_middleware()` re-adds a fresh instance.
+    """
+    global _auto_trace_registered
+    _auto_trace_registered = False
+    # Best-effort: drop any `_AutoTraceMiddleware` from the chain.
+    if hasattr(mcp, "middleware"):
+        mcp.middleware = [mw for mw in mcp.middleware if not isinstance(mw, _AutoTraceMiddleware)]
+
+
 __all__ = [
     "mcp",
     "configure_logging",
     "set_runtime_state",
     "get_runtime_state",
     "nora_health_impl",
+    "_AutoTraceMiddleware",
+    "register_auto_trace_middleware",
+    "unregister_auto_trace_middleware",
+    "init_session_journal",  # re-exported for callers that need to wire up
 ]

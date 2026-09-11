@@ -30,6 +30,10 @@ LoadSource = Literal[".env", "process_env", "defaults"]
 # Prefix used to detect process-env contribution in `loaded_from`.
 _PROCESS_ENV_PREFIX = "NORA_"
 
+# Default `nora_operator_alias`. Bounded by R13 to 64 chars; the field has
+# its own Pydantic constraint that the default MUST satisfy.
+_DEFAULT_OPERATOR_ALIAS: str = "anonymous"
+
 
 def _has_nora_env_var() -> bool:
     """Return True if any process env var in our prefix is set (non-empty)."""
@@ -50,6 +54,22 @@ class Settings(BaseSettings):
     lmstudio_model_id: str = "qwen2.5-7b-instruct"
     gemini_api_key: SecretStr | None = None
     gemini_model_id: str = "gemini-2.5-flash"
+
+    # --- SessionJournal (Phase 2) -------------------------------------------
+    # Per-process directory of canonical session files. Atomic writes, owner-
+    # only mode. Sanitizer keeps a separate alias map per session.
+    nora_session_journal_dir: Path = Path("./var/sessions/")
+    # Cap on the in-memory `trace` length before oldest steps are displaced to
+    # NDJSON. Operator disk budget is the only ceiling beyond this.
+    nora_session_trace_max_steps: int = 50
+    # Operator-controlled opt-out: when `false`, the auto-trace middleware
+    # skips recording entirely and the 3 explicit tools raise
+    # `JournalDisabledError`. Defaults to True so an empty value still records.
+    nora_session_journal_enabled: bool = True
+    # Operator identity written into `SessionState.operator_alias`. SHALL be
+    # ≤ 64 chars (per R13); the field is also constrained by Pydantic.
+    nora_operator_alias: str = _DEFAULT_OPERATOR_ALIAS
+
     loaded_from: LoadSource = "defaults"
 
     @model_validator(mode="before")

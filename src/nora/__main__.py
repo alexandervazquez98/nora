@@ -21,7 +21,13 @@ os.environ.setdefault("FASTMCP_SHOW_SERVER_BANNER", "false")
 
 from nora.config import Settings  # noqa: E402
 from nora.llm import build_provider  # noqa: E402
-from nora.server import configure_logging, mcp, set_runtime_state  # noqa: E402
+from nora.server import (  # noqa: E402
+    configure_logging,
+    init_session_journal,
+    mcp,
+    register_auto_trace_middleware,
+    set_runtime_state,
+)
 
 logger = logging.getLogger("nora.main")
 
@@ -32,10 +38,16 @@ def main() -> None:
     settings = Settings()
     provider = build_provider(settings)
     set_runtime_state(settings, provider)
+    # Phase 2 — initialise the session journal singleton and mount the
+    # auto-trace middleware AFTER the runtime state is in place. The
+    # middleware reads `get_journal()` lazily on every tool call.
+    init_session_journal(settings)
+    register_auto_trace_middleware()
     logger.info(
-        "nora boot complete: active_provider=%s env_loaded=%s",
+        "nora boot complete: active_provider=%s env_loaded=%s journal_dir=%s",
         settings.nora_llm_provider,
         settings.loaded_from == ".env",
+        settings.nora_session_journal_dir,
     )
     # `mcp.run()` with no transport argument defaults to stdio, which is the
     # JSON-RPC transport every MCP client (Claude Desktop, inspector, etc.)
