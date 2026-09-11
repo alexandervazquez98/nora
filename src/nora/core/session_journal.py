@@ -227,14 +227,55 @@ class SessionJournal:
             state = self._rehydrate_rotated(state)
         return state
 
-    def _rehydrate_rotated(self, state: SessionState) -> SessionState:
-        """Merge NDJSON steps into `state.trace` in `step` order.
+    def set_focus(self, device_id: str) -> SessionState:
+        """Record `device_id` as the active focus and append to `devices_reviewed`.
 
-        Wired in task #8 alongside `nora_session_get_state(include_rotated)`.
-        Returns `state` unchanged here; the real implementation lands in
-        commit #8.
+        R7-S3 / R7-S4 — idempotent: a second `set_focus` with the same
+        device id MUST NOT duplicate `devices_reviewed`.
         """
+        state = self._state or self._load_or_create()
+        state.focus_device_id = device_id
+        if device_id not in state.devices_reviewed:
+            state.devices_reviewed.append(device_id)
+        state.last_updated = datetime.now(timezone.utc)
+        self._state = state
+        self._persist(state)
         return state
+
+    def resume(self, session_id: str) -> SessionState:
+        """Switch the active session to `session_id`.
+
+        R7-S5 — loads the named canonical file as the active session.
+        R7-S6 — raises `SessionNotFoundError` if the file is missing.
+        R9-S2 — does NOT mutate the previously-active session on disk.
+        """
+        target = canonical_path(self._journal_dir, session_id)
+        if not target.exists():
+            raise SessionNotFoundError(f"Session not found: no canonical file at {target}")
+        with target.open() as f:
+            data = json.load(f)
+        state = SessionState.model_validate(data)
+        self._session_id = session_id
+        self._state = state
+        return state
+
+    def _rehydrate_rotated(self, state: SessionState) -> SessionState:
+        """Merge NDJSON tail into `state.trace` in `step` order (R16-S1).
+
+        Reads `<session_id>.log.ndjson` line-by-line, parses each line as
+        a `SessionStep`, and returns a copy with the merged trace.
+        """
+        path = self._ndjson_path()
+        rotated: list[SessionStep] = []
+        if path.exists():
+            for line in path.read_text().splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                rotated.append(SessionStep.model_validate(json.loads(line)))
+        merged = state.model_copy(deep=True)
+        merged.trace = sorted(rotated + state.trace, key=lambda s: s.step)
+        return merged
 
     # --- internals ---------------------------------------------------------
 

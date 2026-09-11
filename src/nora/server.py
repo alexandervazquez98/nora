@@ -141,6 +141,64 @@ def nora_health() -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# SessionJournal explicit recall tools (R7, R9-S2, R14, R16).
+#
+# Three `@mcp.tool`s registered on the global `mcp` instance. They share
+# the module-level `_journal` singleton (set up by `init_session_journal`).
+# ---------------------------------------------------------------------------
+
+
+def _state_to_payload(state: Any) -> dict[str, Any]:
+    """Serialise `SessionState` (or compatible model) to a JSON-safe dict."""
+    import json
+
+    payload: dict[str, Any] = json.loads(json.dumps(state.model_dump(mode="json")))
+    return payload
+
+
+@mcp.tool
+def nora_session_get_state(include_rotated: bool = False) -> dict[str, Any]:
+    """Return the current `SessionState` as a JSON-safe dict.
+
+    On a missing canonical file, this call CREATES one with the empty
+    default state (R7-S2). When `include_rotated` is True, NDJSON steps
+    are merged into `trace` in `step` order (R16-S1).
+
+    Idempotent: consecutive calls return equivalent state (R7-S1).
+    """
+    journal = get_journal()
+    state = journal.get_state(include_rotated=include_rotated)
+    return _state_to_payload(state)
+
+
+@mcp.tool
+def nora_session_set_focus(device_id: str) -> dict[str, Any]:
+    """Record `device_id` as the active focus and append to `devices_reviewed`.
+
+    Idempotent on the same device id (R7-S4). Advances `last_updated`
+    (R14). The state is persisted atomically.
+    """
+    journal = get_journal()
+    state = journal.set_focus(device_id)
+    return _state_to_payload(state)
+
+
+@mcp.tool
+def nora_session_resume(session_id: str) -> dict[str, Any]:
+    """Load the named session as the active session.
+
+    R7-S5 / R9-S2 — the previously-active session is NOT mutated. The
+    in-memory `_session_id` is replaced; subsequent tool calls land on
+    the resumed session's canonical file.
+
+    R7-S6 — raises `SessionNotFoundError` if the named file is missing.
+    """
+    journal = get_journal()
+    state = journal.resume(session_id)
+    return _state_to_payload(state)
+
+
+# ---------------------------------------------------------------------------
 # Auto-trace middleware (Phase 2 — SessionJournal)
 #
 # Wraps every `@mcp.tool` invocation in the FastMCP dispatcher. Records
