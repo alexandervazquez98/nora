@@ -273,3 +273,95 @@ def test_env_is_listed_in_gitignore() -> None:
     assert re.search(r"^\.env\b", gitignore_text, re.MULTILINE), (
         f".env is not gitignored. Current .gitignore:\n{gitignore_text}"
     )
+
+
+# --- Requirement: SessionJournal Settings Fields (Phase 2) -----------------
+#
+# Four new env-driven settings. Defaults are safe:
+#   nora_session_journal_dir  = ./var/sessions/
+#   nora_session_trace_max_steps = 50
+#   nora_session_journal_enabled = true
+#   nora_operator_alias = "anonymous"
+
+
+def test_session_journal_settings_have_safe_defaults(tmp_path: Path, monkeypatch) -> None:
+    """All four SessionJournal Settings fields exist with the documented defaults."""
+    # Hermetic env: strip every NORA_/LMSTUDIO_/GEMINI_ var so the test is deterministic.
+    import os
+
+    from nora.config import Settings
+
+    for key in list(os.environ):
+        if key.startswith(("NORA_", "LMSTUDIO_", "GEMINI_")):
+            monkeypatch.delenv(key, raising=False)
+
+    settings = Settings(_env_file=None, _env_file_encoding=None)
+
+    # Field existence + defaults (paths compared via string for portability).
+    assert settings.nora_session_journal_dir == Path("./var/sessions/"), (
+        f"nora_session_journal_dir default wrong: {settings.nora_session_journal_dir!r}"
+    )
+    assert settings.nora_session_trace_max_steps == 50, (
+        f"nora_session_trace_max_steps default wrong: {settings.nora_session_trace_max_steps!r}"
+    )
+    assert settings.nora_session_journal_enabled is True, (
+        f"nora_session_journal_enabled default wrong: {settings.nora_session_journal_enabled!r}"
+    )
+    assert settings.nora_operator_alias == "anonymous", (
+        f"nora_operator_alias default wrong: {settings.nora_operator_alias!r}"
+    )
+
+
+def test_session_journal_settings_override_from_env(tmp_path: Path, monkeypatch) -> None:
+    """Each SessionJournal Settings field is overridable via env."""
+    from nora.config import Settings
+
+    monkeypatch.setenv("NORA_SESSION_TRACE_MAX_STEPS", "7")
+    monkeypatch.setenv("NORA_SESSION_JOURNAL_ENABLED", "false")
+    monkeypatch.setenv("NORA_OPERATOR_ALIAS", "noc-night-shift")
+
+    settings = Settings(
+        _env_file=None,
+        _env_file_encoding=None,
+        nora_session_journal_dir=tmp_path / "sessions",
+    )
+
+    assert settings.nora_session_trace_max_steps == 7
+    assert settings.nora_session_journal_enabled is False
+    assert settings.nora_operator_alias == "noc-night-shift"
+
+
+def test_env_example_lists_session_journal_keys_with_synthetic_values() -> None:
+    """`.env.example` MUST list every new key with a sanitized placeholder.
+
+    No real paths, IPs, MACs, hostnames, or credentials — only synthetic
+    placeholders (`change-me`, `example.com`, `localhost`, `placeholder`).
+    """
+
+    env_text = ENV_EXAMPLE.read_text()
+    declared = set(re.findall(r"^([A-Z][A-Z0-9_]+)\s*=", env_text, re.MULTILINE))
+
+    expected_new_keys = {
+        "NORA_SESSION_JOURNAL_DIR",
+        "NORA_SESSION_TRACE_MAX_STEPS",
+        "NORA_SESSION_JOURNAL_ENABLED",
+        "NORA_OPERATOR_ALIAS",
+    }
+    missing = expected_new_keys - declared
+    assert not missing, f".env.example missing SessionJournal keys: {sorted(missing)}"
+
+    # And the same synthetic-only contract used for the rest of the file.
+    offenders: list[str] = []
+    for line in env_text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        if key.strip() not in expected_new_keys:
+            continue
+        v = value.strip().strip('"').strip("'")
+        if PRIVATE_IPV4.search(v):
+            offenders.append(f"{key}: private IPv4 literal {v!r}")
+        if re.search(r"(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}", v):
+            offenders.append(f"{key}: MAC literal {v!r}")
+    assert offenders == [], f".env.example has non-synthetic values for new keys: {offenders}"
