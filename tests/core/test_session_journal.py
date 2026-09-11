@@ -7,13 +7,16 @@ This file accumulates tests as features land:
     task #7 — R12 (4-tuple preserved)
     task #11 — R11, R18 (corrupt + POSIX mode)
     task #10 — R15 (disable switch)
+    remediation — R4-S2 (concurrent writers), R6-S2 (re-sanitize on read)
 """
 
 from __future__ import annotations
 
 import json
 import sys
+import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -482,3 +485,161 @@ def test_canonical_file_mode_0o600_on_posix(journal_dir: Path) -> None:
     assert len(files) == 1
     mode = files[0].stat().st_mode & 0o777
     assert mode == 0o600, f"Expected mode 0o600; got 0o{mode:o}"
+
+
+# ---------------------------------------------------------------------------
+# R6-S2 — re-sanitization on read masks anything that slipped past write
+# ---------------------------------------------------------------------------
+
+
+def test_resanitize_on_read_masks_bypass(journal_dir: Path) -> None:
+    """R6-S2 — a free-text field containing a literal identifier on disk is masked on read.
+
+    Simulates a sanitize bypass at write time: the on-disk file is hand-
+    written with literal IPv4 and MAC addresses in two free-text fields.
+    R6 defense-in-depth: every read MUST re-apply the Sanitizer to free-
+    text fields, so the literals do NOT survive `get_state()`.
+
+    Also confirms a structured field (`focus_device_id`) is NOT touched by
+    re-sanitization (matches R6-S3 — structured fields bypass sanitizer).
+    """
+    import json as json_mod
+
+    from nora.core.session_journal import SessionJournal
+    from nora.sanitizer import Sanitizer
+
+    journal = SessionJournal(
+        journal_dir=journal_dir,
+        max_trace_steps=50,
+        sanitizer=Sanitizer(),
+        enabled=True,
+    )
+    sid = journal.session_id
+    canonical = journal_dir / f"{sid}.json"
+
+    # Hand-write a session file whose free-text fields carry literal
+    # IPv4 + MAC — simulating a sanitize bypass at write time.
+    canonical.write_text(
+        json_mod.dumps(
+            {
+                "session_id": sid,
+                "operator_alias": "test-op",
+                "started_at": "2026-01-01T00:00:00+00:00",
+                "focus_device_id": "ap-7400-01",  # structured — must survive
+                "devices_reviewed": ["ap-7400-01"],
+                "last_updated": "2026-01-01T00:00:00+00:00",
+                "trace": [
+                    {
+                        "ts": "2026-01-01T00:00:00+00:00",
+                        "step": 1,
+                        "tool": "nora_health",
+                        "input": {},
+                        "result_summary": "probe failed; mac=aa:bb:cc:dd:ee:ff",
+                        "duration_ms": 12,
+                        "outcome": "success",
+                        "llm_interpretation": "investigation at 10.0.0.5",
+                    }
+                ],
+            }
+        )
+    )
+
+    # Read via get_state — R6-S2 requires the literals to be masked.
+    state = journal.get_state()
+    step = state.trace[0]
+
+    # Free-text fields are re-sanitized: literals do NOT survive.
+    assert "10.0.0.5" not in step.llm_interpretation, (
+        f"Private IPv4 literal leaked through re-sanitize: {step.llm_interpretation!r}"
+    )
+    assert "aa:bb:cc:dd:ee:ff" not in step.result_summary, (
+        f"MAC literal leaked through re-sanitize: {step.result_summary!r}"
+    )
+    # Synthetic aliases appear in the returned trace.
+    assert "RADIO_NODE_" in step.llm_interpretation
+    assert "SWITCH_ACC_" in step.result_summary
+
+    # Structured fields bypass re-sanitization (R6-S3).
+    assert state.focus_device_id == "ap-7400-01"
+
+
+# ---------------------------------------------------------------------------
+# R4-S2 — concurrent writers both end with valid JSON
+# ---------------------------------------------------------------------------
+
+
+def test_concurrent_writers_both_end_with_valid_json(journal_dir: Path) -> None:
+    """R4-S2 — N threads racing `record_step` leave a parseable JSON file.
+
+    The design contract is deterministic last-write-wins: each writer
+    builds an in-memory copy of the state, appends its step, and calls
+    `atomic_write_json` (temp + `os.replace`). The final on-disk file
+    MUST be parseable as JSON; the trace length MUST be one of
+    ``{1, 2, ..., N}`` (some writes may be lost to last-write-wins; the
+    file MUST never be a torn mix).
+
+    The test uses a `threading.Barrier` so all writers enter
+    `record_step` simultaneously, maximising the contention window at
+    the `_load_or_create → state.trace.append → _persist` sequence.
+    """
+    from datetime import datetime, timezone
+
+    from nora.core.session_journal import SessionJournal
+    from nora.sanitizer import Sanitizer
+
+    journal = SessionJournal(
+        journal_dir=journal_dir,
+        max_trace_steps=50,
+        sanitizer=Sanitizer(),
+        enabled=True,
+    )
+    # All writers race on the SAME journal + SAME canonical file. We
+    # share a session by having every writer use the same instance; the
+    # last `_persist` write is the on-disk survivor.
+    n_writers = 4
+    barrier = threading.Barrier(n_writers)
+
+    def writer(i: int) -> None:
+        # All threads block here until N writers have arrived.
+        barrier.wait()
+        # Use the journal's own session_id so they all append to the
+        # same canonical file. Each writer appends ONE distinct step.
+        journal.record_step(
+            tool=f"writer-{i}",
+            input_args={"i": i},
+            result_summary=f"step from writer-{i}",
+            duration_ms=1,
+            outcome="success",
+            ts=datetime.now(timezone.utc),
+        )
+
+    with ThreadPoolExecutor(max_workers=n_writers) as pool:
+        futures = [pool.submit(writer, i) for i in range(n_writers)]
+        for f in futures:
+            f.result()
+
+    # Exactly one canonical file must exist; the .tmp orphan (if any)
+    # is not a valid JSON file and is ignored.
+    files = [p for p in journal_dir.glob("*.json") if not p.name.endswith(".tmp")]
+    assert len(files) == 1, f"Expected one canonical file; got {files!r}"
+
+    # The canonical file MUST be parseable as JSON. This is the
+    # load-bearing assertion: any torn mix fails json.load.
+    with files[0].open() as f:
+        data = json.load(f)
+
+    assert "trace" in data and isinstance(data["trace"], list)
+
+    # Trace length is bounded by [1, N_writers]. The design accepts
+    # last-write-wins (some writes can be lost). The contract is "never
+    # a torn mix" — which is equivalent to "valid JSON above" since
+    # torn bytes would not parse.
+    trace_len = len(data["trace"])
+    assert 1 <= trace_len <= n_writers, (
+        f"Trace length {trace_len} outside the bounded last-write-wins contract [1, {n_writers}]"
+    )
+
+    # Every step on disk is a valid SessionStep dict (tool field present).
+    for s in data["trace"]:
+        assert s["tool"].startswith("writer-"), f"Step tool name is not a writer marker: {s!r}"
+        assert s["step"] >= 1

@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import sys
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -28,9 +29,12 @@ logger = logging.getLogger("nora.core.session_paths")
 # `0o600` is best-effort; the chmod call is skipped to avoid `OSError`.
 _POSIX: bool = os.name == "posix"
 
-# Suffix for the temp file written before `os.replace`. Picked so the
-# orphan is recognisable in `var/sessions/`.
-_TMP_SUFFIX: str = ".tmp"
+# Suffix family for the temp file written before `os.replace`. Each call
+# appends a uuid4 hex BEFORE the `.tmp` tail so concurrent writers do
+# NOT share a temp filename — they each `os.replace` a DISTINCT tmp
+# into the canonical path, and the last one wins. R4-S2 (caught by
+# verify 2026-09-10) requires this.
+_TMP_TAIL: str = ".tmp"
 
 # Default mode for the journal directory itself (POSIX).
 _DIR_MODE: int = 0o700
@@ -39,12 +43,25 @@ _DIR_MODE: int = 0o700
 _FILE_MODE: int = 0o600
 
 
+def _unique_tmp_path(path: Path) -> Path:
+    """Return a per-call-unique temp file path inside `path.parent`.
+
+    Format: `<canonical-name>.<uuid4-hex>.tmp` (e.g. `session.json.
+    7f3a1c2b8e9d4f6a.tmp`). The `*.tmp` glob used by tests still
+    matches the tail; the canonical name is preserved at the start so
+    operators can spot orphans.
+    """
+    unique = f".{uuid.uuid4().hex}{_TMP_TAIL}"
+    return path.with_name(path.name + unique)
+
+
 def _atomic_write_json_posix(path: Path, payload: dict[str, Any]) -> None:
     """Write `payload` to `path` atomically with POSIX 0o600 mode."""
-    tmp = path.with_name(path.name + _TMP_SUFFIX)
+    tmp = _unique_tmp_path(path)
     # Write+fsync the temp file before renaming — `os.replace` is atomic
     # on the same filesystem but a crash before close() can still leave
-    # a half-written .tmp. Caller tolerates orphan .tmp on next open.
+    # a half-written tmp. Caller tolerates orphan tmp on next open (only
+    # `<sid>.json` is ever read; orphans are ignored — R4-S1 wording).
     with tmp.open("w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
         f.flush()
@@ -60,7 +77,7 @@ def _atomic_write_json_fallback(path: Path, payload: dict[str, Any]) -> None:
     to a temp file and rename. The on-disk ACLs are whatever the
     filesystem's default is — the spec accepts this (R18 platform guard).
     """
-    tmp = path.with_name(path.name + _TMP_SUFFIX)
+    tmp = _unique_tmp_path(path)
     with tmp.open("w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
         f.flush()
@@ -71,14 +88,20 @@ def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     """Atomically write `payload` to `path`.
 
     Process:
-        1. Open `<path>.tmp` for writing.
+        1. Open `<path>.<uuid>.tmp` for writing.
         2. `json.dump(...)` the payload, flush + fsync.
-        3. `os.chmod(<path>.tmp, 0o600)` (POSIX only).
-        4. `os.replace(<path>.tmp, path)` — atomic on POSIX + Windows ≥ 3.3.
+        3. `os.chmod(<path>.<uuid>.tmp, 0o600)` (POSIX only).
+        4. `os.replace(<path>.<uuid>.tmp, path)` — atomic on POSIX +
+           Windows ≥ 3.3.
 
     A crash anywhere before step 4 leaves the previous canonical file
     untouched (R4-S1). A crash after step 4 leaves the new content. Either
     way the canonical file is parseable JSON.
+
+    The temp filename carries a per-call uuid4 suffix so concurrent
+    writers do NOT stomp on each other's temp file — the previous
+    fixed `.tmp` suffix raced when two `record_step` calls were in
+    flight simultaneously (R4-S2).
     """
     if _POSIX:
         _atomic_write_json_posix(path, payload)

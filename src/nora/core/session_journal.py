@@ -228,9 +228,11 @@ class SessionJournal:
         if was_loaded and self._state is not None:
             state: SessionState = self._state
         else:
+            # `_load_or_create` calls `_resanitize_state` on the loaded
+            # state (R6-S2 defense in depth). For the cached-self._state
+            # path the state was already re-sanitized on the first load,
+            # so a second `get_state` is idempotent.
             state = self._load_or_create()
-        # R6: re-sanitize on read (defense in depth). Wired as no-op in
-        # this commit; added in #5.
         self._state = state
         if not was_loaded:
             # First read after construction: persist the empty canonical
@@ -276,6 +278,13 @@ class SessionJournal:
         with target.open() as f:
             data = json.load(f)
         state = SessionState.model_validate(data)
+        # R6: re-sanitize on read (defense in depth). A sanitize bypass
+        # at write time is caught here. R10 redaction is not re-run
+        # because (a) it's idempotent for the same JSON, (b) the
+        # `redact()` walker would have nothing new to mask. We DO
+        # re-walk free-text fields through `_sanitize_tree`, which
+        # leaves `[REDACTED]` markers at REDACTION_LIST keys intact.
+        state = self._resanitize_state(state)
         self._session_id = session_id
         self._state = state
         return state
@@ -363,6 +372,11 @@ class SessionJournal:
         bytes are not valid JSON. The auto-recovery call site is in
         `record_step` (and the explicit tools) — they catch the
         corruption, archive the bad file, and start fresh.
+
+        On a successful load, the free-text fields of the trace are
+        re-sanitized through `_resanitize_state` (R6-S2 defense in
+        depth). The fresh-empty-state branch is a no-op for re-sanitize
+        because the trace is empty.
         """
         path = self._path()
         if not path.exists():
@@ -378,7 +392,48 @@ class SessionJournal:
                 data = json.load(f)
         except json.JSONDecodeError as exc:
             raise JournalCorruptError(path) from exc
-        return SessionState.model_validate(data)
+        loaded = SessionState.model_validate(data)
+        # R6: re-sanitize on read (defense in depth). Wired here so
+        # every read path that goes through `_load_or_create`
+        # (`get_state`, `set_focus` after a fresh load, `record_step`'s
+        # `_load_or_create_or_recover`) inherits the defense.
+        return self._resanitize_state(loaded)
+
+    def _resanitize_state(self, state: SessionState) -> SessionState:
+        """Re-apply the `Sanitizer` to free-text fields of `state.trace`.
+
+        R6 defense-in-depth: even if write-time sanitization was bypassed
+        (bug, hand-edited file, third-party writer), every read masks
+        literals through the same `Sanitizer` instance so aliases stay
+        stable across the session's lifetime.
+
+        R10 redaction is NOT re-run (the redaction walker operates on
+        raw input payloads before they reach the journal; re-walking the
+        on-disk JSON would be a no-op since REDACTION_LIST keys are
+        already replaced with the `[REDACTED]` marker at write time).
+
+        Returns a NEW `SessionState`; the input is never mutated.
+        """
+        if not state.trace:
+            return state
+        new_trace: list[SessionStep] = []
+        for step in state.trace:
+            new_input = _sanitize_tree(step.input, self._sanitizer)
+            new_result = self._sanitizer.sanitize(step.result_summary).text
+            new_llm: str | None
+            if step.llm_interpretation is None:
+                new_llm = None
+            else:
+                new_llm = self._sanitizer.sanitize(step.llm_interpretation).text
+            new_step = step.model_copy(
+                update={
+                    "input": new_input,
+                    "result_summary": new_result,
+                    "llm_interpretation": new_llm,
+                }
+            )
+            new_trace.append(new_step)
+        return state.model_copy(update={"trace": new_trace})
 
     def _recover_from_corrupt(self, path: Path) -> None:
         """Archive the corrupt file by renaming it with a `.corrupt-<ts>.json` suffix (R11-S2).
