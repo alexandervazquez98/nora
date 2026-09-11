@@ -198,6 +198,18 @@ def nora_session_resume(session_id: str) -> dict[str, Any]:
     return _state_to_payload(state)
 
 
+@mcp.tool
+def nora_session_summarize() -> str:
+    """Return a non-empty Markdown digest of the current session.
+
+    Covers `focus_device_id`, `devices_reviewed`, and the last 10 step
+    summaries (R17). Pure projection — does NOT mutate the canonical
+    file or record a step.
+    """
+    journal = get_journal()
+    return journal.summarize()
+
+
 # ---------------------------------------------------------------------------
 # Auto-trace middleware (Phase 2 — SessionJournal)
 #

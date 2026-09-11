@@ -228,8 +228,36 @@ def test_resume_missing_file_raises_session_not_found(hermetic_settings: Setting
 
 
 # ---------------------------------------------------------------------------
-# R16-S1 — include_rotated merges NDJSON tail in step order
+# R17 — nora_session_summarize returns non-empty Markdown
 # ---------------------------------------------------------------------------
+
+
+def test_summarize_returns_markdown_with_required_fields(hermetic_settings: Settings) -> None:
+    """`nora_session_summarize()` returns Markdown containing focus, devices, and tool names."""
+    server_mod = _wire_server(hermetic_settings)
+    try:
+        # Build a session with a focus, two devices, and at least one tool call.
+        asyncio.run(_call_tool(server_mod, "nora_session_set_focus", {"device_id": "ap-7400-01"}))
+        asyncio.run(_call_tool(server_mod, "nora_session_set_focus", {"device_id": "ap-7400-02"}))
+        # A get_state call will be auto-traced.
+        asyncio.run(_call_tool(server_mod, "nora_session_get_state", {}))
+
+        # The summarize tool returns the Markdown as the result data (a string).
+        result = asyncio.run(_call_tool(server_mod, "nora_session_summarize", {}))
+        markdown = result.data
+        assert isinstance(markdown, str), (
+            f"summarize must return a string; got {type(markdown).__name__}"
+        )
+        assert markdown.strip(), "summarize returned empty Markdown"
+        # Required fields per R17:
+        assert "ap-7400-01" in markdown, f"focus_device_id missing from summary: {markdown!r}"
+        assert "ap-7400-02" in markdown, f"second device_id missing from summary: {markdown!r}"
+        # At least one tool name from the trace (auto-traced set_focus / get_state).
+        assert "nora_session_set_focus" in markdown or "nora_session_get_state" in markdown, (
+            f"No tool name from trace in summary: {markdown!r}"
+        )
+    finally:
+        _cleanup_server()
 
 
 def test_get_state_include_rotated_merges_ndjson_in_step_order(

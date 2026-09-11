@@ -277,6 +277,52 @@ class SessionJournal:
         merged.trace = sorted(rotated + state.trace, key=lambda s: s.step)
         return merged
 
+    def summarize(self) -> str:
+        """Return a non-empty Markdown digest of the current session (R17).
+
+        Covers:
+            * `focus_device_id`
+            * `devices_reviewed`
+            * the last 10 step summaries (truncated to 120 chars each)
+
+        Pure projection — does NOT mutate the canonical file.
+        """
+        state = self._state or self._load_or_create()
+
+        lines: list[str] = []
+        lines.append(f"# Session {state.session_id}")
+        lines.append("")
+        lines.append(f"**Operator**: `{state.operator_alias}`")
+        lines.append("")
+        focus = state.focus_device_id if state.focus_device_id is not None else "(none)"
+        lines.append(f"**Focus**: {focus}")
+        lines.append("")
+        if state.devices_reviewed:
+            devices = ", ".join(state.devices_reviewed)
+            lines.append(f"**Devices reviewed**: {devices}")
+        else:
+            lines.append("**Devices reviewed**: (none)")
+        lines.append("")
+
+        recent = state.trace[-10:] if state.trace else []
+        if recent:
+            lines.append(f"## Recent steps (last {len(recent)})")
+            lines.append("")
+            lines.append("| step | tool | outcome | duration_ms | result_summary |")
+            lines.append("|------|------|---------|-------------|----------------|")
+            for step in recent:
+                summary = step.result_summary[:120].replace("|", "\\|")
+                lines.append(
+                    f"| {step.step} | `{step.tool}` | {step.outcome} | "
+                    f"{step.duration_ms} | {summary} |"
+                )
+        else:
+            lines.append("## Recent steps")
+            lines.append("")
+            lines.append("_(no steps recorded yet)_")
+
+        return "\n".join(lines)
+
     # --- internals ---------------------------------------------------------
 
     def _path(self) -> Path:
