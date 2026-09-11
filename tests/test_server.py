@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import ast
 import logging
+import os
 import re
 import subprocess
 import sys
@@ -358,6 +359,20 @@ def test_subprocess_boot_writes_only_jsonrpc_to_stdout() -> None:
     }
     payload = json.dumps(init_frame) + "\n"
 
+    # Provide a non-empty signing key so `OidCatalogRegistry.verify_all`
+    # does not abort boot. The empty catalog path means the registry is
+    # empty (no firmwares loaded) — the driver raises at fetch time, not
+    # at boot, so the JSON-RPC layer still responds.
+    env = {
+        **os.environ,
+        "NORA_OID_CATALOG_SIGNING_KEY": "test-server-subprocess-key",
+        "NORA_OID_CATALOGS_PATH": str(PROJECT_ROOT / "data" / "oid-catalogs-tmp"),
+        "NORA_DEVICES_INVENTORY_PATH": str(PROJECT_ROOT / "data" / "devices-tmp.yaml"),
+    }
+    # Ensure the temp paths exist (empty catalog, empty inventory).
+    (PROJECT_ROOT / "data" / "oid-catalogs-tmp").mkdir(parents=True, exist_ok=True)
+    (PROJECT_ROOT / "data" / "devices-tmp.yaml").write_text("# empty\n")
+
     try:
         proc = subprocess.run(
             [str(py), "-m", "nora"],
@@ -367,6 +382,7 @@ def test_subprocess_boot_writes_only_jsonrpc_to_stdout() -> None:
             text=True,
             timeout=15,
             check=False,
+            env=env,
         )
     except subprocess.TimeoutExpired as exc:
         pytest.fail(f"Subprocess hung.\nstdout:\n{exc.stdout}\nstderr:\n{exc.stderr}")

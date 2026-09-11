@@ -20,7 +20,12 @@ import os
 os.environ.setdefault("FASTMCP_SHOW_SERVER_BANNER", "false")
 
 from nora.config import Settings  # noqa: E402
+from nora.drivers.inventory import Inventory  # noqa: E402
+from nora.drivers.oid_catalog import OidCatalogRegistry  # noqa: E402
+from nora.drivers.registry import set_driver  # noqa: E402
+from nora.drivers.snmp_pmp450i import Pmp450iDriver  # noqa: E402
 from nora.llm import build_provider  # noqa: E402
+from nora.prompts.registry import PromptRegistry  # noqa: E402
 from nora.server import (  # noqa: E402
     configure_logging,
     init_session_journal,
@@ -42,12 +47,23 @@ def main() -> None:
     # auto-trace middleware AFTER the runtime state is in place. The
     # middleware reads `get_journal()` lazily on every tool call.
     init_session_journal(settings)
+    # Phase 2 driver layer — load prompts once, verify every OID catalog
+    # under `settings.nora_oid_catalogs_path`, build the inventory, and
+    # inject the driver singleton. Both `PromptRegistry.scan` and
+    # `OidCatalogRegistry.verify_all` are boot-fatal on failure.
+    PromptRegistry.from_settings(settings)
+    catalog_registry = OidCatalogRegistry.verify_all(settings)
+    inventory = Inventory.from_yaml(settings.nora_devices_inventory_path)
+    set_driver(Pmp450iDriver(inventory=inventory, catalog_registry=catalog_registry))
     register_auto_trace_middleware()
     logger.info(
-        "nora boot complete: active_provider=%s env_loaded=%s journal_dir=%s",
+        "nora boot complete: active_provider=%s env_loaded=%s journal_dir=%s "
+        "catalogs=%s devices=%s",
         settings.nora_llm_provider,
         settings.loaded_from == ".env",
         settings.nora_session_journal_dir,
+        settings.nora_oid_catalogs_path,
+        len(inventory.device_ids),
     )
     # `mcp.run()` with no transport argument defaults to stdio, which is the
     # JSON-RPC transport every MCP client (Claude Desktop, inspector, etc.)

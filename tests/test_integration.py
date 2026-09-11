@@ -96,6 +96,19 @@ def _boot_server(
         env.update(extra_env)
     for k in ("NORA_LLM_PROVIDER", "LMSTUDIO_MODEL_ID", "GEMINI_API_KEY"):
         env.pop(k, None)
+    # Provide a non-empty signing key for the OID catalog verifier so
+    # boot reaches the FastMCP layer (the test scenarios exercise the
+    # nora_health tool, which doesn't need catalog data).
+    env.setdefault("NORA_OID_CATALOG_SIGNING_KEY", "test-integration-key")
+    # Empty catalogs dir per call: the registry scans an empty path and
+    # resolves nothing — the test surface never invokes the driver.
+    import tempfile
+
+    tmp_catalogs = Path(tempfile.mkdtemp(prefix="nora-it-catalogs-"))
+    tmp_devices = tmp_catalogs / "devices.yaml"
+    tmp_devices.write_text("# empty\n")
+    env["NORA_OID_CATALOGS_PATH"] = str(tmp_catalogs)
+    env["NORA_DEVICES_INVENTORY_PATH"] = str(tmp_devices)
 
     proc = subprocess.Popen(
         [py, "-m", "nora"],
@@ -262,6 +275,10 @@ def test_subprocess_handles_malformed_json_gracefully(tmp_path: Path) -> None:
     env_file.write_text("NORA_LLM_PROVIDER=lmstudio\n")
     py = _venv_python()
 
+    # Ensure the temp dirs/files exist so boot can complete.
+    (tmp_path / "tmp-catalogs").mkdir(exist_ok=True)
+    (tmp_path / "tmp-devices.yaml").write_text("# empty\n")
+
     # Send a clearly broken frame.
     bad_payload = "{not json}\n"
     proc = subprocess.run(
@@ -275,6 +292,9 @@ def test_subprocess_handles_malformed_json_gracefully(tmp_path: Path) -> None:
         env={
             **os.environ,
             "NORA_LLM_PROVIDER": "lmstudio",
+            "NORA_OID_CATALOG_SIGNING_KEY": "test-integration-key",
+            "NORA_OID_CATALOGS_PATH": str(tmp_path / "tmp-catalogs"),
+            "NORA_DEVICES_INVENTORY_PATH": str(tmp_path / "tmp-devices.yaml"),
         },
     )
     # The process should not crash with a non-zero exit code from a parse error.
@@ -307,6 +327,10 @@ def test_subprocess_uses_configured_provider_via_dotenv(tmp_path: Path) -> None:
         )
         + "\n"
     )
+    # Ensure the temp dirs/files exist so boot can complete.
+    (tmp_path / "tmp-catalogs").mkdir(exist_ok=True)
+    (tmp_path / "tmp-devices.yaml").write_text("# empty\n")
+
     proc = subprocess.run(
         [py, "-m", "nora"],
         cwd=str(tmp_path),
@@ -315,7 +339,12 @@ def test_subprocess_uses_configured_provider_via_dotenv(tmp_path: Path) -> None:
         text=True,
         timeout=20,
         check=False,
-        env={k: v for k, v in os.environ.items() if k != "GEMINI_API_KEY"},
+        env={
+            **{k: v for k, v in os.environ.items() if k != "GEMINI_API_KEY"},
+            "NORA_OID_CATALOG_SIGNING_KEY": "test-integration-key",
+            "NORA_OID_CATALOGS_PATH": str(tmp_path / "tmp-catalogs"),
+            "NORA_DEVICES_INVENTORY_PATH": str(tmp_path / "tmp-devices.yaml"),
+        },
     )
     assert "active_provider=gemini" in proc.stderr, (
         f"Expected active_provider=gemini in stderr; got:\n{proc.stderr}"

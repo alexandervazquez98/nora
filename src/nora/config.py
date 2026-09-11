@@ -70,6 +70,21 @@ class Settings(BaseSettings):
     # ≤ 64 chars (per R13); the field is also constrained by Pydantic.
     nora_operator_alias: str = _DEFAULT_OPERATOR_ALIAS
 
+    # --- Driver layer (Phase 2 — PMP 450i driver) ---------------------------
+    # Directory holding per-vendor/per-firmware OID catalog JSON files.
+    # Layout: `<oid_catalogs_path>/<vendor>/<model>/<firmware>.json`.
+    nora_oid_catalogs_path: Path = Path("./data/oid-catalogs/")
+    # YAML inventory file consumed by `Inventory.from_yaml`.
+    nora_devices_inventory_path: Path = Path("./data/devices.yaml")
+    # HMAC-SHA256 signing key for catalog verification. Empty / unset
+    # values fail closed: `OidCatalogRegistry.verify_all` raises
+    # `CatalogVerificationError` on boot (OidCatalog-R3).
+    nora_oid_catalog_signing_key: SecretStr | None = None
+    # Operator override for the prompt source directory. When None, the
+    # registry falls back to the packaged prompts shipped under
+    # `src/nora/prompts/` (Prompt-R3).
+    nora_prompts_dir: Path | None = None
+
     loaded_from: LoadSource = "defaults"
 
     @model_validator(mode="before")

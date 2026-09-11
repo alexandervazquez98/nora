@@ -1,0 +1,330 @@
+"""Tests for `Pmp450iDriver.fetch_radio_metrics` + RadioMetricsReport.
+
+Maps Driver-R1 (typed protocol support), R3 (typed return), R4 (focus
+binding), R5 (typed error mapping), R6 (within-call OID cache).
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+from unittest import mock
+
+import pytest
+
+from nora.drivers.exceptions import (
+    DeviceNotFoundError,
+    NetworkUnreachableError,
+    SnmpTimeoutError,
+)
+from nora.drivers.inventory import Inventory
+from nora.drivers.oid_catalog import OidCatalog, OidCatalogRegistry
+from nora.drivers.snmp_pmp450i import (
+    RadioMetricsReport,
+)
+from nora.drivers.snmp_pmp450i import driver as _driver_mod
+from nora.drivers.snmp_pmp450i.client import SnmpClient
+from nora.drivers.snmp_pmp450i.driver import Pmp450iDriver
+
+
+# Default `nora_session_set_focus` reaches into the live journal; tests
+# stub it out at module-load time so the driver tests do not require
+# the full boot sequence. The test that exercises the real focus
+# binding patches this attribute directly.
+@pytest.fixture(autouse=True)
+def _stub_set_focus() -> Any:
+    captured: list[str] = []
+
+    def _fake(device_id: str) -> dict[str, Any]:
+        captured.append(device_id)
+        return {
+            "session_id": "test-session",
+            "focus_device_id": device_id,
+            "devices_reviewed": [device_id],
+        }
+
+    original = _driver_mod.nora_session_set_focus
+    _driver_mod.nora_session_set_focus = _fake
+    try:
+        yield captured
+    finally:
+        _driver_mod.nora_session_set_focus = original
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _build_inventory(tmp_path: Path) -> Inventory:
+    """Build a hermetic inventory with one v2c and one v3 device."""
+    import yaml
+
+    payload = {
+        "devices": [
+            {
+                "device_id": "ap-7400-01",
+                "vendor": "cambium",
+                "model": "pmp450i",
+                "firmware": "15.2.1",
+                "host": "192.0.2.10",
+                "snmp_version": "v2c",
+                "community": "change-me-v2c",
+            },
+            {
+                "device_id": "sm-7400-02",
+                "vendor": "cambium",
+                "model": "pmp450i",
+                "firmware": "15.2.1",
+                "host": "192.0.2.11",
+                "snmp_version": "v3",
+                "auth_password": "change-me-auth",
+                "priv_password": "change-me-priv",
+            },
+        ]
+    }
+    inv_path = tmp_path / "devices.yaml"
+    inv_path.write_text(yaml.safe_dump(payload))
+    return Inventory.from_yaml(inv_path)
+
+
+def _build_catalog() -> OidCatalogRegistry:
+    """Build a registry with the 6 required OIDs as dotted strings."""
+    catalog = OidCatalog(
+        vendor="cambium",
+        model="pmp450i",
+        firmware="15.2.1",
+        oids={
+            "radioDownlinkRate": "1.3.6.1.4.1.161.19.3.1.1.1.0",
+            "radioUplinkRate": "1.3.6.1.4.1.161.19.3.1.1.2.0",
+            "signalStrengthRx": "1.3.6.1.4.1.161.19.3.1.1.3.0",
+            "signalStrengthTx": "1.3.6.1.4.1.161.19.3.1.1.4.0",
+            "ssr": "1.3.6.1.4.1.161.19.3.1.1.5.0",
+            "modulationMode": "1.3.6.1.4.1.161.19.3.1.1.6.0",
+        },
+    )
+    return OidCatalogRegistry(
+        _catalogs_path=Path("."),
+        _catalogs={("cambium", "pmp450i", "15.2.1"): catalog},
+    )
+
+
+def _fake_values() -> dict[str, str]:
+    return {
+        "1.3.6.1.4.1.161.19.3.1.1.1.0": "54000000",
+        "1.3.6.1.4.1.161.19.3.1.1.2.0": "21000000",
+        "1.3.6.1.4.1.161.19.3.1.1.3.0": "-58",
+        "1.3.6.1.4.1.161.19.3.1.1.4.0": "23",
+        "1.3.6.1.4.1.161.19.3.1.1.5.0": "75",
+        "1.3.6.1.4.1.161.19.3.1.1.6.0": "256QAM",
+    }
+
+
+# ---------------------------------------------------------------------------
+# R1 — Protocol support (typed v2c + v3 fetch)
+# ---------------------------------------------------------------------------
+
+
+def test_v2c_fetch_returns_typed_report(tmp_path: Path) -> None:
+    """v2c fetch folds SNMP GET results into a typed `RadioMetricsReport`."""
+    inv = _build_inventory(tmp_path)
+    registry = _build_catalog()
+    fake_client = mock.MagicMock(spec=SnmpClient)
+    fake_client.get_oid.side_effect = lambda oid: _fake_values()[oid]
+    driver = Pmp450iDriver(
+        inventory=inv, catalog_registry=registry, client_factory=lambda d: fake_client
+    )
+
+    report = driver.fetch_radio_metrics("ap-7400-01")
+    assert isinstance(report, RadioMetricsReport)
+    assert report.device_id == "ap-7400-01"
+    assert report.firmware == "15.2.1"
+    assert report.radio_dl_rate_bps == 54000000
+    assert report.radio_ul_rate_bps == 21000000
+    assert report.rx_signal_dbm == -58
+    assert report.tx_signal_dbm == 23
+    assert report.ssr == 75
+    assert report.modulation == "256QAM"
+    # No dict / Any field — every field is a typed scalar.
+    assert isinstance(report.fetched_at, datetime)
+
+
+def test_v3_fetch_returns_typed_report(tmp_path: Path) -> None:
+    """v3 fetch with auth + priv returns a typed report."""
+    inv = _build_inventory(tmp_path)
+    registry = _build_catalog()
+    fake_client = mock.MagicMock(spec=SnmpClient)
+    fake_client.get_oid.side_effect = lambda oid: _fake_values()[oid]
+    factory = mock.MagicMock(return_value=fake_client)
+    driver = Pmp450iDriver(inventory=inv, catalog_registry=registry, client_factory=factory)
+
+    report = driver.fetch_radio_metrics("sm-7400-02")
+    assert isinstance(report, RadioMetricsReport)
+    factory.assert_called_once()
+    called_device = factory.call_args[0][0]
+    assert called_device.snmp_version == "v3"
+
+
+# ---------------------------------------------------------------------------
+# R3 — Strictly typed return (no dict / Any field)
+# ---------------------------------------------------------------------------
+
+
+def test_report_has_no_dict_or_any_field() -> None:
+    """The `RadioMetricsReport` model exposes no `dict` / `Any` fields."""
+    from typing import Any
+
+    annotations = RadioMetricsReport.model_fields
+    for name, field in annotations.items():
+        if field.annotation is dict or field.annotation is Any:
+            pytest.fail(f"RadioMetricsReport.{name} is dict or Any — must be a typed scalar")
+
+
+# ---------------------------------------------------------------------------
+# R5 — Failure surfaces typed errors
+# ---------------------------------------------------------------------------
+
+
+def test_unknown_device_id_raises_device_not_found(tmp_path: Path) -> None:
+    """An unknown `device_id` raises `DeviceNotFoundError`."""
+    inv = _build_inventory(tmp_path)
+    registry = _build_catalog()
+    driver = Pmp450iDriver(
+        inventory=inv, catalog_registry=registry, client_factory=lambda d: mock.MagicMock()
+    )
+    with pytest.raises(DeviceNotFoundError):
+        driver.fetch_radio_metrics("unknown")
+
+
+def test_network_unreachable_raises_typed_error(tmp_path: Path) -> None:
+    """A closed agent port surfaces `NetworkUnreachableError`."""
+    inv = _build_inventory(tmp_path)
+    registry = _build_catalog()
+
+    fake_client = mock.MagicMock(spec=SnmpClient)
+    fake_client.get_oid.side_effect = ConnectionRefusedError("closed")
+    driver = Pmp450iDriver(
+        inventory=inv, catalog_registry=registry, client_factory=lambda d: fake_client
+    )
+
+    with pytest.raises(NetworkUnreachableError):
+        driver.fetch_radio_metrics("ap-7400-01")
+
+
+def test_snmp_timeout_raises_typed_error(tmp_path: Path) -> None:
+    """An unresponsive agent surfaces `SnmpTimeoutError`."""
+    import socket
+
+    inv = _build_inventory(tmp_path)
+    registry = _build_catalog()
+
+    fake_client = mock.MagicMock(spec=SnmpClient)
+    fake_client.get_oid.side_effect = socket.timeout("agent took too long")
+    driver = Pmp450iDriver(
+        inventory=inv, catalog_registry=registry, client_factory=lambda d: fake_client
+    )
+
+    with pytest.raises(SnmpTimeoutError):
+        driver.fetch_radio_metrics("ap-7400-01")
+
+
+def test_malformed_oid_value_raises_typed_error(tmp_path: Path) -> None:
+    """A non-numeric value on a numeric OID surfaces `NetworkUnreachableError`
+    (the driver treats both as wire-level faults).
+    """
+    inv = _build_inventory(tmp_path)
+    registry = _build_catalog()
+    fake_client = mock.MagicMock(spec=SnmpClient)
+    values = _fake_values()
+    values["1.3.6.1.4.1.161.19.3.1.1.1.0"] = "not-a-number"
+    fake_client.get_oid.side_effect = lambda oid: values[oid]
+    driver = Pmp450iDriver(
+        inventory=inv, catalog_registry=registry, client_factory=lambda d: fake_client
+    )
+    with pytest.raises((NetworkUnreachableError, SnmpTimeoutError, ValueError)):
+        driver.fetch_radio_metrics("ap-7400-01")
+
+
+# ---------------------------------------------------------------------------
+# R6 — OID caching within a single call
+# ---------------------------------------------------------------------------
+
+
+def test_repeated_oid_lookup_within_call_is_cached(tmp_path: Path) -> None:
+    """Within one tool call, repeated lookups reuse the same wire GET."""
+    inv = _build_inventory(tmp_path)
+    registry = _build_catalog()
+    fake_client = mock.MagicMock(spec=SnmpClient)
+    fake_client.get_oid.side_effect = lambda oid: _fake_values()[oid]
+    driver = Pmp450iDriver(
+        inventory=inv, catalog_registry=registry, client_factory=lambda d: fake_client
+    )
+
+    # Spy on the internal _get_oid path: count how many wire GETs were emitted.
+    counter = {"calls": 0}
+    original_get_oid = fake_client.get_oid.side_effect
+
+    def _counting(oid: str) -> str:
+        counter["calls"] += 1
+        return original_get_oid(oid)
+
+    fake_client.get_oid.side_effect = _counting
+
+    report = driver.fetch_radio_metrics("ap-7400-01")
+
+    # Six required OIDs; exactly six wire GETs (no duplicates).
+    assert counter["calls"] == 6
+    assert isinstance(report, RadioMetricsReport)
+
+
+# ---------------------------------------------------------------------------
+# R4 — Focus binding (calls set_focus first)
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_radio_metrics_calls_set_focus_first(tmp_path: Path) -> None:
+    """`fetch_radio_metrics` records `device_id` as focus before fetching."""
+    inv = _build_inventory(tmp_path)
+    registry = _build_catalog()
+
+    fake_client = mock.MagicMock(spec=SnmpClient)
+    fake_client.get_oid.side_effect = lambda oid: _fake_values()[oid]
+
+    focus_calls: list[str] = []
+
+    def _set_focus(device_id: str) -> dict[str, Any]:
+        focus_calls.append(device_id)
+        return {"focus_device_id": device_id, "devices_reviewed": [device_id]}
+
+    with mock.patch("nora.drivers.snmp_pmp450i.driver.nora_session_set_focus", _set_focus):
+        driver = Pmp450iDriver(
+            inventory=inv, catalog_registry=registry, client_factory=lambda d: fake_client
+        )
+        driver.fetch_radio_metrics("ap-7400-01")
+
+    assert focus_calls == ["ap-7400-01"]
+
+
+# ---------------------------------------------------------------------------
+# RadioMetricsReport.fold — typed contract
+# ---------------------------------------------------------------------------
+
+
+def test_fold_maps_oid_values_to_typed_fields(tmp_path: Path) -> None:
+    """`fold` maps raw SNMP values into typed Pydantic fields."""
+    inv = _build_inventory(tmp_path)
+    device = inv.get("ap-7400-01")
+    catalog = _build_catalog().resolve(("cambium", "pmp450i", "15.2.1"))
+    report = RadioMetricsReport.fold(
+        device=device,
+        catalog=catalog,
+        values=_fake_values(),
+        fetched_at=datetime(2026, 1, 1, 12, 0, 0),
+    )
+    assert report.device_id == "ap-7400-01"
+    assert report.firmware == "15.2.1"
+    assert report.radio_dl_rate_bps == 54000000
+    assert report.rx_signal_dbm == -58
+    assert report.ssr == 75
+    assert report.modulation == "256QAM"

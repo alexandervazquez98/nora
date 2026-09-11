@@ -26,6 +26,8 @@ dependencies = [
     "lmstudio>=1,<2",
     "google-genai>=1,<3",
     "pydantic-settings>=2",
+    "puresnmp==2.0.1",
+    "puresnmp-crypto>=1.0",
 ]
 
 [project.scripts]
@@ -39,6 +41,8 @@ dev = [
     "hypothesis>=6",
     "ruff>=0.6",
     "mypy>=1.10",
+    "snmpsim>=1.0",
+    "pysmi>=1.0",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -52,13 +56,14 @@ packages = ["src/nora"]
 [tool.ruff]
 target-version = "py312"
 line-length = 100
-extend-exclude = [".venv", ".reportes", ".atl", "openspec"]
+extend-exclude = [".venv", ".reportes", ".atl", "openspec", "scripts"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "T201"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["T201"]
+"scripts/**/*.py" = ["T201"]
 
 [tool.mypy]
 strict = true
