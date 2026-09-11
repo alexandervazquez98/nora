@@ -17,6 +17,9 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any
 
+import lmstudio as lms
+from google import genai
+from google.genai import errors as genai_errors
 from pydantic import SecretStr
 
 from nora.config import Settings
@@ -77,13 +80,20 @@ class LLMProvider(ABC):
 
 # ---------------------------------------------------------------------------
 # Errors that should map to `LLMUnavailable`. Each SDK raises its own typed
-# errors; we catch broadly so transient network or model failures are
-# surfaced uniformly.
+# errors; the catch tuple enumerates them explicitly so the surface is
+# auditable and type-checkable. `KeyboardInterrupt` / `SystemExit` inherit
+# from `BaseException` (not `Exception`) and are NOT caught.
 # ---------------------------------------------------------------------------
 
 _SAN: Sanitizer = Sanitizer()
 _SDK_ERROR_MAP: tuple[type[BaseException], ...] = (
-    Exception,  # Catch-all at the boundary; we re-raise as LLMUnavailable.
+    lms.LMStudioError,
+    lms.LMStudioTimeoutError,
+    lms.LMStudioPredictionError,
+    lms.LMStudioClientError,
+    genai_errors.APIError,
+    genai_errors.ClientError,
+    genai_errors.ServerError,
 )
 
 
@@ -116,10 +126,6 @@ class LMStudioProvider(LLMProvider):
         system: str | None = None,
         context: dict[str, Any] | None = None,
     ) -> Completion:
-        # Late import keeps `import nora` cheap when the user only touches
-        # configuration or the sanitizer.
-        import lmstudio as lms
-
         try:
             with lms.Client(api_host=self._api_host) as client:
                 model = client.llm.model(self._model_id)
@@ -172,9 +178,6 @@ class GeminiProvider(LLMProvider):
         system: str | None = None,
         context: dict[str, Any] | None = None,
     ) -> Completion:
-        # Late import keeps `import nora` cheap.
-        from google import genai
-
         try:
             with genai.Client(api_key=self._api_key.get_secret_value()) as client:
                 config: dict[str, Any] | None = {"system_instruction": system} if system else None

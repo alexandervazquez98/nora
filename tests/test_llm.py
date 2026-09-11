@@ -171,7 +171,7 @@ def test_lmstudio_provider_returns_raw_sdk_response() -> None:
 def test_lmstudio_provider_maps_sdk_errors_to_llm_unavailable() -> None:
     """Any `lmstudio` SDK error MUST surface as `LLMUnavailable`."""
     fake_client = mock.MagicMock()
-    fake_client.__enter__.side_effect = RuntimeError("boom")
+    fake_client.__enter__.side_effect = _make_lmstudio_error("LMStudioError", "boom")
     with mock.patch("lmstudio.Client", return_value=fake_client):
         provider = LMStudioProvider(api_host="localhost:1234", model_id="m")
         with pytest.raises(LLMUnavailable) as excinfo:
@@ -227,7 +227,7 @@ def test_gemini_provider_uses_genai_client() -> None:
 def test_gemini_provider_maps_sdk_errors_to_llm_unavailable() -> None:
     """Any `genai` SDK error MUST surface as `LLMUnavailable`."""
     fake_client = mock.MagicMock()
-    fake_client.__enter__.side_effect = RuntimeError("network")
+    fake_client.__enter__.side_effect = _make_genai_error("APIError", "network")
     with mock.patch("google.genai.Client", return_value=fake_client):
         provider = GeminiProvider(api_key=SecretStr("k"), model_id="m")
         with pytest.raises(LLMUnavailable) as excinfo:
@@ -262,7 +262,7 @@ def test_no_fallback_when_lmstudio_fails(monkeypatch: pytest.MonkeyPatch) -> Non
     settings = Settings(_env_file=None, _env_file_encoding=None)
 
     fake_client = mock.MagicMock()
-    fake_client.__enter__.side_effect = RuntimeError("lmstudio down")
+    fake_client.__enter__.side_effect = _make_lmstudio_error("LMStudioError", "lmstudio down")
     with (
         mock.patch("lmstudio.Client", return_value=fake_client),
         mock.patch("google.genai.Client") as genai_client,
@@ -557,4 +557,173 @@ def test_gemini_provider_passes_model_id_verbatim_to_sdk() -> None:
     call_kwargs = fake_models.generate_content.call_args.kwargs
     assert call_kwargs.get("model") == sentinel_model_id, (
         f"genai SDK must receive model_id verbatim; got {call_kwargs.get('model')!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Requirement: explicit `_SDK_ERROR_MAP` (Closes W3)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "provider_name, sdk_path, exception_factory",
+    [
+        # lmstudio SDK errors
+        (
+            "lmstudio",
+            "lmstudio.Client",
+            lambda: _make_lmstudio_error("LMStudioError", "boom"),
+        ),
+        (
+            "lmstudio",
+            "lmstudio.Client",
+            lambda: _make_lmstudio_error("LMStudioTimeoutError", "timeout"),
+        ),
+        (
+            "lmstudio",
+            "lmstudio.Client",
+            lambda: _make_lmstudio_error("LMStudioPredictionError", "prediction"),
+        ),
+        (
+            "lmstudio",
+            "lmstudio.Client",
+            lambda: _make_lmstudio_error("LMStudioClientError", "client"),
+        ),
+        # google-genai SDK errors
+        (
+            "gemini",
+            "google.genai.Client",
+            lambda: _make_genai_error("APIError", "api"),
+        ),
+        (
+            "gemini",
+            "google.genai.Client",
+            lambda: _make_genai_error("ClientError", "client"),
+        ),
+        (
+            "gemini",
+            "google.genai.Client",
+            lambda: _make_genai_error("ServerError", "server"),
+        ),
+    ],
+)
+def test_sdk_error_class_maps_to_llm_unavailable(
+    provider_name: str, sdk_path: str, exception_factory: Any
+) -> None:
+    """Each typed SDK exception in `_SDK_ERROR_MAP` MUST surface as `LLMUnavailable`."""
+    fake_client = mock.MagicMock()
+    fake_client.__enter__.side_effect = exception_factory()
+    with mock.patch(sdk_path, return_value=fake_client):
+        if provider_name == "lmstudio":
+            provider = LMStudioProvider(api_host="localhost:1234", model_id="m")
+        else:
+            provider = GeminiProvider(api_key=SecretStr("k"), model_id="m")
+        with pytest.raises(LLMUnavailable) as excinfo:
+            provider.complete("ping")
+    assert (
+        "boom" in str(excinfo.value)
+        or "timeout" in str(excinfo.value)
+        or "prediction" in str(excinfo.value)
+        or "client" in str(excinfo.value)
+        or "api" in str(excinfo.value)
+        or "server" in str(excinfo.value)
+    ), f"LLMUnavailable message should retain error context; got {excinfo.value!r}"
+
+
+def _make_lmstudio_error(class_name: str, message: str) -> BaseException:
+    """Construct a real `lmstudio` exception class instance."""
+    import lmstudio as lms
+
+    cls = getattr(lms, class_name)
+    return cls(message)
+
+
+def _make_genai_error(class_name: str, message: str) -> BaseException:
+    """Construct a real `google.genai.errors` exception class instance.
+
+    `APIError` requires `(code, response_json, response=None)` per the SDK
+    contract; the subclasses (`ClientError`, `ServerError`) share the
+    signature. The `message` argument is embedded inside the
+    `response_json["error"]["message"]` payload.
+    """
+    from google.genai import errors as genai_errors
+
+    cls = getattr(genai_errors, class_name)
+    response_json: dict[str, Any] = {"error": {"message": message}}
+    return cls(500, response_json)
+
+
+def test_keyboard_interrupt_is_not_caught_by_lmstudio_provider() -> None:
+    """`KeyboardInterrupt` MUST bubble through `LMStudioProvider.complete`."""
+    fake_client = mock.MagicMock()
+    fake_client.__enter__.side_effect = KeyboardInterrupt()
+    with mock.patch("lmstudio.Client", return_value=fake_client):
+        provider = LMStudioProvider(api_host="localhost:1234", model_id="m")
+        with pytest.raises(KeyboardInterrupt):
+            provider.complete("ping")
+
+
+def test_system_exit_is_not_caught_by_lmstudio_provider() -> None:
+    """`SystemExit` MUST bubble through `LMStudioProvider.complete`."""
+    fake_client = mock.MagicMock()
+    fake_client.__enter__.side_effect = SystemExit(1)
+    with mock.patch("lmstudio.Client", return_value=fake_client):
+        provider = LMStudioProvider(api_host="localhost:1234", model_id="m")
+        with pytest.raises(SystemExit):
+            provider.complete("ping")
+
+
+def test_keyboard_interrupt_is_not_caught_by_gemini_provider() -> None:
+    """`KeyboardInterrupt` MUST bubble through `GeminiProvider.complete`."""
+    fake_client = mock.MagicMock()
+    fake_client.__enter__.side_effect = KeyboardInterrupt()
+    with mock.patch("google.genai.Client", return_value=fake_client):
+        provider = GeminiProvider(api_key=SecretStr("k"), model_id="m")
+        with pytest.raises(KeyboardInterrupt):
+            provider.complete("ping")
+
+
+def test_system_exit_is_not_caught_by_gemini_provider() -> None:
+    """`SystemExit` MUST bubble through `GeminiProvider.complete`."""
+    fake_client = mock.MagicMock()
+    fake_client.__enter__.side_effect = SystemExit(1)
+    with mock.patch("google.genai.Client", return_value=fake_client):
+        provider = GeminiProvider(api_key=SecretStr("k"), model_id="m")
+        with pytest.raises(SystemExit):
+            provider.complete("ping")
+
+
+def test_sdk_error_map_enumerates_explicit_classes() -> None:
+    """`_SDK_ERROR_MAP` MUST enumerate the seven typed SDK exception classes.
+
+    W3 hardening: replacing `(Exception,)` with explicit SDK classes so the
+    catch surface is auditable, the catch tuple is type-checkable, and a
+    future SDK error type can't silently fall outside the tuple. The set of
+    classes covered is unchanged — this is implementation tightening, not a
+    behaviour contract change.
+    """
+    import lmstudio as lms
+    from google.genai import errors as genai_errors
+
+    from nora import llm as llm_mod
+
+    expected = {
+        lms.LMStudioError,
+        lms.LMStudioTimeoutError,
+        lms.LMStudioPredictionError,
+        lms.LMStudioClientError,
+        genai_errors.APIError,
+        genai_errors.ClientError,
+        genai_errors.ServerError,
+    }
+    actual = set(llm_mod._SDK_ERROR_MAP)
+    assert actual == expected, (
+        f"_SDK_ERROR_MAP must enumerate the seven typed SDK exception classes.\n"
+        f"Missing: {expected - actual}\n"
+        f"Unexpected: {actual - expected}"
+    )
+    # Catch tuple MUST NOT include the catch-all `Exception` — that would
+    # re-introduce the W3 ambiguity.
+    assert Exception not in actual, (
+        f"_SDK_ERROR_MAP must not contain the catch-all `Exception`; got {actual!r}"
     )
