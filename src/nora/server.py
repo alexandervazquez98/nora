@@ -32,6 +32,7 @@ from nora.core.session_journal import (
     get_journal,
     init_session_journal,
 )
+from nora.drivers import get_driver
 from nora.llm import LLMProvider
 from nora.sanitizer import Sanitizer
 
@@ -208,6 +209,32 @@ def nora_session_summarize() -> str:
     """
     journal = get_journal()
     return journal.summarize()
+
+
+# ---------------------------------------------------------------------------
+# PMP 450i SNMP driver tool (Phase 2 — Driver Layer)
+#
+# Single `@mcp.tool` exposing the typed `RadioMetricsReport` returned by
+# `Pmp450iDriver.fetch_radio_metrics`. The tool body delegates to the
+# driver singleton injected at boot by `__main__.py` (or by tests via
+# `nora.drivers.registry.set_driver`).
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool
+def snmp_get_pmp450i_radio_metrics(device_id: str) -> dict[str, Any]:
+    """Fetch a typed `RadioMetricsReport` for the named PMP 450i device.
+
+    The tool body delegates to `Pmp450iDriver.fetch_radio_metrics`,
+    which sets the session focus before fetching (Driver-R4) and
+    surfaces typed driver exceptions on every wire failure (Driver-R5).
+
+    Returns a JSON-serialisable dict (no `dict` / `Any` shape — every
+    field is a typed scalar from `RadioMetricsReport.model_dump(mode="json")`).
+    """
+    driver = get_driver()
+    report = driver.fetch_radio_metrics(device_id)
+    return report.model_dump(mode="json")
 
 
 # ---------------------------------------------------------------------------

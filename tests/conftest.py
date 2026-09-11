@@ -160,3 +160,40 @@ def hermetic_settings(tmp_path: Path) -> Any:
         nora_oid_catalog_signing_key=SAMPLE_CATALOG_KEY,
         nora_prompts_dir=prompts_dir,
     )
+
+
+@pytest.fixture
+def sample_inventory(tmp_path: Path) -> Path:
+    """A YAML inventory file with one v2c and one v3 PMP 450i device.
+
+    RFC 5737 hosts (`192.0.2.x`) and `change-me` credentials — never
+    real infrastructure values.
+    """
+    import yaml
+
+    payload = {
+        "devices": [
+            {
+                "device_id": "ap-7400-01",
+                "vendor": "cambium",
+                "model": "pmp450i",
+                "firmware": "15.2.1",
+                "host": "192.0.2.10",
+                "snmp_version": "v2c",
+                "community": "change-me-v2c",
+            },
+            {
+                "device_id": "sm-7400-02",
+                "vendor": "cambium",
+                "model": "pmp450i",
+                "firmware": "15.2.1",
+                "host": "192.0.2.11",
+                "snmp_version": "v3",
+                "auth_password": "change-me-auth",
+                "priv_password": "change-me-priv",
+            },
+        ]
+    }
+    path = tmp_path / "devices.yaml"
+    path.write_text(yaml.safe_dump(payload))
+    return path

@@ -24,6 +24,7 @@ from nora.drivers.exceptions import (
     RefusesWriteError,
     SnmpTimeoutError,
 )
+from nora.drivers.registry import get_driver, set_driver
 
 __all__ = [
     "DriverError",
@@ -34,4 +35,6 @@ __all__ = [
     "CatalogNotFoundError",
     "CatalogVerificationError",
     "PromptNotFoundError",
+    "get_driver",
+    "set_driver",
 ]
