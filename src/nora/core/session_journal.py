@@ -3,25 +3,45 @@
 This module owns:
 
 * The typed exception hierarchy (`SessionJournalError` + subclasses).
-* The `SessionJournal` class itself (recording contract, persistence).
-* The module-level `_journal` singleton + `init_session_journal` /
-  `get_journal` accessors used by both the auto-trace middleware and the
-  three explicit recall tools.
+* The `SessionJournal` class — the recording contract, persistence, and
+  the `init_session_journal` / `get_journal` accessors.
+* A module-level `_journal` singleton used by both the auto-trace
+  middleware and the 4 explicit recall tools.
 
-The full class lands in commit #4. This commit ships only the exception
-hierarchy so that callers can already `from nora.core.session_journal
-import SessionNotFoundError` without `ImportError`.
+Commit map:
+    #2 — exceptions only (so call sites can already import them).
+    #4 — this commit: load / save / append / get_state (no redaction,
+         no rotation, no sanitize yet).
+    #5 — wire R10 redaction + Sanitizer into `record_step`.
+    #6 — wire NDJSON rotation into `record_step`.
+    #9 — add `summarize()` (R17).
+    #10 — add the `NORA_SESSION_JOURNAL_ENABLED` gate.
+    #11 — add R11 corrupt-file recovery.
 """
 
 from __future__ import annotations
 
+import json
+import logging
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from nora.config import Settings
+from nora.core.session_models import Outcome, SessionState, SessionStep
+from nora.core.session_paths import (
+    atomic_write_json,
+    canonical_path,
+    ensure_journal_dir,
+    ndjson_path,
+)
+from nora.sanitizer import Sanitizer
+
+logger = logging.getLogger("nora.core.session_journal")
+
 # ---------------------------------------------------------------------------
 # Typed exception hierarchy (R7, R11, R15).
-#
-# One base — `SessionJournalError` — keeps catch-blocks concise at the call
-# site. Subclasses carry no extra fields beyond the message; the underlying
-# file path is intentionally NOT stored on the exception (operators read it
-# from the log line instead — keeps the on-disk contract simple).
 # ---------------------------------------------------------------------------
 
 
@@ -41,9 +61,261 @@ class JournalDisabledError(SessionJournalError):
     """Raised when the explicit tools are invoked while journal is disabled (R15-S2)."""
 
 
+# ---------------------------------------------------------------------------
+# SessionJournal — core public API.
+#
+# Concurrency model: lock-free, rely on `os.replace` atomicity. The GIL
+# serialises in-memory mutations; the only race is at the file boundary
+# which `os.replace` resolves. R4 acceptance: deterministic last-write-
+# wins; we accept it explicitly.
+# ---------------------------------------------------------------------------
+
+
+class SessionJournal:
+    """Per-session JSON trace with auto-trace + 3 explicit recall tools."""
+
+    def __init__(
+        self,
+        *,
+        journal_dir: Path,
+        max_trace_steps: int,
+        sanitizer: Sanitizer,
+        enabled: bool = True,
+        operator_alias: str = "anonymous",
+    ) -> None:
+        self._journal_dir = ensure_journal_dir(journal_dir)
+        self._max_trace_steps = max_trace_steps
+        self._sanitizer = sanitizer
+        self._enabled = enabled
+        self._operator_alias = operator_alias
+        # Eager UUIDv4 generation so callers can read `journal.session_id`
+        # before the first write (R9-S1 covers this contract).
+        self._session_id: str = str(uuid.uuid4())
+        # Active state — loaded lazily on first read.
+        self._state: SessionState | None = None
+
+    # --- accessors ---------------------------------------------------------
+
+    @property
+    def session_id(self) -> str:
+        """UUIDv4 session id, generated at construction (R9)."""
+        return self._session_id
+
+    @property
+    def journal_dir(self) -> Path:
+        return self._journal_dir
+
+    @property
+    def enabled(self) -> bool:
+        return self._enabled
+
+    # --- constructors ------------------------------------------------------
+
+    @classmethod
+    def for_settings(cls, settings: Settings, sanitizer: Sanitizer) -> "SessionJournal":
+        """Construct a `SessionJournal` from a `Settings` instance."""
+        return cls(
+            journal_dir=settings.nora_session_journal_dir,
+            max_trace_steps=settings.nora_session_trace_max_steps,
+            sanitizer=sanitizer,
+            enabled=settings.nora_session_journal_enabled,
+            operator_alias=settings.nora_operator_alias,
+        )
+
+    # --- primary API -------------------------------------------------------
+
+    def record_step(
+        self,
+        *,
+        tool: str,
+        input_args: dict[str, Any],
+        result_summary: str,
+        duration_ms: int,
+        outcome: Outcome,
+        ts: datetime,
+        llm_interpretation: str | None = None,
+    ) -> SessionStep:
+        """Build, append, and persist one `SessionStep`.
+
+        R10 redaction (commit #5) and sanitize (commit #5) are wired as
+        no-ops in this commit; the contract they eventually implement is
+        captured by tests in `tests/core/test_session_journal.py` and
+        `tests/core/test_session_redaction.py`.
+        """
+        if not self._enabled:
+            # R15-S1: when disabled, auto-trace MUST skip recording.
+            # Return a non-persisted Step so callers don't blow up.
+            return SessionStep(
+                ts=ts,
+                step=0,
+                tool=tool,
+                input=input_args,
+                result_summary=result_summary,
+                duration_ms=duration_ms,
+                outcome=outcome,
+                llm_interpretation=llm_interpretation,
+            )
+
+        state = self._load_or_create()
+        # R10: no-op in this commit (added in #5).
+        # R6:  no-op in this commit (added in #5).
+        sanitized_input = input_args
+        sanitized_summary = result_summary
+        sanitized_llm = llm_interpretation
+
+        next_step = _next_step(state)
+        step = SessionStep(
+            ts=ts,
+            step=next_step,
+            tool=tool,
+            input=sanitized_input,
+            result_summary=sanitized_summary,
+            duration_ms=duration_ms,
+            outcome=outcome,
+            llm_interpretation=sanitized_llm,
+        )
+        state.trace.append(step)
+        state.last_updated = datetime.now(timezone.utc)
+        self._state = state
+        self._persist(state)
+        logger.info(
+            "session journal recorded: tool=%s step=%d outcome=%s duration_ms=%d",
+            tool,
+            next_step,
+            outcome,
+            duration_ms,
+        )
+        return step
+
+    def get_state(self, *, include_rotated: bool = False) -> SessionState:
+        """Return the current `SessionState`.
+
+        R7-S2 — when no canonical file exists, this call CREATES one with
+        the empty default state and persists it. When `include_rotated` is
+        True, NDJSON steps are merged into `state.trace` in `step` order
+        (R16). Default False for backward compatibility.
+        """
+        was_loaded = self._state is not None
+        if was_loaded and self._state is not None:
+            state: SessionState = self._state
+        else:
+            state = self._load_or_create()
+        # R6: re-sanitize on read (defense in depth). Wired as no-op in
+        # this commit; added in #5.
+        self._state = state
+        if not was_loaded:
+            # First read after construction: persist the empty canonical
+            # file (R7-S2 — get_state MUST create one if missing).
+            self._persist(state)
+        if include_rotated:
+            state = self._rehydrate_rotated(state)
+        return state
+
+    def _rehydrate_rotated(self, state: SessionState) -> SessionState:
+        """Merge NDJSON steps into `state.trace` in `step` order.
+
+        Wired in task #8 alongside `nora_session_get_state(include_rotated)`.
+        Returns `state` unchanged here; the real implementation lands in
+        commit #8.
+        """
+        return state
+
+    # --- internals ---------------------------------------------------------
+
+    def _path(self) -> Path:
+        return canonical_path(self._journal_dir, self._session_id)
+
+    def _ndjson_path(self) -> Path:
+        return ndjson_path(self._journal_dir, self._session_id)
+
+    def _load_or_create(self) -> SessionState:
+        """Load existing canonical file, or create a fresh empty state."""
+        path = self._path()
+        if not path.exists():
+            now = datetime.now(timezone.utc)
+            return SessionState(
+                session_id=self._session_id,
+                operator_alias=self._operator_alias,
+                started_at=now,
+                last_updated=now,
+            )
+        try:
+            with path.open() as f:
+                data = json.load(f)
+        except json.JSONDecodeError as exc:
+            # R11 — corrupt file raises typed error.
+            raise JournalCorruptError(path) from exc
+        return SessionState.model_validate(data)
+
+    def _persist(self, state: SessionState) -> None:
+        """Serialize `state` to JSON and atomically write to canonical path.
+
+        Pydantic's `model_dump(mode="json")` returns datetimes as ISO
+        strings, which `json.loads` re-parses to `dict[str, Any]`. The
+        re-serialise step keeps payload shape consistent with the spec
+        (string-keyed dict, no Pydantic-specific markers).
+        """
+        payload: dict[str, Any] = json.loads(json.dumps(state.model_dump(mode="json")))
+        atomic_write_json(self._path(), payload)
+
+
+def _next_step(state: SessionState) -> int:
+    """Return the next monotonic step number for `state.trace`."""
+    if not state.trace:
+        return 1
+    return state.trace[-1].step + 1
+
+
+# ---------------------------------------------------------------------------
+# Module-level singleton. The middleware and the explicit tools both read
+# `_journal` via `get_journal()`. `__main__.py` is the single boot site
+# that calls `init_session_journal(settings)`.
+# ---------------------------------------------------------------------------
+
+
+_journal: SessionJournal | None = None
+
+
+def init_session_journal(settings: Settings) -> SessionJournal:
+    """Construct (or replace) the module-level singleton.
+
+    Idempotent: a second call replaces the previous instance (useful for
+    test fixtures).
+    """
+    global _journal
+    _journal = SessionJournal.for_settings(settings, _module_sanitizer())
+    return _journal
+
+
+def get_journal() -> SessionJournal:
+    """Return the module-level singleton.
+
+    Raises `JournalDisabledError` when the env var is `"false"` (R15-S2).
+    """
+    if _journal is None:
+        raise JournalDisabledError(
+            "session journal not initialised; call init_session_journal(settings) "
+            "or nora.server.set_runtime_state(...)"
+        )
+    return _journal
+
+
+def _module_sanitizer() -> Sanitizer:
+    """Build the default `Sanitizer` used by the singleton.
+
+    Each SessionJournal could hold its own Sanitizer (per-session alias
+    map); for the module singleton we use a fresh one. Tests that need
+    an isolated map construct their own SessionJournal directly.
+    """
+    return Sanitizer()
+
+
 __all__ = [
+    "SessionJournal",
     "SessionJournalError",
     "SessionNotFoundError",
     "JournalCorruptError",
     "JournalDisabledError",
+    "init_session_journal",
+    "get_journal",
 ]
