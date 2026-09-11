@@ -37,6 +37,7 @@ from nora.core.session_paths import (
     ndjson_path,
 )
 from nora.core.session_redaction import REDACTION_LIST, redact
+from nora.core.session_rotation import rotate_if_needed
 from nora.sanitizer import Sanitizer
 
 logger = logging.getLogger("nora.core.session_journal")
@@ -186,6 +187,10 @@ class SessionJournal:
             llm_interpretation=sanitized_llm,
         )
         state.trace.append(step)
+        # R5: rotate if the in-memory trace exceeded the threshold. The
+        # rotate helper is a no-op below the threshold, so the common
+        # case costs one length check.
+        state = rotate_if_needed(state, self._ndjson_path(), self._max_trace_steps)
         state.last_updated = datetime.now(timezone.utc)
         self._state = state
         self._persist(state)
