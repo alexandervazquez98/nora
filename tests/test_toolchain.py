@@ -247,3 +247,36 @@ def test_makefile_declares_required_targets() -> None:
     makefile = (PROJECT_ROOT / "Makefile").read_text()
     for target in ("test:", "lint:", "type:", "format:", "run:"):
         assert target in makefile, f"Makefile missing target '{target}'"
+
+
+@pytest.mark.parametrize(
+    "target, expected_tool",
+    [
+        ("test", "pytest"),
+        ("lint", "ruff check"),
+        ("format", "ruff format"),
+        ("type", "mypy"),
+        ("run", "nora"),
+    ],
+)
+def test_makefile_targets_invoke_configured_tools(target: str, expected_tool: str) -> None:
+    """`make -n <target>` MUST expand to a line invoking the configured tool.
+
+    Spec scenario (project-toolchain): "make test wraps the configured runner".
+    `make -n` is a read-only dry-run that prints the resolved shell commands
+    without executing them; we assert the expansion contains the tool name so
+    a regression in the Makefile (e.g. swapping `pytest` for `nose`) fails
+    loudly.
+    """
+    if shutil.which("make") is None:
+        pytest.skip("make is not installed on PATH")
+
+    result = _run(["make", "-n", target])
+    assert result.returncode == 0, (
+        f"`make -n {target}` failed (exit={result.returncode}):\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    assert expected_tool in (result.stdout or ""), (
+        f"`make -n {target}` did not expand to a command containing {expected_tool!r};\n"
+        f"got stdout:\n{result.stdout!r}"
+    )
