@@ -216,6 +216,63 @@ def test_health_sanitizes_upstream_error_messages() -> None:
     assert "router-core-01.example.com" not in rendered, f"Hostname literal leaked: {rendered!r}"
 
 
+def test_health_error_path_does_not_leak_secrets_to_stderr(
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    """Provider error payload with IP+MAC+serial+hostname+key MUST NOT leak.
+
+    Closes W1 PARTIAL scenario 2 (nora-mcp-server error-path sanitization +
+    secrets-leak). The single-literal test above is necessary but not
+    sufficient; the contract is "nothing identifiable leaves the process",
+    so we pack every category into the payload and assert both the tool
+    response AND the captured stderr stay clean. The 4-tuple response
+    shape and `connectivity == "unavailable"` are also pinned.
+    """
+    from nora.llm import LLMUnavailable
+    from nora.sanitizer import Sanitizer
+
+    payload = (
+        "boom: ipv4=10.0.0.5 mac=aa:bb:cc:dd:ee:ff "
+        "serial=ABC123XYZ-PROD-001 host=router-core-01.example.com "
+        "key=sk-testkey1234567890abcdef"
+    )
+    settings = Settings(_env_file=None, _env_file_encoding=None)
+    provider = mock.MagicMock()
+    provider.complete.side_effect = LLMUnavailable(payload)
+
+    sanitizer = Sanitizer()
+    with mock.patch("nora.server._sanitizer", sanitizer):
+        result = _call_nora_health(provider, settings)
+
+    captured = capfd.readouterr()
+    rendered_response = str(result)
+    rendered_stderr = captured.err or ""
+
+    # No payload literal may survive in response or stderr.
+    for needle in (
+        "10.0.0.5",
+        "aa:bb:cc:dd:ee:ff",
+        "ABC123XYZ-PROD-001",
+        "router-core-01.example.com",
+        "sk-testkey1234567890abcdef",
+    ):
+        assert needle not in rendered_response, (
+            f"Response leaked payload literal {needle!r}: {rendered_response!r}"
+        )
+        assert needle not in rendered_stderr, (
+            f"stderr leaked payload literal {needle!r}: {rendered_stderr!r}"
+        )
+
+    # 4-tuple contract preserved on the unavailable path.
+    assert set(result.keys()) == {
+        "version",
+        "active_provider",
+        "connectivity",
+        "env_loaded",
+    }
+    assert result["connectivity"] == "unavailable"
+
+
 # ---------------------------------------------------------------------------
 # Requirement: Edge Cases — Subprocess boot
 # ---------------------------------------------------------------------------
