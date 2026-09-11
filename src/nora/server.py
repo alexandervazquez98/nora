@@ -18,12 +18,20 @@ from __future__ import annotations
 import logging
 import sys
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 from fastmcp import FastMCP
+from fastmcp.server.middleware import Middleware
 
 from nora import __version__
 from nora.config import Settings
+from nora.core.session_journal import (
+    SessionJournal,
+    SessionJournalError,
+    get_journal,
+    init_session_journal,
+)
 from nora.llm import LLMProvider
 from nora.sanitizer import Sanitizer
 
@@ -132,10 +140,132 @@ def nora_health() -> dict[str, Any]:
     return nora_health_impl(settings, provider)
 
 
+# ---------------------------------------------------------------------------
+# Auto-trace middleware (Phase 2 — SessionJournal)
+#
+# Wraps every `@mcp.tool` invocation in the FastMCP dispatcher. Records
+# exactly one `SessionStep` per call, AFTER the tool body returns (or
+# raises) — the recording is durability-backed so a crash between the
+# tool body and the middleware returning leaves either old or new content
+# on disk, never a torn mix (R3).
+#
+# The middleware is registered exactly once via `register_auto_trace_middleware`,
+# typically called from `__main__.py` after `init_session_journal(...)`.
+# Tests that need the middleware call it explicitly.
+# ---------------------------------------------------------------------------
+
+
+class _AutoTraceMiddleware(Middleware):
+    """Records every `@mcp.tool` call into the module-level `_journal` singleton.
+
+    R3 — `record_step` (atomic JSON write) returns BEFORE this middleware
+    returns, so the on-disk state is one step ahead of the in-flight tool.
+
+    R12 — the middleware never mutates `result`. On a tool body exception
+    the middleware records with `outcome="error"` then RE-RAISES so the
+    JSON-RPC error surface is preserved.
+    """
+
+    def __init__(self, journal: SessionJournal) -> None:
+        self._journal = journal
+
+    async def on_call_tool(self, context: Any, call_next: Any) -> Any:
+        # Lazy import keeps `server.py` importable in environments without
+        # the auto-trace test setup (e.g., tests that don't exercise it).
+        ts = datetime.now(timezone.utc)
+        start = time.monotonic()
+        message = context.message
+        tool = getattr(message, "name", "<unknown>")
+        args = getattr(message, "arguments", None) or {}
+
+        try:
+            result = await call_next(context)
+        except Exception as exc:
+            duration_ms = int((time.monotonic() - start) * 1000)
+            sanitized = self._journal._sanitizer.sanitize(str(exc)).text
+            try:
+                self._journal.record_step(
+                    tool=tool,
+                    input_args=args,
+                    result_summary=sanitized,
+                    duration_ms=duration_ms,
+                    outcome="error",
+                    ts=ts,
+                )
+            except SessionJournalError as log_exc:  # pragma: no cover - defensive
+                logger.warning("auto-trace failed to record error step: %s", log_exc)
+            raise
+
+        duration_ms = int((time.monotonic() - start) * 1000)
+        summary = _derive_summary(result)
+        try:
+            self._journal.record_step(
+                tool=tool,
+                input_args=args,
+                result_summary=summary,
+                duration_ms=duration_ms,
+                outcome="success",
+                ts=ts,
+            )
+        except SessionJournalError as log_exc:  # pragma: no cover - defensive
+            logger.warning("auto-trace failed to record success step: %s", log_exc)
+        return result
+
+
+def _derive_summary(result: Any) -> str:
+    """Return a short string summary for `result`.
+
+    Strings pass through (truncated to 256 chars). Other values are
+    `repr()`d. The summary is later sanitized on write, so private IPv4 /
+    MAC / hostname literals in the string get masked before persistence.
+    """
+    if isinstance(result, str):
+        return result[:256]
+    return repr(result)[:256]
+
+
+_auto_trace_registered: bool = False
+
+
+def register_auto_trace_middleware(journal: SessionJournal | None = None) -> None:
+    """Register the `_AutoTraceMiddleware` against the global `mcp` instance.
+
+    Idempotent: a second call is a no-op (the same middleware stays
+    registered for the lifetime of the process). Pass `journal` to use a
+    non-default journal; otherwise `get_journal()` is consulted lazily
+    on every tool call (so swapping the module-level singleton also swaps
+    the journal the middleware writes to).
+    """
+    global _auto_trace_registered
+    if _auto_trace_registered:
+        return
+    middleware = _AutoTraceMiddleware(journal or get_journal())
+    mcp.add_middleware(middleware)
+    _auto_trace_registered = True
+    logger.info("auto-trace middleware registered")
+
+
+def unregister_auto_trace_middleware() -> None:
+    """Test-only hook — remove the auto-trace middleware from the global mcp.
+
+    Resets the `_auto_trace_registered` flag so a subsequent call to
+    `register_auto_trace_middleware()` re-adds a fresh instance.
+    """
+    global _auto_trace_registered
+    _auto_trace_registered = False
+    # Best-effort: drop any `_AutoTraceMiddleware` from the chain.
+    if hasattr(mcp, "middleware"):
+        mcp.middleware = [mw for mw in mcp.middleware if not isinstance(mw, _AutoTraceMiddleware)]
+
+
 __all__ = [
     "mcp",
     "configure_logging",
     "set_runtime_state",
     "get_runtime_state",
     "nora_health_impl",
+    "_AutoTraceMiddleware",
+    "register_auto_trace_middleware",
+    "unregister_auto_trace_middleware",
+    "init_session_journal",  # re-exported for callers that need to wire up
 ]
