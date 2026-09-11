@@ -32,10 +32,13 @@ Out of scope
 
 from __future__ import annotations
 
+import logging
 import re
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Final
+
+logger = logging.getLogger(__name__)
 
 
 class SanitizerInputError(TypeError):
@@ -146,6 +149,7 @@ class Sanitizer:
         else:  # pragma: no cover - defensive
             alias = f"ALIAS_{category.upper()}_{idx}"
         bucket[literal] = alias
+        logger.debug("alias %s=%s", literal, alias)
         return alias
 
     @staticmethod

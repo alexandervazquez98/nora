@@ -7,6 +7,7 @@ synthetic aliases within a session, and that edge cases pass through safely.
 
 from __future__ import annotations
 
+import logging
 import re
 from unittest import mock
 
@@ -288,3 +289,53 @@ def test_aliases_use_distinct_category_prefixes(
     assert expected_substring_in_replacement in result.text, (
         f"Expected alias with prefix {expected_substring_in_replacement!r}; got: {result.text!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Requirement: Observability — Replacement Counter + Alias Map Log Levels
+# (Closes W1 PARTIAL scenario 3)
+# ---------------------------------------------------------------------------
+
+
+def test_alias_map_debug_log_lists_literal_and_alias(
+    sanitizer: Sanitizer, caplog: pytest.LogCaptureFixture
+) -> None:
+    """At DEBUG, the alias map entry MUST appear (literal + alias) per (category, literal)."""
+    # Pre-populate with a different IP so the caplog block observes a NEW alias being created.
+    sanitizer.sanitize(f"ip={PRIVATE_IPV4_SECOND}")
+
+    with caplog.at_level(logging.DEBUG, logger="nora.sanitizer"):
+        sanitizer.sanitize(f"ip={PRIVATE_IPV4_LITERAL} mac={MAC_LITERAL}")
+
+    debug_records = [r for r in caplog.records if r.levelno == logging.DEBUG]
+    assert debug_records, (
+        f"Expected at least one DEBUG log record from nora.sanitizer; got: {caplog.records!r}"
+    )
+    # At least one record names both the IP literal and its alias.
+    matched = [
+        r
+        for r in debug_records
+        if "alias" in r.getMessage().lower() and PRIVATE_IPV4_LITERAL in r.getMessage()
+    ]
+    assert matched, (
+        f"Expected DEBUG alias record for {PRIVATE_IPV4_LITERAL!r}; got: "
+        f"{[r.getMessage() for r in debug_records]!r}"
+    )
+
+
+def test_alias_map_absent_at_info_level(
+    sanitizer: Sanitizer, caplog: pytest.LogCaptureFixture
+) -> None:
+    """At INFO, the alias map MUST NOT appear (alias literals are absent)."""
+    with caplog.at_level(logging.INFO, logger="nora.sanitizer"):
+        sanitizer.sanitize(f"ip={PRIVATE_IPV4_LITERAL} mac={MAC_LITERAL} host={HOSTNAME_LITERAL}")
+
+    info_or_above = [r for r in caplog.records if r.levelno >= logging.INFO]
+    for record in info_or_above:
+        msg = record.getMessage()
+        assert "alias" not in msg.lower() or "counter" in msg.lower(), (
+            f"INFO+ log line should not contain alias-map details; got: {msg!r}"
+        )
+        # The raw IP/MAC/hostname literal MUST NOT appear in any INFO+ record.
+        for needle in (PRIVATE_IPV4_LITERAL, MAC_LITERAL, HOSTNAME_LITERAL):
+            assert needle not in msg, f"INFO+ log leaked literal {needle!r}: {msg!r}"
