@@ -10,86 +10,78 @@ artifact_store: openspec
 context: |
   Product: NORA (Network Operations & Remediation Assistant) — agnostic NOC telemetry,
   root-cause diagnosis and human-approved remediation. Scope of record: SCOPE.md.
-  Tech stack: Python 3.9.6 (system interpreter, no venv, no dependency manifest yet).
-  State: greenfield — only LICENSE (Apache 2.0) and SCOPE.md are tracked; no src/ or tests/.
-  Prototypes: .reportes/ (gitignored) — ~20 throwaway scripts: hand-rolled SNMP BER over sockets, ICMP via subprocess, matplotlib/numpy charts, reportlab PDFs.
-  Target architecture (SCOPE.md, not built yet): provider factory/adapter for multi-LLM
-  (LM Studio + Google Gemini), SNMP/SSH driver layer, HITL ChangeRequest state machine with
-  rollback watchdog, FastMCP + FastAPI, Pydantic Settings, telemetry sanitizer.
-  Style: zero hardcoded IPs/credentials/topologies; secrets only via .env; Spanish docs, English code.
+  Tech stack: Python 3.12 (uv-managed venv), hatchling build backend, real `src/nora/`
+  package with Pydantic Settings, FastMCP server, telemetry sanitizer, lmstudio and
+  google-genai SDK adapters, pytest test suite under `tests/`.
+  State: foundation-bootstrap landed — Phase 1 toolchain + LLM provider + sanitizer +
+  FastMCP server shipped. Driver layer (Phase 2) and HITL ChangeRequest (Phase 3)
+  remain out of scope.
+  Target architecture (SCOPE.md): provider factory/adapter for multi-LLM
+  (LM Studio + Google Gemini), SNMP/SSH driver layer, HITL ChangeRequest state machine
+  with rollback watchdog, FastMCP, Pydantic Settings, telemetry sanitizer.
+  Style: zero hardcoded IPs/credentials/topologies; secrets only via .env; Spanish docs,
+  English code.
 
-# Testing capabilities — detected at environment level on 2026-09-05.
-# IMPORTANT: nothing here is declared by the project. There is no pyproject.toml,
-# requirements.txt, pytest.ini, Makefile or CI workflow. These tools are installed on
-# the machine and were verified runnable. Phase 1 MUST pin them in a real manifest.
+# Testing capabilities — refreshed post-foundation-bootstrap on 2026-09-10.
+# Project now ships its own pyproject.toml, .venv, and pinned dependencies via uv.
 testing:
   strict_tdd: true
   strict_tdd_basis: >-
-    No TDD marker and no project config found, but a working test runner was verified
-    (python3 -m pytest -> pytest 8.4.2). Per SDD decision gates the runner-present
-    default applies. Declared at environment level, not by the project.
-  declared_by_project: false
-  interpreter: python3 3.9.6 (/Library/Developer/CommandLineTools)
+    No TDD marker and no project config found at init, but a working test runner was
+    verified. Per SDD decision gates the runner-present default applies. Confirmed
+    in foundation-bootstrap: pytest-cov is now pinned in [dependency-groups].dev.
+  declared_by_project: true
+  interpreter: python 3.12 (uv-managed .venv)
   runner:
-    framework: pytest 8.4.2
-    command: python3 -m pytest
+    framework: pytest 9.x
+    command: uv run python -m pytest --cov=src/nora --cov-report=term-missing
     plugins_detected:
-      - anyio 4.12.1
-      - timeout 2.4.0
+      - pytest-cov 7.x
+      - timeout 2.4
+      - anyio 4.x
     note: >-
-      The bare `pytest` console script is broken in this environment; always invoke via
-      `python3 -m pytest`. Verified: collects 0 items, exit 0. `ruff` honors .gitignore,
-      so .reportes/ is excluded from lint and format runs.
+      Coverage is now wired into the default verify command via R4 of
+      foundation-bootstrap-cleanup; threshold is 85%.
   layers:
     unit:
       available: true
-      tool: pytest 8.4.2
+      tool: pytest 9.x
     integration:
       available: true
-      tool: httpx 0.28.1 + fastapi 0.128.8 TestClient
-      note: Tooling is installed; no integration tests exist yet.
+      tool: pytest subprocess pattern (real binary boot)
+      note: No external httpx TestClient tests in foundation-bootstrap.
     e2e:
       available: false
       tool: null
-      note: No playwright/cypress/selenium detected; NORA is a backend/MCP service.
+      note: NORA is a backend/MCP service — no browser-driven E2E.
   coverage:
-    available: false
-    command: null
-    note: pytest-cov and coverage are both absent. Phase 1 must add pytest-cov.
+    available: true
+    command: pytest-cov 7.x
+    note: Wired into verify.test_command via R4 of foundation-bootstrap-cleanup.
   quality:
     linter:
       available: true
-      command: ruff check .
-      tool: ruff 0.15.18
-      note: Installed globally; no ruff.toml or [tool.ruff] section in the project.
+      command: uv run ruff check .
+      tool: ruff (pinned via pyproject.toml)
     type_checker:
-      available: false
-      command: null
-      note: mypy and pyright both absent. SCOPE.md relies on strict typing — add one.
+      available: true
+      command: uv run mypy --strict src/nora
+      tool: mypy (pinned via pyproject.toml)
     formatter:
       available: true
-      command: ruff format .
-      tool: ruff 0.15.18
+      command: uv run ruff format --check .
+      tool: ruff (pinned via pyproject.toml)
   installed_libraries:
     verified_present:
-      - pytest 8.4.2
-      - ruff 0.15.18
-      - httpx 0.28.1
-      - fastapi 0.128.8
-      - pydantic 2.13.4
-      - paramiko 5.0.0
-      - numpy 2.0.2
-      - matplotlib 3.9.4
-      - reportlab 5.0.1
-    declared_in_scope_but_missing:
-      - fastmcp
-      - google-genai
-      - pysnmp
-      - netmiko
-      - pydantic-settings
-      - onvif
-      - requests
-      - pytest-cov
+      - fastmcp>=3.2,<4
+      - lmstudio>=1,<2
+      - google-genai>=1,<3
+      - pydantic-settings>=2
+      - pytest>=8
+      - pytest-cov>=5
+      - pytest-timeout>=2.4
+      - ruff>=0.6
+      - mypy>=1.10
 
 rules:
   proposal:
@@ -117,14 +109,15 @@ rules:
       - Treat .reportes/ as throwaway prototypes — port logic deliberately, do not import it.
       - Never commit .env, credentials, real IPs or topology data.
     tdd: true
-    test_command: uv run python -m pytest
+    test_command: uv run python -m pytest --cov=src/nora --cov-report=term-missing
   verify:
-    test_command: uv run python -m pytest
+    test_command: uv run python -m pytest --cov=src/nora --cov-report=term-missing
     build_command: uv run ruff check . && uv run ruff format --check . && uv run mypy --strict src/nora
-    coverage_threshold: 0
+    coverage_threshold: 85
     coverage_note: >-
-      Threshold stays 0 until pytest-cov is installed and pinned in the manifest;
-      raise it in the change that adds coverage.
+      Threshold raised to 85% now that pytest-cov is pinned in
+      [dependency-groups].dev and wired into verify.test_command via R4 of
+      foundation-bootstrap-cleanup. Edit when the suite grows.
   archive:
     - Warn before merging destructive deltas.
     - Confirm no secrets or real infrastructure identifiers entered openspec/specs/.
