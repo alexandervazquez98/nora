@@ -507,3 +507,54 @@ def test_pyproject_pins_fastmcp_below_v4() -> None:
     assert re.match(r"fastmcp\s*>=\s*3\.2\s*,\s*<\s*4", matches[0]), (
         f"fastmcp must be pinned to >=3.2,<4; got {matches[0]!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Requirement: model_id reaches SDK verbatim (Closes W1 PARTIAL scenario 4)
+# ---------------------------------------------------------------------------
+
+
+def test_lmstudio_provider_passes_model_id_verbatim_to_sdk() -> None:
+    """`LMStudioProvider` MUST forward `settings.lmstudio_model_id` to the SDK unchanged.
+
+    Spec scenario (secure-configuration:116-119): "`model_id` is passed
+    verbatim to the SDK AND the sanitizer is NOT applied to `model_id`".
+    Existing tests assert `Completion.model_id` but not the SDK kwarg
+    itself; this test pins the SDK boundary.
+    """
+    sdk_result = mock.Mock(content="ok")
+    fake_model = mock.Mock(respond=mock.Mock(return_value=sdk_result))
+    fake_client = mock.MagicMock()
+    fake_client.__enter__.return_value.llm.model.return_value = fake_model
+
+    sentinel_model_id = "qwen2.5-coder-7b-instruct"
+    with mock.patch("lmstudio.Client", return_value=fake_client):
+        provider = LMStudioProvider(api_host="localhost:1234", model_id=sentinel_model_id)
+        provider.complete("ping")
+
+    # The lmstudio SDK receives the model id as the positional arg to `model(<id>)`.
+    fake_client.__enter__.return_value.llm.model.assert_called_once_with(sentinel_model_id)
+
+
+def test_gemini_provider_passes_model_id_verbatim_to_sdk() -> None:
+    """`GeminiProvider` MUST forward `settings.gemini_model_id` to the SDK unchanged.
+
+    Spec scenario (secure-configuration:116-119): "`model_id` is passed
+    verbatim to the SDK AND the sanitizer is NOT applied to `model_id`".
+    The genai SDK receives the model id as the `model=` kwarg to
+    `generate_content`; this test pins that boundary.
+    """
+    sdk_response = mock.Mock(text="ok")
+    fake_models = mock.Mock(generate_content=mock.Mock(return_value=sdk_response))
+    fake_client = mock.MagicMock()
+    fake_client.__enter__.return_value.models = fake_models
+
+    sentinel_model_id = "gemini-2.5-flash-lite"
+    with mock.patch("google.genai.Client", return_value=fake_client):
+        provider = GeminiProvider(api_key=SecretStr("k"), model_id=sentinel_model_id)
+        provider.complete("ping")
+
+    call_kwargs = fake_models.generate_content.call_args.kwargs
+    assert call_kwargs.get("model") == sentinel_model_id, (
+        f"genai SDK must receive model_id verbatim; got {call_kwargs.get('model')!r}"
+    )
