@@ -135,21 +135,15 @@ class OidCatalogRegistry:
         return cls(_catalogs_path=root, _catalogs=catalogs)
 
     @classmethod
-    def _verify_one(
-        cls, path: Path, key_bytes: bytes
-    ) -> tuple[str, str, str, OidCatalog] | None:
+    def _verify_one(cls, path: Path, key_bytes: bytes) -> tuple[str, str, str, OidCatalog] | None:
         """Verify `path` against `key_bytes`; return the catalog or raise."""
         try:
             envelope = json.loads(path.read_text())
         except json.JSONDecodeError as exc:
-            raise CatalogVerificationError(
-                path=path, reason=f"invalid JSON: {exc.msg}"
-            ) from exc
+            raise CatalogVerificationError(path=path, reason=f"invalid JSON: {exc.msg}") from exc
 
         if not isinstance(envelope, dict):
-            raise CatalogVerificationError(
-                path=path, reason="envelope is not a JSON object"
-            )
+            raise CatalogVerificationError(path=path, reason="envelope is not a JSON object")
 
         vendor = envelope.get("vendor")
         model = envelope.get("model")
@@ -165,13 +159,9 @@ class OidCatalogRegistry:
                 path=path, reason="envelope missing vendor/model/firmware"
             )
         if not isinstance(oids, dict):
-            raise CatalogVerificationError(
-                path=path, reason="envelope.oids is not an object"
-            )
+            raise CatalogVerificationError(path=path, reason="envelope.oids is not an object")
         if not isinstance(signature, str):
-            raise CatalogVerificationError(
-                path=path, reason="envelope.hmac_sha256 is not a string"
-            )
+            raise CatalogVerificationError(path=path, reason="envelope.hmac_sha256 is not a string")
 
         # Canonicalise: sort the oids map so the signature matches across
         # authors / formatter settings.

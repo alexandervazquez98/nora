@@ -55,13 +55,14 @@ packages = ["src/nora"]
 [tool.ruff]
 target-version = "py312"
 line-length = 100
-extend-exclude = [".venv", ".reportes", ".atl", "openspec"]
+extend-exclude = [".venv", ".reportes", ".atl", "openspec", "scripts"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "T201"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["T201"]
+"scripts/**/*.py" = ["T201"]
 
 [tool.mypy]
 strict = true
