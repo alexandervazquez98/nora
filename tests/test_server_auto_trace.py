@@ -187,3 +187,90 @@ def test_raising_tool_records_outcome_error_and_re_raises(
         jdir = Path("/tmp/nora-test-error-journal")
         if jdir.exists():
             shutil.rmtree(jdir, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# R15 — NORA_SESSION_JOURNAL_ENABLED disable switch
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def disabled_settings(tmp_path: Path) -> Settings:
+    """Settings with the disable switch on (R15)."""
+    return Settings(
+        _env_file=None,
+        _env_file_encoding=None,
+        nora_session_journal_dir=tmp_path / "sessions",
+        nora_session_trace_max_steps=50,
+        nora_session_journal_enabled=False,
+        nora_operator_alias="disabled-op",
+    )
+
+
+def test_disable_switch_skips_auto_trace_for_nora_health(
+    disabled_settings: Settings,
+) -> None:
+    """R15-S1 — when disabled, nora_health produces no journal file and 4-tuple is intact."""
+    from nora import server as server_mod
+
+    provider = mock.MagicMock()
+    provider.complete.return_value = mock.Mock(text="pong", model_id="m", raw=object())
+    server_mod.set_runtime_state(disabled_settings, provider)
+    server_mod.init_session_journal(disabled_settings)
+    server_mod.register_auto_trace_middleware()
+    try:
+
+        async def _run() -> dict[str, Any]:
+            from fastmcp import Client
+
+            async with Client(server_mod.mcp) as client:
+                result = await client.call_tool("nora_health", {})
+                return result.data
+
+        response = asyncio.run(_run())
+
+        # The 4-tuple is byte-identical to the enabled case (R12 invariant).
+        assert set(response.keys()) == {
+            "version",
+            "active_provider",
+            "connectivity",
+            "env_loaded",
+        }
+        assert response["connectivity"] == "ok"
+        assert response["active_provider"] == "lmstudio"
+
+        # No file appears under the journal dir.
+        files = list(disabled_settings.nora_session_journal_dir.glob("*.json"))
+        assert files == [], f"No file should exist under the journal dir; got {files!r}"
+    finally:
+        server_mod.unregister_auto_trace_middleware()
+
+
+def test_disable_switch_makes_explicit_tools_raise(disabled_settings: Settings) -> None:
+    """R15-S2 — explicit tools raise JournalDisabledError when disabled."""
+    from nora import server as server_mod
+
+    provider = mock.MagicMock()
+    provider.complete.return_value = mock.Mock(text="ok", model_id="m", raw=object())
+    server_mod.set_runtime_state(disabled_settings, provider)
+    server_mod.init_session_journal(disabled_settings)
+    server_mod.register_auto_trace_middleware()
+    try:
+
+        async def _expect(name: str, args: dict[str, Any]) -> None:
+            from fastmcp import Client
+
+            async with Client(server_mod.mcp) as client:
+                with pytest.raises(Exception) as exc:
+                    await client.call_tool(name, args)
+                msg = str(exc.value).lower()
+                assert "journaldisabled" in msg.replace(" ", "") or "disabled" in msg, (
+                    f"Expected JournalDisabledError from {name!r}; got: {exc.value!r}"
+                )
+
+        asyncio.run(_expect("nora_session_get_state", {}))
+        asyncio.run(_expect("nora_session_set_focus", {"device_id": "ap-7400-01"}))
+        asyncio.run(_expect("nora_session_resume", {"session_id": "any-id"}))
+        asyncio.run(_expect("nora_session_summarize", {}))
+    finally:
+        server_mod.unregister_auto_trace_middleware()

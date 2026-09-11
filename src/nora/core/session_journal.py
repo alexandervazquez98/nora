@@ -42,6 +42,11 @@ from nora.sanitizer import Sanitizer
 
 logger = logging.getLogger("nora.core.session_journal")
 
+# Standard message for the disabled gate (R15). Kept as a module-level
+# constant so the test suite can pattern-match it without coupling to the
+# Settings field name.
+_DISABLED_MSG: str = "session journal disabled via NORA_SESSION_JOURNAL_ENABLED"
+
 # ---------------------------------------------------------------------------
 # Typed exception hierarchy (R7, R11, R15).
 # ---------------------------------------------------------------------------
@@ -145,18 +150,14 @@ class SessionJournal:
         `tests/core/test_session_redaction.py`.
         """
         if not self._enabled:
-            # R15-S1: when disabled, auto-trace MUST skip recording.
-            # Return a non-persisted Step so callers don't blow up.
-            return SessionStep(
-                ts=ts,
-                step=0,
-                tool=tool,
-                input=input_args,
-                result_summary=result_summary,
-                duration_ms=duration_ms,
-                outcome=outcome,
-                llm_interpretation=llm_interpretation,
+            # R15-S1: when disabled, auto-trace MUST skip recording
+            # entirely. Return None; the middleware never uses the
+            # return value, so this is safe.
+            logger.debug(
+                "session journal disabled; auto-trace skipped for tool=%s",
+                tool,
             )
+            return None  # type: ignore[return-value]
 
         state = self._load_or_create()
         # R10: redact by key name first, so the [REDACTED] marker never
@@ -210,7 +211,11 @@ class SessionJournal:
         the empty default state and persists it. When `include_rotated` is
         True, NDJSON steps are merged into `state.trace` in `step` order
         (R16). Default False for backward compatibility.
+
+        Raises `JournalDisabledError` when the journal is disabled (R15-S2).
         """
+        if not self._enabled:
+            raise JournalDisabledError(_DISABLED_MSG)
         was_loaded = self._state is not None
         if was_loaded and self._state is not None:
             state: SessionState = self._state
@@ -232,7 +237,11 @@ class SessionJournal:
 
         R7-S3 / R7-S4 — idempotent: a second `set_focus` with the same
         device id MUST NOT duplicate `devices_reviewed`.
+
+        Raises `JournalDisabledError` when the journal is disabled (R15-S2).
         """
+        if not self._enabled:
+            raise JournalDisabledError(_DISABLED_MSG)
         state = self._state or self._load_or_create()
         state.focus_device_id = device_id
         if device_id not in state.devices_reviewed:
@@ -248,7 +257,11 @@ class SessionJournal:
         R7-S5 — loads the named canonical file as the active session.
         R7-S6 — raises `SessionNotFoundError` if the file is missing.
         R9-S2 — does NOT mutate the previously-active session on disk.
+
+        Raises `JournalDisabledError` when the journal is disabled (R15-S2).
         """
+        if not self._enabled:
+            raise JournalDisabledError(_DISABLED_MSG)
         target = canonical_path(self._journal_dir, session_id)
         if not target.exists():
             raise SessionNotFoundError(f"Session not found: no canonical file at {target}")
@@ -286,7 +299,11 @@ class SessionJournal:
             * the last 10 step summaries (truncated to 120 chars each)
 
         Pure projection — does NOT mutate the canonical file.
+
+        Raises `JournalDisabledError` when the journal is disabled (R15-S2).
         """
+        if not self._enabled:
+            raise JournalDisabledError(_DISABLED_MSG)
         state = self._state or self._load_or_create()
 
         lines: list[str] = []
