@@ -145,7 +145,7 @@ class Pmp450iDriver:
 
         Wire-level failures are remapped to typed driver exceptions:
 
-        * `TimeoutError` / `socket.timeout`            -> `SnmpTimeoutError`
+        * `TimeoutError`                               -> `SnmpTimeoutError`
         * `ConnectionRefusedError` / `OSError`        -> `NetworkUnreachableError`
         * `ValueError` (parse failure)                 -> `NetworkUnreachableError`
         """
@@ -163,10 +163,6 @@ class Pmp450iDriver:
             except TimeoutError as exc:
                 raise SnmpTimeoutError(oid) from exc
             except OSError as exc:
-                import socket
-
-                if isinstance(exc, socket.timeout):
-                    raise SnmpTimeoutError(oid) from exc
                 raise NetworkUnreachableError(target) from exc
             except ValueError as exc:
                 raise NetworkUnreachableError(f"OID {oid}: {exc}") from exc

@@ -10,7 +10,6 @@ HMAC / encryption routines aren't available.
 from __future__ import annotations
 
 import asyncio
-import socket
 from typing import Any
 
 from puresnmp import Auth as _Auth
@@ -103,8 +102,9 @@ class V3Client:
             result: Any = asyncio.run(coro)
             return result
         except (TimeoutError, asyncio.TimeoutError) as exc:
-            raise SnmpTimeoutError(str(args[0])) from exc
-        except socket.timeout as exc:
+            # `socket.timeout` is a subclass of `TimeoutError` on
+            # Python 3.10+, so this catch covers raw socket timeouts
+            # without us importing `socket`.
             raise SnmpTimeoutError(str(args[0])) from exc
         except OSError as exc:
             raise NetworkUnreachableError(f"{self._device.host}:{self._device.port}") from exc
