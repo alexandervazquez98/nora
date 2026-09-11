@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -61,7 +62,14 @@ class SessionNotFoundError(SessionJournalError):
 
 
 class JournalCorruptError(SessionJournalError):
-    """Raised when a canonical file contains bytes that are not valid JSON (R11-S1)."""
+    """Raised when a canonical file contains bytes that are not valid JSON (R11-S1).
+
+    Carries `.path` so the recovery site knows which file to archive.
+    """
+
+    def __init__(self, path: Path) -> None:
+        super().__init__(f"Session journal file is corrupt: {path}")
+        self.path = path
 
 
 class JournalDisabledError(SessionJournalError):
@@ -159,7 +167,7 @@ class SessionJournal:
             )
             return None  # type: ignore[return-value]
 
-        state = self._load_or_create()
+        state = self._load_or_create_or_recover()
         # R10: redact by key name first, so the [REDACTED] marker never
         # reaches the sanitizer (which would otherwise mangle `REDACTED`
         # because it matches the SERIAL regex).
@@ -349,7 +357,13 @@ class SessionJournal:
         return ndjson_path(self._journal_dir, self._session_id)
 
     def _load_or_create(self) -> SessionState:
-        """Load existing canonical file, or create a fresh empty state."""
+        """Load existing canonical file, or create a fresh empty state.
+
+        Raises `JournalCorruptError` (R11-S1) if the file exists but its
+        bytes are not valid JSON. The auto-recovery call site is in
+        `record_step` (and the explicit tools) — they catch the
+        corruption, archive the bad file, and start fresh.
+        """
         path = self._path()
         if not path.exists():
             now = datetime.now(timezone.utc)
@@ -363,9 +377,41 @@ class SessionJournal:
             with path.open() as f:
                 data = json.load(f)
         except json.JSONDecodeError as exc:
-            # R11 — corrupt file raises typed error.
             raise JournalCorruptError(path) from exc
         return SessionState.model_validate(data)
+
+    def _recover_from_corrupt(self, path: Path) -> None:
+        """Archive the corrupt file by renaming it with a `.corrupt-<ts>.json` suffix (R11-S2).
+
+        Logged at WARNING so an operator can spot the recovery. The next
+        `_load_or_create` will then create a fresh canonical file.
+        """
+        ts = int(time.time())
+        archived = path.with_suffix(f".corrupt-{ts}.json")
+        path.rename(archived)
+        logger.warning(
+            "session journal recovered from corrupt file: archived=%s",
+            archived,
+        )
+
+    def _load_or_create_or_recover(self) -> SessionState:
+        """Wrap `_load_or_create` with R11-S2 auto-recovery.
+
+        On `JournalCorruptError`: archive the corrupt file, then return a
+        fresh empty `SessionState`. Reads that surface corruption (e.g.
+        `get_state`) still RAISE — recovery is a write-time concern.
+        """
+        try:
+            return self._load_or_create()
+        except JournalCorruptError as exc:
+            self._recover_from_corrupt(exc.path)
+            now = datetime.now(timezone.utc)
+            return SessionState(
+                session_id=self._session_id,
+                operator_alias=self._operator_alias,
+                started_at=now,
+                last_updated=now,
+            )
 
     def _persist(self, state: SessionState) -> None:
         """Serialize `state` to JSON and atomically write to canonical path.

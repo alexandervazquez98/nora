@@ -12,6 +12,7 @@ This file accumulates tests as features land:
 from __future__ import annotations
 
 import json
+import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -378,3 +379,106 @@ def test_redacted_input_key_does_not_appear_on_disk(journal_dir: Path) -> None:
     raw = files[0].read_text()
     assert "private" not in raw, f"Redacted value leaked: {raw!r}"
     assert "[REDACTED]" in raw, f"Expected redaction marker on disk; got: {raw!r}"
+
+
+# ---------------------------------------------------------------------------
+# R11 — corrupt-file handling: typed error at read, auto-recovery on next write
+# ---------------------------------------------------------------------------
+
+
+def test_corrupt_file_raises_journal_corrupt_error(journal_dir: Path) -> None:
+    """R11-S1 — invalid JSON bytes at the canonical path raise `JournalCorruptError`."""
+    from nora.core.session_journal import JournalCorruptError, SessionJournal
+    from nora.sanitizer import Sanitizer
+
+    journal = SessionJournal(
+        journal_dir=journal_dir,
+        max_trace_steps=50,
+        sanitizer=Sanitizer(),
+        enabled=True,
+    )
+
+    # Pre-create the canonical file with bytes that are NOT valid JSON.
+    sid = journal.session_id
+    bad_path = journal_dir / f"{sid}.json"
+    bad_path.write_text("{not valid json at all -- oops")
+
+    with pytest.raises(JournalCorruptError) as excinfo:
+        journal.get_state()
+
+    # The path is included so the operator knows which file is bad.
+    assert str(bad_path) in str(excinfo.value) or bad_path.name in str(excinfo.value), (
+        f"Expected the corrupt path in the message; got: {excinfo.value!r}"
+    )
+
+
+def test_next_write_auto_recovers_by_archiving_corrupt(journal_dir: Path) -> None:
+    """R11-S2 — the next write auto-recovers by archiving the corrupt file."""
+    from datetime import datetime, timezone
+
+    from nora.core.session_journal import JournalCorruptError, SessionJournal
+    from nora.sanitizer import Sanitizer
+
+    journal = SessionJournal(
+        journal_dir=journal_dir,
+        max_trace_steps=50,
+        sanitizer=Sanitizer(),
+        enabled=True,
+    )
+    sid = journal.session_id
+    bad_path = journal_dir / f"{sid}.json"
+    bad_path.write_text("{not json}")
+
+    # First call raises; the file is still corrupt.
+    with pytest.raises(JournalCorruptError):
+        journal.get_state()
+
+    # Next write auto-recovers.
+    journal.record_step(
+        tool="probe",
+        input_args={},
+        result_summary="ok",
+        duration_ms=1,
+        outcome="success",
+        ts=datetime.now(timezone.utc),
+    )
+
+    # An archived .corrupt-*.json file exists.
+    archived = list(journal_dir.glob(f"{sid}.corrupt-*.json"))
+    assert len(archived) == 1, f"Expected one archived corrupt file; got {archived!r}"
+    assert archived[0].read_text() == "{not json}", (
+        "Archived file should preserve the original bad bytes"
+    )
+
+    # The canonical file is fresh and parses.
+    fresh = list(journal_dir.glob(f"{sid}.json"))
+    assert len(fresh) == 1
+    state = journal.get_state()
+    assert state.session_id == sid
+    assert len(state.trace) == 1
+
+
+# ---------------------------------------------------------------------------
+# R18 — POSIX 0o600 mode on the canonical file
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="0o600 is POSIX-only")
+def test_canonical_file_mode_0o600_on_posix(journal_dir: Path) -> None:
+    """R18-S1 — the file mode after `_persist` is exactly 0o600 on POSIX."""
+    from datetime import datetime, timezone
+
+    journal = _fresh_journal(journal_dir)
+    journal.record_step(
+        tool="nora_health",
+        input_args={},
+        result_summary="ok",
+        duration_ms=1,
+        outcome="success",
+        ts=datetime.now(timezone.utc),
+    )
+
+    files = list(journal_dir.glob("*.json"))
+    assert len(files) == 1
+    mode = files[0].stat().st_mode & 0o777
+    assert mode == 0o600, f"Expected mode 0o600; got 0o{mode:o}"
