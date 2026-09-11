@@ -275,3 +275,106 @@ def test_session_id_stable_across_many_writes(journal_dir: Path) -> None:
     state = journal.get_state()
     assert state.session_id == initial_sid
     assert all(s.tool == f"tool-{i}" for i, s in enumerate(state.trace))
+
+
+# ---------------------------------------------------------------------------
+# R6 — free-text sanitization boundary (write + read).
+# ---------------------------------------------------------------------------
+
+
+def test_private_ipv4_in_llm_interpretation_is_masked_on_write(journal_dir: Path) -> None:
+    """R6-S1 — a private IPv4 in `llm_interpretation` is masked before persistence.
+
+    The alias appears on disk; the literal `10.0.0.5` MUST NOT survive.
+    """
+    from datetime import datetime, timezone
+
+    journal = _fresh_journal(journal_dir)
+    journal.record_step(
+        tool="nora_health",
+        input_args={},
+        result_summary="ok",
+        duration_ms=0,
+        outcome="success",
+        ts=datetime.now(timezone.utc),
+        llm_interpretation="investigation at 10.0.0.5",
+    )
+
+    files = list(journal_dir.glob("*.json"))
+    raw = files[0].read_text()
+    assert "10.0.0.5" not in raw, f"Private IPv4 literal leaked to disk: {raw!r}"
+    # The on-disk literal was replaced by an alias-shaped token.
+    assert "RADIO_NODE_" in raw, f"Expected an alias on disk; got: {raw!r}"
+
+
+def test_structured_fields_bypass_sanitizer(journal_dir: Path) -> None:
+    """R6-S3 — `tool` / `step` / `duration_ms` MUST be byte-identical on read."""
+    from datetime import datetime, timezone
+
+    journal = _fresh_journal(journal_dir)
+    journal.record_step(
+        tool="nora_health",
+        input_args={},
+        result_summary="ok",
+        duration_ms=12,
+        outcome="success",
+        ts=datetime.now(timezone.utc),
+    )
+
+    state = journal.get_state()
+    step = state.trace[0]
+    assert step.tool == "nora_health"
+    assert step.step == 1
+    assert step.duration_ms == 12
+
+
+def test_result_summary_is_sanitized_on_write(journal_dir: Path) -> None:
+    """R6 — `result_summary` runs through Sanitizer on write.
+
+    A hostname literal in the summary MUST be replaced by an alias.
+    """
+    from datetime import datetime, timezone
+
+    journal = _fresh_journal(journal_dir)
+    journal.record_step(
+        tool="nora_health",
+        input_args={},
+        result_summary="probe failed at router-core-01.example.com",
+        duration_ms=0,
+        outcome="success",
+        ts=datetime.now(timezone.utc),
+    )
+
+    files = list(journal_dir.glob("*.json"))
+    raw = files[0].read_text()
+    assert "router-core-01.example.com" not in raw, f"Hostname literal leaked to disk: {raw!r}"
+    assert "HOST_" in raw, f"Expected a HOST_ alias on disk; got: {raw!r}"
+
+
+# ---------------------------------------------------------------------------
+# R10 — name-keyed redaction on the persisted step's `input`.
+# ---------------------------------------------------------------------------
+
+
+def test_redacted_input_key_does_not_appear_on_disk(journal_dir: Path) -> None:
+    """R10 — `kwargs["community"]` value MUST NOT survive the write.
+
+    The literal `private` (the value) MUST NOT be in the canonical file.
+    The marker `[REDACTED]` MUST appear in the on-disk JSON.
+    """
+    from datetime import datetime, timezone
+
+    journal = _fresh_journal(journal_dir)
+    journal.record_step(
+        tool="snmp_get",
+        input_args={"device_id": "ap-7400-01", "community": "private"},
+        result_summary="ok",
+        duration_ms=1,
+        outcome="success",
+        ts=datetime.now(timezone.utc),
+    )
+
+    files = list(journal_dir.glob("*.json"))
+    raw = files[0].read_text()
+    assert "private" not in raw, f"Redacted value leaked: {raw!r}"
+    assert "[REDACTED]" in raw, f"Expected redaction marker on disk; got: {raw!r}"

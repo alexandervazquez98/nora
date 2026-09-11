@@ -36,6 +36,7 @@ from nora.core.session_paths import (
     ensure_journal_dir,
     ndjson_path,
 )
+from nora.core.session_redaction import REDACTION_LIST, redact
 from nora.sanitizer import Sanitizer
 
 logger = logging.getLogger("nora.core.session_journal")
@@ -157,11 +158,21 @@ class SessionJournal:
             )
 
         state = self._load_or_create()
-        # R10: no-op in this commit (added in #5).
-        # R6:  no-op in this commit (added in #5).
-        sanitized_input = input_args
-        sanitized_summary = result_summary
-        sanitized_llm = llm_interpretation
+        # R10: redact by key name first, so the [REDACTED] marker never
+        # reaches the sanitizer (which would otherwise mangle `REDACTED`
+        # because it matches the SERIAL regex).
+        redacted_input = redact(input_args)
+        # R6: sanitize the redacted tree; skip sanitization at keys on
+        # REDACTION_LIST so the marker survives. Free-text values inside
+        # un-redacted keys still pass through Sanitizer.sanitize.
+        sanitized_input = _sanitize_tree(redacted_input, self._sanitizer)
+        # R6: free-text scalars pass directly through sanitize.
+        sanitized_summary = self._sanitizer.sanitize(result_summary).text
+        sanitized_llm = (
+            self._sanitizer.sanitize(llm_interpretation).text
+            if llm_interpretation is not None
+            else None
+        )
 
         next_step = _next_step(state)
         step = SessionStep(
@@ -264,6 +275,31 @@ def _next_step(state: SessionState) -> int:
     if not state.trace:
         return 1
     return state.trace[-1].step + 1
+
+
+def _sanitize_tree(value: Any, sanitizer: Sanitizer) -> Any:
+    """Apply `sanitizer` to every free-text string in `value`.
+
+    R6 ordering: redaction has already happened, so any string at a key
+    on `REDACTION_LIST` is the literal `_REDACTION_MARKER` — we MUST NOT
+    pass it through the sanitizer (else `REDACTED` would be re-aliased
+    to `SERIAL_X`). Sibling free-text strings still pass through.
+
+    Pure: returns a new structure; never mutates the input.
+    """
+    if isinstance(value, dict):
+        out: dict[Any, Any] = {}
+        for key, item in value.items():
+            if isinstance(key, str) and key in REDACTION_LIST:
+                out[key] = item  # leave the marker untouched
+            else:
+                out[key] = _sanitize_tree(item, sanitizer)
+        return out
+    if isinstance(value, list):
+        return [_sanitize_tree(v, sanitizer) for v in value]
+    if isinstance(value, str):
+        return sanitizer.sanitize(value).text
+    return value
 
 
 # ---------------------------------------------------------------------------
