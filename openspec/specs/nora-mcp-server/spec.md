@@ -8,14 +8,13 @@ Defines how NORA boots the FastMCP server over stdio, registers the `nora_health
 
 ### Requirement: FastMCP Boot Over Stdio
 
-The server MUST boot via `FastMCP("nora")`, MUST register tools via `@mcp.tool`, and MUST run over stdio by default. FastMCP MUST be pinned to `>=3.2,<4` (v3 stable; v4 ships breaking changes to background tasks).
+The server MUST boot via `FastMCP("nora")` and register exactly four `@mcp.tool` functions over stdio. FastMCP MUST be pinned to `>=3.2,<4`. Boot MUST NOT construct `LLMProvider`, MUST NOT call `init_session_journal`, MUST NOT register `_AutoTraceMiddleware`.
 
 #### Scenario: server registers and runs over stdio
 
-- GIVEN the server module imports FastMCP and registers `nora_health`
+- GIVEN `src/nora/cli.py` imports `mcp` from `src/nora/server.py`
 - WHEN `mcp.run()` is called
-- THEN the server listens on stdio
-- AND NORA code does not write to stdout
+- THEN the server listens on stdio AND NORA code does not write to stdout
 
 #### Scenario: pinned FastMCP version
 
@@ -23,38 +22,15 @@ The server MUST boot via `FastMCP("nora")`, MUST register tools via `@mcp.tool`,
 - WHEN its dependencies are listed
 - THEN `fastmcp` is pinned to `>=3.2,<4`
 
-### Requirement: `nora_health` Tool Contract
-
-`nora_health` MUST return a JSON-serialisable object with four fields: `version`, `active_provider`, `connectivity`, `env_loaded`. The tool MUST invoke `provider.complete(...)` with a fixed system prompt and MUST NOT mutate any device state.
-
-#### Scenario: healthy server returns all four fields
-
-- GIVEN the active provider is reachable
-- WHEN `nora_health` is invoked
-- THEN the response includes all four fields with `connectivity: ok`
-
-#### Scenario: provider unreachable reports unavailable
-
-- GIVEN the active provider is unreachable
-- WHEN `nora_health` is invoked
-- THEN `connectivity` reports unavailable
-- AND the tool does NOT raise
-
-#### Scenario: `.env` not present is reported
-
-- GIVEN no `.env` file is present
-- WHEN `nora_health` is invoked
-- THEN `env_loaded == false`
-
 ### Requirement: Stderr-Only Logging
 
-Every log line emitted by NORA MUST go to stderr. No code path under `src/nora/` MAY write to stdout. The ruff rule banning `print(...)` in `src/nora/` is part of this contract.
+Every log line emitted by NORA MUST go to stderr. No code path under `src/nora/` MAY write to stdout.
 
 #### Scenario: stderr receives a startup log line
 
 - GIVEN the server starts
 - WHEN stderr is captured
-- THEN a log line names the active provider and model
+- THEN a log line names the boot surface
 
 #### Scenario: stdout is reserved for JSON-RPC
 
@@ -75,174 +51,136 @@ Every free-text value leaving the process via an MCP tool response MUST pass thr
 #### Scenario: free-text fields are sanitized
 
 - GIVEN an upstream error message contains a private IPv4 literal
-- WHEN `nora_health` includes that message
-- THEN the literal is replaced by an alias
+- WHEN `correlate_sector_interference(...)` is invoked
+- THEN the literal is replaced by a synthetic alias
 
 #### Scenario: structured fields bypass the sanitizer
 
-- GIVEN `nora_health` returns the four typed fields
+- GIVEN `search_intervention_history` returns its typed top-level fields
 - WHEN the response is serialised
-- THEN those fields are NOT run through the sanitizer
+- THEN `intervention_id`, `target_ip`, `stage`, `status`, `timestamp_unix` are NOT run through the sanitizer
 
 ### Requirement: Security Boundary — No Secrets in Tool Responses
 
 Every MCP tool MUST NOT include any secret value from `Settings` in any response field, error message, or log line.
 
-#### Scenario: API key never appears in tool response
+#### Scenario: signing key never appears in tool response
 
-- GIVEN `Settings.gemini_api_key` is set
-- WHEN `nora_health` is invoked
-- THEN no field contains the API key value
+- GIVEN `Settings.nora_oid_catalog_signing_key` is set
+- WHEN any of the four tools is invoked
+- THEN no response field contains the signing key value
 
-#### Scenario: API key never appears in error messages
+#### Scenario: signing key never appears in error messages
 
-- GIVEN the active provider fails to initialise
-- WHEN the tool returns an error message
-- THEN the message does NOT contain any secret value
-
-### Requirement: Edge Cases
-
-Malformed JSON-RPC frame and provider timeout MUST be handled without crashing the server.
-
-#### Scenario: malformed input is rejected with a JSON-RPC error
-
-- GIVEN a malformed payload arrives on stdin
-- WHEN the server processes it
-- THEN a JSON-RPC parse error is returned on stdout
-- AND the server continues running
-
-#### Scenario: provider timeout is bounded
-
-- GIVEN the active provider hangs longer than the configured timeout
-- WHEN `nora_health` invokes it
-- THEN the call returns `connectivity: unavailable` within the timeout
+- GIVEN the driver raises an `InventoryError`
+- WHEN the tool returns its error message
+- THEN the message does NOT contain the signing key value
 
 ### Requirement: Observability — Stderr Tool Diagnostics
 
-Each tool invocation MUST emit one structured log line on stderr with tool name, duration, and outcome. The line MUST NOT include any secret value.
+Each tool invocation MUST emit one structured log line on stderr with tool name, duration, and outcome.
 
 #### Scenario: tool call emits a structured log line
 
-- GIVEN `nora_health` is invoked
+- GIVEN `snmp_get_pmp450i_radio_metrics` is invoked
 - WHEN the call completes
 - THEN one stderr line is emitted with tool name, duration, and outcome
-### Requirement: R-NEW-1 — Three Read-Only Tools on the Global MCP Instance
 
-The server SHALL register exactly three new `@mcp.tool`-decorated functions
-on the global `mcp = FastMCP("nora")` instance defined in
-`src/nora/server.py`:
-`search_intervention_history`, `get_device_lifecycle_summary`, and
-`correlate_sector_interference`. Each tool SHALL delegate its body to the
-corresponding pure function in
-`nora.intervention_memory.tools`. The three names SHALL be re-exported in
-`__all__` for test discoverability. The auto-trace middleware registered
-via `register_auto_trace_middleware()` SHALL record every invocation of
-the three new tools under the same `session-journal` R2 contract — no
-middleware change is required.
+### Requirement: R-NEW-1 — Four `@mcp.tool` Registrations
 
-#### ADDED Scenario: server module exports the three new tool names
+The server SHALL register exactly four `@mcp.tool`-decorated functions on the global `mcp = FastMCP("nora")` instance: one driver + three intervention memory. The driver tool SHALL NOT call `nora_session_set_focus`. The four names SHALL be re-exported in `__all__`. No `_AutoTraceMiddleware` is registered.
 
-- GIVEN `src/nora/server.py` imports the three pure functions from `nora.intervention_memory.tools`
-- WHEN `from nora.server import search_intervention_history, get_device_lifecycle_summary, correlate_sector_interference` runs
-- THEN the imports succeed
-- AND the three names appear in `nora.server.__all__`
+#### ADDED Scenario: server module exports the four tool names
 
-#### ADDED Scenario: MCP tool wrappers delegate to the pure library functions
+- GIVEN `src/nora/server.py` imports the driver + three intervention callables
+- WHEN the four names are imported from `nora.server`
+- THEN the imports succeed AND all four names appear in `nora.server.__all__`
 
-- GIVEN a `set_runtime_state(settings=fake_settings, provider=fake_provider)` call
-- WHEN the registered `search_intervention_history(target_ip="10.0.0.5")` MCP tool is invoked
-- THEN `nora.intervention_memory.tools.search_intervention_history` is called exactly once with the same kwargs
-- AND the MCP wrapper returns the library result unchanged
+#### ADDED Scenario: MCP wrappers delegate to library functions
 
-#### ADDED Scenario: auto-trace middleware records a call to the new tool
+- GIVEN `set_runtime_state(settings=fake_settings)` has been called
+- WHEN `search_intervention_history(target_ip="10.0.0.5")` MCP tool is invoked
+- THEN `nora.intervention_memory.tools.search_intervention_history` is called exactly once AND the wrapper returns the library result unchanged
 
-- GIVEN `register_auto_trace_middleware(journal)` has run
-- WHEN the registered `search_intervention_history(...)` MCP tool is invoked
-- THEN the journal's trace gains one `SessionStep` with `tool == "search_intervention_history"`
-- AND `outcome == "success"`
+#### ADDED Scenario: driver tool no longer calls `nora_session_set_focus`
+
+- GIVEN the driver tool is invoked with `device_id="ap-7400-01"`
+- WHEN the call body executes
+- THEN no `nora_session_set_focus(...)` call is attempted AND no journal file is created as a side-effect
 
 ### Requirement: R-NEW-2 — Sanitizer Bound at Tool Boundary
 
-Every free-text field in the three new tools' output SHALL pass through
-`Sanitizer.sanitize(...)` before serialization. Structured top-level
-fields (`intervention_id`, `target_ip`, `stage`, `status`,
-`timestamp_unix`) SHALL bypass per the existing `session-journal` R6
-contract. The bypass list SHALL be inherited as-is from `session-journal`
-R6 — no new bypass keys are added by this delta.
+Every free-text field in the four surviving tools' output SHALL pass through `Sanitizer.sanitize(...)` before serialization. Structured top-level fields SHALL bypass.
 
-#### ADDED Scenario: free-text fields in `search_intervention_history` output are sanitized
+#### ADDED Scenario: free-text fields in `search_intervention_history` are sanitized
 
 - GIVEN a record whose `record_name` contains the literal `10.53.12.4`
 - WHEN `search_intervention_history(target_ip=...)` is invoked via the MCP tool
-- THEN the returned list contains a dict whose `record_name` does NOT include `10.53.12.4`
-- AND it includes a `RADIO_NODE_*` alias
+- THEN the returned list contains a dict whose `record_name` does NOT include `10.53.12.4` AND includes a `RADIO_NODE_*` alias
 
 #### ADDED Scenario: structured top-level fields bypass the sanitizer
 
 - GIVEN a record whose `intervention_id == "INT-1-10.0.0.5-1234567-XYZ"`
 - WHEN `search_intervention_history(...)` returns the record via the MCP tool
-- THEN `record["intervention_id"]` is byte-identical to the on-disk value
-- AND `record["timestamp_unix"]` is byte-identical (int)
-- AND `record["stage"]` is byte-identical (enum string)
+- THEN `record["intervention_id"]`, `record["timestamp_unix"]`, and `record["stage"]` are all byte-identical to the on-disk values
 
 ### Requirement: R-NEW-3 — Hard Read-Only Contract (AST Guard)
 
-The three new tools SHALL NOT mutate any file. The test
-`tests/intervention_memory/test_no_writes.py` SHALL fail any commit that
-introduces a writable file operation under `src/nora/intervention_memory/`.
-The expected failure mode — if a future contributor adds a write tool
-without removing the AST test — is that the build breaks. This is a
-test-time guard only; the server SHALL NOT enforce the read-only contract
-at runtime. The auto-trace middleware records a tool call whose body
-raises `PermissionError` with `outcome == "error"`.
+The three intervention tools SHALL NOT mutate any file. `tests/intervention_memory/test_no_writes.py` SHALL fail any commit that introduces a writable file operation under `src/nora/intervention_memory/`. The driver tool is out of scope for this guard.
 
 #### ADDED Scenario: the AST read-only guard fails on an injected write
 
 - GIVEN a developer adds `Path("/tmp/x").write_text("x")` inside `src/nora/intervention_memory/storage.py`
 - WHEN `uv run pytest tests/intervention_memory/test_no_writes.py` runs
-- THEN the test exits non-zero
-- AND the failure message identifies `(storage.py, <line>, "write_text")`
-
-#### ADDED Scenario: a hypothetical write tool records an error outcome
-
-- GIVEN a hypothetical tool whose body raises `PermissionError("writes are forbidden")`
-- WHEN the auto-trace middleware wraps the call
-- THEN the journal's trace gains one `SessionStep` with `outcome == "error"`
-- AND `result_summary` contains the sanitized message
+- THEN the test exits non-zero AND the failure message identifies `(storage.py, <line>, "write_text")`
 
 ### Requirement: R-NEW-4 — One-Way Cross-Capability Dependency Direction
 
-The dependency between `nora-mcp-server` and `intervention-memory` SHALL
-be one-way: `src/nora/server.py` MAY import from
-`nora.intervention_memory.tools` to wire the `@mcp.tool` registrations.
-The reverse direction SHALL NOT exist: no module under
-`src/nora/intervention_memory/` (other than `shim_webui.py` itself) SHALL
-import from `nora.server`, `nora.drivers`, or any other NORA capability
-that would couple the package to the MCP wiring. The `shim_webui.py`
-mirror is also a one-way consumer — it imports from
-`nora.intervention_memory.tools` and is consumed by external deploy
-scripts (out of repo), not by `nora-mcp-server`.
+`src/nora/server.py` MAY import from `nora.intervention_memory.tools` and from `nora.drivers.snmp_pmp450i.driver`. No module under `src/nora/intervention_memory/` or `src/nora/drivers/` SHALL import from `nora.server`. `shim_webui.py` remains a one-way consumer external to NORA.
 
-#### ADDED Scenario: `nora-mcp-server` imports from `intervention-memory.tools`
+#### ADDED Scenario: `nora-mcp-server` imports from both consumer packages
 
-- GIVEN `src/nora/server.py` adds `from nora.intervention_memory.tools import search_intervention_history as _search, ...`
+- GIVEN `src/nora/server.py` adds the import block from `nora.intervention_memory.tools` and from `nora.drivers.snmp_pmp450i.driver`
 - WHEN the server module is imported
-- THEN no import error is raised
-- AND the three `@mcp.tool` registrations bind to the imported callables
+- THEN no import error is raised AND the four `@mcp.tool` registrations bind to the imported callables
 
-#### ADDED Scenario: `intervention-memory` does not import from `nora.server`
+#### ADDED Scenario: consumer packages do not import from `nora.server`
 
-- GIVEN every `.py` under `src/nora/intervention_memory/` except `shim_webui.py`
-- WHEN a static grep scans for `from nora.server`, `import nora.server`, or `from nora.drivers`
+- GIVEN every `.py` under `src/nora/intervention_memory/` and `src/nora/drivers/` except `shim_webui.py`
+- WHEN a static grep scans for `from nora.server` or `import nora.server`
 - THEN zero matches are found
 
-#### ADDED Scenario: `shim_webui.py` is consumed only by external deploy scripts
+### Requirement: `python -m nora` Deprecation Alias
 
-- GIVEN a static grep across `src/nora/` for `from nora.intervention_memory.shim_webui`
-- WHEN the scan runs
-- THEN the ONLY match is the file itself (the import statement at the top of `shim_webui.py` for self-typing)
-- AND no production module under `src/nora/intervention_memory/` imports from `shim_webui`
+`python -m nora` MUST emit a `DeprecationWarning` whose message contains `will be removed in the next minor release` and MUST delegate to the `nora-mcp` boot sequence, exposing the identical four-tool surface.
 
+#### Scenario: alias emits the deprecation warning and boots the thin surface
+
+- GIVEN the package is installed in editable mode
+- WHEN `python -m nora` is invoked as a subprocess
+- THEN stderr contains one line matching `DeprecationWarning` and `will be removed in the next minor release` AND the four-tool surface is reachable via JSON-RPC
+
+#### Scenario: alias and `nora-mcp` expose identical tool lists
+
+- GIVEN both entry points are reachable
+- WHEN each is asked for its `tools/list` over stdio
+- THEN the two responses contain the same four tool names in the same order
+
+### Requirement: No Boot-Time LLM or Journal Injection
+
+The canonical `nora-mcp` boot (`src/nora/cli.py`) MUST wire `Settings() -> PromptRegistry.from_settings -> OidCatalogRegistry.verify_all -> Inventory.from_yaml -> set_driver -> mcp.run(show_banner=False)`. Boot MUST NOT construct `LLMProvider`, call `init_session_journal`, call `build_provider`, or register `_AutoTraceMiddleware`.
+
+#### Scenario: cli.py has no LLM/journal/middleware wiring
+
+- GIVEN `src/nora/cli.py`
+- WHEN its source is scanned for `build_provider`, `init_session_journal`, `_AutoTraceMiddleware`, `register_auto_trace_middleware`
+- THEN zero matches exist
+
+#### Scenario: server module has no LLMProvider import
+
+- GIVEN `src/nora/server.py` and `src/nora/__main__.py`
+- WHEN their imports are scanned for `LLMProvider` and `build_provider`
+- THEN zero matches exist
 ## Cross-References
 
 Depends on `intervention-memory` capability (read-only consumer). The three new `@mcp.tool` registrations (`search_intervention_history`, `get_device_lifecycle_summary`, `correlate_sector_interference`) delegate to pure functions in `nora.intervention_memory.tools`; the dependency direction is one-way (`nora-mcp-server` → `intervention-memory`, never the reverse). Sanitizer contract inherited from `intervention-memory` R9 / `session-journal` R6. Auto-trace recording inherited from `session-journal` R2 — no middleware change was required for this delta.
