@@ -38,8 +38,31 @@ SAMPLE_CATALOG_KEY: str = "test-catalog-signing-key-do-not-use-in-prod"
 
 @pytest.fixture
 def tmp_catalogs_dir(tmp_path: Path) -> Path:
-    """An empty catalogs directory tree under `tmp_path`."""
+    """An empty catalogs directory tree under `tmp_path`.
+
+    Acts as the *operator* root in PR 1's two-root scan model
+    (the matching built-in baseline lives at
+    `src/nora/data/oid-catalogs/`; tests inject a hermetic built-in
+    via the `tmp_builtin_root` fixture when they need it).
+    """
     d = tmp_path / "oid-catalogs"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+@pytest.fixture
+def tmp_builtin_root(tmp_path: Path) -> Path:
+    """An empty built-in catalogs directory under `tmp_path`.
+
+    Mirrors `tmp_catalogs_dir` but is wired up as the *built-in* root of
+    `OidCatalogRegistry.verify(...)`. Tests that exercise the two-root
+    scan write their hermetic baseline into this directory and pass it
+    as `built_in_root=` while leaving `tmp_catalogs_dir` empty as the
+    operator root (or vice versa). PR 1 ships a single built-in catalog
+    (`cambium/pmp450i/15.2.1.json`) that operators never see directly —
+    it's only reachable through the registry's built-in scan path.
+    """
+    d = tmp_path / "oid-catalogs-builtin"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -47,23 +70,30 @@ def tmp_catalogs_dir(tmp_path: Path) -> Path:
 @pytest.fixture
 def sample_catalog(
     tmp_catalogs_dir: Path,
+    request: Any,
 ) -> dict[str, Any]:
     """Write a signed catalog JSON file and return its payload + key.
 
-    Returns a dict with three keys:
+    Returns a dict with five keys:
 
-    * `path`  — Path to the on-disk catalog file.
-    * `data`  — the parsed JSON payload (object name -> dotted OID).
-    * `key`   — the deterministic HMAC signing key.
+    * `path`     — Path to the on-disk catalog file.
+    * `data`     — the parsed JSON payload (object name -> dotted OID).
+    * `key`      — the deterministic HMAC signing key.
+    * `vendor`   — the catalog's vendor (default ``cambium``).
+    * `model`    — the catalog's model (default ``pmp450i``).
+    * `firmware` — the catalog's firmware string (default ``15.2.1``).
 
-    The HMAC is computed over the canonicalised oids map (sort_keys=True,
-    separators=(",", ":")) so it matches what `OidCatalogRegistry.verify_all`
-    recomputes on boot. Keeping the canonicalisation identical on both
-    ends avoids drift between the test fixture and the verifier.
+    Pass ``vendor=``, ``model=``, or ``firmware=`` kwargs (via
+    ``pytest.mark.parametrize`` with ``indirect=True``) to write the
+    catalog under a different triple. The HMAC is computed over the
+    canonicalised oids map (sort_keys=True, separators=(",", ":"))
+    so it matches what `OidCatalogRegistry.verify` recomputes on boot.
+    Keeping the canonicalisation identical on both ends avoids drift
+    between the test fixture and the verifier.
     """
-    vendor = "cambium"
-    model = "pmp450i"
-    firmware = "15.2.1"
+    vendor = getattr(request, "param", {}).get("vendor", "cambium")
+    model = getattr(request, "param", {}).get("model", "pmp450i")
+    firmware = getattr(request, "param", {}).get("firmware", "15.2.1")
     target_dir = tmp_catalogs_dir / vendor / model
     target_dir.mkdir(parents=True, exist_ok=True)
     path = target_dir / f"{firmware}.json"
