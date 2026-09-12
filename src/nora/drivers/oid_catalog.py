@@ -157,16 +157,40 @@ class OidCatalogRegistry:
             )
         key_bytes = key_str.encode("utf-8")
         catalogs: dict[tuple[str, str, str], OidCatalog] = {}
+        builtin_seen: set[tuple[str, str, str]] = set()
+        operator_seen: set[tuple[str, str, str]] = set()
 
         if built_in_root is not None and built_in_root.exists():
             for path in sorted(built_in_root.rglob("*.json")):
                 vendor, model, firmware, catalog = cls._verify_one(path, key_bytes)
-                catalogs[(vendor, model, firmware)] = catalog
+                ref = (vendor, model, firmware)
+                if ref in builtin_seen:
+                    raise CatalogVerificationError(
+                        path=path,
+                        reason=(
+                            f"duplicate catalog for (vendor={vendor}, model={model}, "
+                            f"firmware={firmware}) in built-in root"
+                        ),
+                    )
+                builtin_seen.add(ref)
+                catalogs[ref] = catalog
 
         if operator_root.exists():
             for path in sorted(operator_root.rglob("*.json")):
                 vendor, model, firmware, catalog = cls._verify_one(path, key_bytes)
-                catalogs[(vendor, model, firmware)] = catalog
+                ref = (vendor, model, firmware)
+                # Operator wins on collision: the same triple already
+                # loaded from built-in is silently shadowed.
+                if ref in operator_seen:
+                    raise CatalogVerificationError(
+                        path=path,
+                        reason=(
+                            f"duplicate catalog for (vendor={vendor}, model={model}, "
+                            f"firmware={firmware}) in operator root"
+                        ),
+                    )
+                operator_seen.add(ref)
+                catalogs[ref] = catalog
 
         return cls(_catalogs_path=operator_root, _catalogs=catalogs)
 

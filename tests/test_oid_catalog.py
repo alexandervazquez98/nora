@@ -25,6 +25,19 @@ from nora.drivers.oid_catalog import (  # noqa: PLC0415
     OidCatalogRegistry,
 )
 
+# Local mirror of the conftest fixture payload + signing key. Tests use
+# the same payload as `sample_catalog` so HMACs stay bit-identical across
+# the single-root and multi-root cases.
+_SAMPLE_BUILTIN_OIDS: dict[str, str] = {
+    "radioDownlinkRate": "1.3.6.1.4.1.161.19.3.1.1.1.0",
+    "radioUplinkRate": "1.3.6.1.4.1.161.19.3.1.1.2.0",
+    "signalStrengthRx": "1.3.6.1.4.1.161.19.3.1.1.3.0",
+    "signalStrengthTx": "1.3.6.1.4.1.161.19.3.1.1.4.0",
+    "ssr": "1.3.6.1.4.1.161.19.3.1.1.5.0",
+    "modulationMode": "1.3.6.1.4.1.161.19.3.1.1.6.0",
+}
+SAMPLE_CATALOG_KEY: str = "test-catalog-signing-key-do-not-use-in-prod"
+
 # ---------------------------------------------------------------------------
 # Schema constants — pinned for the v1 fixture shipped with the change
 # ---------------------------------------------------------------------------
@@ -359,7 +372,208 @@ class TestMultiRoot:
             )
         assert "radioDownlinkRate" in str(exc.value)
 
+    def test_operator_wins(
+        self,
+        tmp_builtin_root: Path,
+        tmp_catalogs_dir: Path,
+    ) -> None:
+        """Scenario: operator override wins on conflict.
+
+        Both roots contain a valid signed catalog for the same
+        ``(cambium, pmp450i, 15.2.1)`` triple. The operator's catalog
+        carries a sentinel OID value (``signalStrengthRx = "operator"``)
+        and the built-in carries a different sentinel. Resolving the
+        triple MUST return the operator copy; the built-in copy is
+        shadowed.
+        """
+        builtin_payload = dict(_SAMPLE_BUILTIN_OIDS)
+        builtin_payload["signalStrengthRx"] = "1.3.6.1.4.1.161.19.3.1.1.999.0"  # built-in
+        builtin_path = _write_signed_catalog(
+            tmp_builtin_root,
+            vendor="cambium",
+            model="pmp450i",
+            firmware="15.2.1",
+            oids=builtin_payload,
+            key=SAMPLE_CATALOG_KEY,
+        )
+
+        operator_payload = dict(_SAMPLE_BUILTIN_OIDS)
+        operator_payload["signalStrengthRx"] = "1.3.6.1.4.1.161.19.3.1.1.3.0"  # operator
+        operator_path = _write_signed_catalog(
+            tmp_catalogs_dir,
+            vendor="cambium",
+            model="pmp450i",
+            firmware="15.2.1",
+            oids=operator_payload,
+            key=SAMPLE_CATALOG_KEY,
+        )
+
+        registry = OidCatalogRegistry.verify(
+            built_in_root=tmp_builtin_root,
+            operator_root=tmp_catalogs_dir,
+            signing_key=SAMPLE_CATALOG_KEY,
+        )
+        catalog = registry.resolve(("cambium", "pmp450i", "15.2.1"))
+        # Operator wins → its sentinel survives.
+        assert catalog.oids["signalStrengthRx"] == "1.3.6.1.4.1.161.19.3.1.1.3.0"
+        # Sanity: both files exist on disk so we know we actually wrote two roots.
+        assert builtin_path.exists() and operator_path.exists()
+        # And the registry has exactly one entry for the shared triple.
+        assert ("cambium", "pmp450i", "15.2.1") in {tuple(r) for r in registry.loaded_refs}
+
+    def test_deterministic_two_root_scan(
+        self,
+        tmp_builtin_root: Path,
+        tmp_catalogs_dir: Path,
+    ) -> None:
+        """Scenario: deterministic two-root scan with override precedence.
+
+        Built-in holds a disjoint triple ``(cambium, pmp450i, 15.3.0)``
+        AND shares the canonical ``(cambium, pmp450i, 15.2.1)`` with the
+        operator (which also carries the disjoint
+        ``(cambium, pmp450i, 15.3.5)``). Running ``verify`` twice with
+        identical inputs MUST yield identical ``loaded_refs`` and the
+        shared triple must resolve to the operator copy.
+        """
+        _write_signed_catalog(
+            tmp_builtin_root,
+            vendor="cambium",
+            model="pmp450i",
+            firmware="15.2.1",
+            oids=dict(_SAMPLE_BUILTIN_OIDS),
+            key=SAMPLE_CATALOG_KEY,
+        )
+        _write_signed_catalog(
+            tmp_builtin_root,
+            vendor="cambium",
+            model="pmp450i",
+            firmware="15.3.0",
+            oids=dict(_SAMPLE_BUILTIN_OIDS),
+            key=SAMPLE_CATALOG_KEY,
+        )
+        _write_signed_catalog(
+            tmp_catalogs_dir,
+            vendor="cambium",
+            model="pmp450i",
+            firmware="15.2.1",
+            oids=dict(_SAMPLE_BUILTIN_OIDS),
+            key=SAMPLE_CATALOG_KEY,
+        )
+        _write_signed_catalog(
+            tmp_catalogs_dir,
+            vendor="cambium",
+            model="pmp450i",
+            firmware="15.3.5",
+            oids=dict(_SAMPLE_BUILTIN_OIDS),
+            key=SAMPLE_CATALOG_KEY,
+        )
+
+        first = OidCatalogRegistry.verify(
+            built_in_root=tmp_builtin_root,
+            operator_root=tmp_catalogs_dir,
+            signing_key=SAMPLE_CATALOG_KEY,
+        )
+        second = OidCatalogRegistry.verify(
+            built_in_root=tmp_builtin_root,
+            operator_root=tmp_catalogs_dir,
+            signing_key=SAMPLE_CATALOG_KEY,
+        )
+        assert first.loaded_refs == second.loaded_refs
+        # Two built-ins + two operators, one collision → 3 distinct triples.
+        assert len(first.loaded_refs) == 3
+        assert {tuple(r) for r in first.loaded_refs} == {
+            ("cambium", "pmp450i", "15.2.1"),
+            ("cambium", "pmp450i", "15.3.0"),
+            ("cambium", "pmp450i", "15.3.5"),
+        }
+        # The operator wins on the shared triple.
+        catalog = first.resolve(("cambium", "pmp450i", "15.2.1"))
+        assert catalog.oids["signalStrengthRx"] == "1.3.6.1.4.1.161.19.3.1.1.3.0"
+
+    def test_duplicate_within_root_raises_catalog_verification_error(
+        self,
+        tmp_catalogs_dir: Path,
+    ) -> None:
+        """Two JSON files in the same root with the same triple → typed failure.
+
+        ADR #17 P1 risk mitigation: silent override would mask operator
+        mistakes (e.g. dropping a new firmware in twice). The verifier
+        MUST raise ``CatalogVerificationError`` naming the colliding
+        triple so the operator can find the duplicate. Two distinct
+        filenames (``15.2.1.json`` + ``15.2.1.bak.json``) with the same
+        envelope triple reproduce the case without one write clobbering
+        the other.
+        """
+        # Drop two distinct JSON files at the same vendor/model/firmware
+        # triple inside the operator root.
+        _write_signed_catalog(
+            tmp_catalogs_dir,
+            vendor="cambium",
+            model="pmp450i",
+            firmware="15.2.1",
+            oids=dict(_SAMPLE_BUILTIN_OIDS),
+            key=SAMPLE_CATALOG_KEY,
+        )
+        # Write a SECOND catalog file with the same triple but a
+        # different oids payload (different sentinel). Re-signed so HMAC
+        # verifies; the verifier MUST still complain about the duplicate.
+        duplicate_payload = dict(_SAMPLE_BUILTIN_OIDS)
+        duplicate_payload["signalStrengthRx"] = "1.3.6.1.4.1.161.19.3.1.1.777.0"
+        _write_signed_catalog(
+            tmp_catalogs_dir,
+            vendor="cambium",
+            model="pmp450i",
+            firmware="15.2.1",
+            oids=duplicate_payload,
+            key=SAMPLE_CATALOG_KEY,
+            filename="15.2.1.bak.json",
+        )
+
+        with pytest.raises(CatalogVerificationError) as exc:
+            OidCatalogRegistry.verify(
+                built_in_root=None,
+                operator_root=tmp_catalogs_dir,
+                signing_key=SAMPLE_CATALOG_KEY,
+            )
+        assert "duplicate" in str(exc.value).lower() or "collision" in str(exc.value).lower()
+
 
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
+
+
+def _write_signed_catalog(
+    root: Path,
+    *,
+    vendor: str,
+    model: str,
+    firmware: str,
+    oids: dict[str, str],
+    key: str,
+    filename: str | None = None,
+) -> Path:
+    """Sign `oids` with `key` and write the envelope under `<root>/<v>/<m>/<filename>`.
+
+    Defaults to the canonical `<firmware>.json` filename so callers that
+    want a single file per triple can ignore ``filename``. Tests that
+    need to provoke a within-root duplicate (same envelope triple, two
+    distinct filenames on disk) pass a non-default ``filename`` to keep
+    both files on disk after the second write.
+    """
+    target_dir = root / vendor / model
+    target_dir.mkdir(parents=True, exist_ok=True)
+    fname = filename if filename is not None else f"{firmware}.json"
+    path = target_dir / fname
+    canonical_body = json.dumps(oids, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    sig = hmac.new(key.encode(), canonical_body, hashlib.sha256).hexdigest()
+    envelope = {
+        "version": 1,
+        "vendor": vendor,
+        "model": model,
+        "firmware": firmware,
+        "oids": oids,
+        "hmac_sha256": sig,
+    }
+    path.write_text(json.dumps(envelope))
+    return path
