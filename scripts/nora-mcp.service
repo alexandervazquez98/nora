@@ -1,0 +1,62 @@
+[Unit]
+Description=NORA MCP server (Network Operations & Remediation Assistant)
+Documentation=https://github.com/alexandervazquez98/nora
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nora
+Group=nora
+WorkingDirectory=/opt/nora
+
+# Use the console script installed by `uv sync` into the project venv.
+ExecStart=/opt/nora/.venv/bin/nora-mcp
+
+# Restart on failure (boot abort from HMAC mismatch, etc.). NOT on clean
+# exit — systemd's default `Restart=no` is correct for an MCP server that
+# exits only when explicitly stopped or when boot fails; systemd will then
+# keep `Restart=on-failure` waiting for an operator to fix the env.
+Restart=on-failure
+RestartSec=5
+
+# Runtime config + signing key live here. File mode MUST be 0600 owned by
+# `nora:nora`. NEVER commit this file or include the signing key in the
+# unit definition.
+EnvironmentFile=/etc/nora/nora.env
+
+# ----- Hardening (defense in depth — NORA is a sensitive tool) -----------
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+MemoryDenyWriteExecute=true
+
+# NORA needs write access ONLY to the interventions directory (read by
+# NORA itself; written by OpenChat's deploy scripts). Everything else on
+# the filesystem is read-only or absent.
+ReadWritePaths=/var/lib/nora/interventions /var/log/nora
+
+# Limit the process surface to the system call set it actually uses.
+# `SystemCallArchitectures=native` blocks 32-bit syscalls; `SystemCallFilter`
+# with a deny list is the strict option but requires tuning — start with
+# the safer default `@system-service` and tighten later.
+SystemCallArchitectures=native
+
+# ----- Logging -------------------------------------------------------------
+# All stderr goes to journald. `nora-mcp` is intentionally noisy on boot
+# (one INFO line per tool call via `_ToolLogMiddleware`). Operators tail
+# with `journalctl -u nora-mcp -f`.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=nora-mcp
+
+[Install]
+WantedBy=multi-user.target
