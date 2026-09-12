@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -639,6 +640,99 @@ class TestMultiRoot:
         assert ("cambium", "pmp450i", "15.2.1") in {tuple(ref) for ref in registry.loaded_refs}
         catalog = registry.resolve(("cambium", "pmp450i", "15.2.1"))
         assert catalog.oids["ssr"] == "1.3.6.1.4.1.161.19.3.1.1.5.0"
+
+
+# ---------------------------------------------------------------------------
+# PR 2 — Semver-aware firmware resolution (ADR #17 P2)
+# ---------------------------------------------------------------------------
+
+
+class TestSemverResolution:
+    """PR 2: ``resolve`` compares firmware strings semver-aware.
+
+    Each scenario maps directly to a spec acceptance scenario in
+    `openspec/changes/2026-09-12-oid-catalog-hybrid-semver/spec.md`:
+
+    * ``test_exact_match_returns_without_warning`` → ``Semver-Aware
+      Firmware Resolution > exact match returns without warning``.
+    * ``test_pre_release_request_matches_bare_version`` → ``Semver-Aware
+      Firmware Resolution > pre-release request matches the bare
+      version``.
+    * ``test_major_mismatch_raises_typed_exception`` → ``Strict-Major
+      Hard Fail > major mismatch raises a typed exception``.
+    * ``test_minor_mismatch_returns_closest_lower_minor_with_literal_warning`` →
+      ``Minor Descending Fallback With Literal Warning > minor mismatch
+      returns closest lower minor with literal warning``.
+    """
+
+    def test_exact_match_returns_without_warning(
+        self,
+        tmp_catalogs_dir: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Scenario: exact match returns without warning.
+
+        Registry holds ``(cambium, pmp450i, 15.2.1)``. ``resolve`` of
+        the same triple returns the catalog silently — no WARNING-level
+        record is emitted. ADR #17 P2 acceptance: "Firmware idéntico al
+        catálogo: sin warning".
+        """
+        _write_signed_catalog(
+            tmp_catalogs_dir,
+            vendor="cambium",
+            model="pmp450i",
+            firmware="15.2.1",
+            oids=dict(_SAMPLE_BUILTIN_OIDS),
+            key=SAMPLE_CATALOG_KEY,
+        )
+        registry = OidCatalogRegistry.verify(
+            built_in_root=None,
+            operator_root=tmp_catalogs_dir,
+            signing_key=SAMPLE_CATALOG_KEY,
+        )
+
+        with caplog.at_level(logging.WARNING, logger="nora.drivers.oid_catalog"):
+            catalog = registry.resolve(("cambium", "pmp450i", "15.2.1"))
+
+        assert catalog.firmware == "15.2.1"
+        assert all(r.levelno < logging.WARNING for r in caplog.records), (
+            f"Exact match must not emit WARNING; got: {[r.getMessage() for r in caplog.records]!r}"
+        )
+
+    def test_pre_release_request_matches_bare_version(
+        self,
+        tmp_catalogs_dir: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Scenario: pre-release request matches the bare version.
+
+        Registry holds ``(cambium, pmp450i, 15.2.1)``. Requesting
+        ``15.2.1-rc.1`` returns the catalog at ``15.2.1`` without warning
+        (pre-release and build metadata are stripped before compare via
+        ``packaging.version.Version(...).base_version``).
+        """
+        _write_signed_catalog(
+            tmp_catalogs_dir,
+            vendor="cambium",
+            model="pmp450i",
+            firmware="15.2.1",
+            oids=dict(_SAMPLE_BUILTIN_OIDS),
+            key=SAMPLE_CATALOG_KEY,
+        )
+        registry = OidCatalogRegistry.verify(
+            built_in_root=None,
+            operator_root=tmp_catalogs_dir,
+            signing_key=SAMPLE_CATALOG_KEY,
+        )
+
+        with caplog.at_level(logging.WARNING, logger="nora.drivers.oid_catalog"):
+            catalog = registry.resolve(("cambium", "pmp450i", "15.2.1-rc.1"))
+
+        assert catalog.firmware == "15.2.1"
+        assert all(r.levelno < logging.WARNING for r in caplog.records), (
+            "Pre-release strip must not emit WARNING; got: "
+            f"{[r.getMessage() for r in caplog.records]!r}"
+        )
 
 
 # ---------------------------------------------------------------------------
