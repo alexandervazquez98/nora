@@ -559,3 +559,251 @@ def test_known_pre_existing_offline_subscribers_from_latest_pre_diagnostic(tmp_p
     # The newer record's MAC literal is masked (sanitized).
     assert "aa:bb:cc:dd:ee:02" not in subs[0]["mac"]
     assert "SWITCH_ACC_" in subs[0]["mac"]
+
+
+# ---------------------------------------------------------------------------
+# R6 — correlate_sector_interference
+# ---------------------------------------------------------------------------
+
+
+def _make_corr_record(
+    *,
+    intervention_id: str,
+    system_name: str,
+    carrier_frequency_mhz: float | None,
+    timestamp_unix: int,
+    target_ip: str = "10.0.0.50",
+) -> dict[str, Any]:
+    """Build a record shaped for correlation tests (system_name + carrier)."""
+    return _make_record(
+        intervention_id=intervention_id,
+        target_ip=target_ip,
+        timestamp_unix=timestamp_unix,
+        system_name=system_name,
+        carrier_frequency_mhz=carrier_frequency_mhz,
+    )
+
+
+def test_correlate_equal_carrier_returns_co_channel(tmp_path: Path) -> None:
+    """`carrier == target` → CO_CHANNEL."""
+    from nora.intervention_memory.tools import correlate_sector_interference
+    from nora.sanitizer import Sanitizer
+
+    settings = _settings_for(tmp_path, correlate_limit=20)
+    _write_record(
+        tmp_path / "r1.json",
+        _make_corr_record(
+            intervention_id="INT-1",
+            system_name="TWR-ISABEL-5GHZ-A",
+            carrier_frequency_mhz=5760.0,
+            timestamp_unix=100,
+        ),
+    )
+    sanitizer = Sanitizer()
+
+    result = correlate_sector_interference(
+        settings,
+        tower_name="TWR-ISABEL",
+        target_frequency_mhz=5760.0,
+        channel_width_mhz=20.0,
+        sanitizer=sanitizer,
+    )
+
+    assert len(result["detected_conflicts"]) == 1
+    conflict = result["detected_conflicts"][0]
+    assert conflict["potential_conflict"] == "CO_CHANNEL"
+    assert conflict["frequency_delta_mhz"] == 0.0
+    assert conflict["carrier_frequency_mhz"] == 5760.0
+
+
+def test_correlate_nearby_carrier_returns_adjacent_channel(tmp_path: Path) -> None:
+    """`0.5 <= delta < width` → ADJACENT_CHANNEL."""
+    from nora.intervention_memory.tools import correlate_sector_interference
+    from nora.sanitizer import Sanitizer
+
+    settings = _settings_for(tmp_path, correlate_limit=20)
+    _write_record(
+        tmp_path / "r1.json",
+        _make_corr_record(
+            intervention_id="INT-1",
+            system_name="TWR-ISABEL-5GHZ-B",
+            carrier_frequency_mhz=5770.0,
+            timestamp_unix=100,
+        ),
+    )
+    sanitizer = Sanitizer()
+
+    result = correlate_sector_interference(
+        settings,
+        tower_name="TWR-ISABEL",
+        target_frequency_mhz=5760.0,
+        channel_width_mhz=20.0,
+        sanitizer=sanitizer,
+    )
+
+    assert len(result["detected_conflicts"]) == 1
+    conflict = result["detected_conflicts"][0]
+    assert conflict["potential_conflict"] == "ADJACENT_CHANNEL"
+    assert conflict["frequency_delta_mhz"] == 10.0
+
+
+def test_correlate_tower_mismatch_returns_zero_conflicts(tmp_path: Path) -> None:
+    """Tower substring doesn't match → `detected_conflicts == []`, `is_frequency_clear_on_tower is True`."""
+    from nora.intervention_memory.tools import correlate_sector_interference
+    from nora.sanitizer import Sanitizer
+
+    settings = _settings_for(tmp_path, correlate_limit=20)
+    _write_record(
+        tmp_path / "r1.json",
+        _make_corr_record(
+            intervention_id="INT-1",
+            system_name="TWR-PASO-5GHZ-A",
+            carrier_frequency_mhz=5760.0,
+            timestamp_unix=100,
+        ),
+    )
+    sanitizer = Sanitizer()
+
+    result = correlate_sector_interference(
+        settings,
+        tower_name="TWR-ISABEL",
+        target_frequency_mhz=5760.0,
+        channel_width_mhz=20.0,
+        sanitizer=sanitizer,
+    )
+
+    assert result["detected_conflicts"] == []
+    assert result["is_frequency_clear_on_tower"] is True
+
+
+def test_correlate_result_neighbor_sanitized(tmp_path: Path) -> None:
+    """Neighbor device `system_name` containing a private IP is masked in output."""
+    from nora.intervention_memory.tools import correlate_sector_interference
+    from nora.sanitizer import Sanitizer
+
+    settings = _settings_for(tmp_path, correlate_limit=20)
+    # system_name with an RFC 1918 IP appended (separated by space so the
+    # sanitizer's IP regex lookbehind can match).
+    _write_record(
+        tmp_path / "r1.json",
+        _make_corr_record(
+            intervention_id="INT-1",
+            system_name="TWR-ISABEL-5GHZ-A 10.0.0.99",
+            carrier_frequency_mhz=5760.0,
+            timestamp_unix=100,
+        ),
+    )
+    sanitizer = Sanitizer()
+
+    result = correlate_sector_interference(
+        settings,
+        tower_name="TWR-ISABEL",
+        target_frequency_mhz=5760.0,
+        channel_width_mhz=20.0,
+        sanitizer=sanitizer,
+    )
+
+    assert len(result["detected_conflicts"]) == 1
+    neighbor_device = result["detected_conflicts"][0]["neighbor_device"]
+    assert "10.0.0.99" not in neighbor_device
+    assert "RADIO_NODE_" in neighbor_device
+
+
+def test_correlate_skips_records_without_carrier_frequency(tmp_path: Path) -> None:
+    """Records missing `carrier_frequency_mhz` are ignored (no `system_name` match either)."""
+    from nora.intervention_memory.tools import correlate_sector_interference
+    from nora.sanitizer import Sanitizer
+
+    settings = _settings_for(tmp_path, correlate_limit=20)
+    # Record has system_name but NO carrier_frequency_mhz.
+    _write_record(
+        tmp_path / "r1.json",
+        _make_corr_record(
+            intervention_id="INT-1",
+            system_name="TWR-ISABEL-5GHZ-A",
+            carrier_frequency_mhz=None,
+            timestamp_unix=100,
+        ),
+    )
+    sanitizer = Sanitizer()
+
+    result = correlate_sector_interference(
+        settings,
+        tower_name="TWR-ISABEL",
+        target_frequency_mhz=5760.0,
+        channel_width_mhz=20.0,
+        sanitizer=sanitizer,
+    )
+
+    assert result["detected_conflicts"] == []
+    assert result["is_frequency_clear_on_tower"] is True
+
+
+def test_correlate_returns_top_level_fields(tmp_path: Path) -> None:
+    """Result shape includes all 5 top-level fields."""
+    from nora.intervention_memory.tools import correlate_sector_interference
+    from nora.sanitizer import Sanitizer
+
+    settings = _settings_for(tmp_path)
+    sanitizer = Sanitizer()
+
+    result = correlate_sector_interference(
+        settings,
+        tower_name="TWR-ISABEL",
+        target_frequency_mhz=5760.0,
+        channel_width_mhz=20.0,
+        sanitizer=sanitizer,
+    )
+
+    assert set(result.keys()) == {
+        "tower_name",
+        "proposed_frequency_mhz",
+        "channel_width_mhz",
+        "is_frequency_clear_on_tower",
+        "detected_conflicts",
+    }
+    assert result["tower_name"] == "TWR-ISABEL"
+    assert result["proposed_frequency_mhz"] == 5760.0
+    assert result["channel_width_mhz"] == 20.0
+
+
+def test_correlate_sorts_conflicts_by_frequency_delta_asc(tmp_path: Path) -> None:
+    """Multiple conflicts are sorted by `frequency_delta_mhz` ASC (closest first)."""
+    from nora.intervention_memory.tools import correlate_sector_interference
+    from nora.sanitizer import Sanitizer
+
+    settings = _settings_for(tmp_path, correlate_limit=20)
+    # CO_CHANNEL (delta=0)
+    _write_record(
+        tmp_path / "r1.json",
+        _make_corr_record(
+            intervention_id="INT-CO",
+            system_name="TWR-ISABEL-A",
+            carrier_frequency_mhz=5760.0,
+            timestamp_unix=100,
+        ),
+    )
+    # ADJACENT (delta=15)
+    _write_record(
+        tmp_path / "r2.json",
+        _make_corr_record(
+            intervention_id="INT-ADJ",
+            system_name="TWR-ISABEL-B",
+            carrier_frequency_mhz=5775.0,
+            timestamp_unix=200,
+        ),
+    )
+    sanitizer = Sanitizer()
+
+    result = correlate_sector_interference(
+        settings,
+        tower_name="TWR-ISABEL",
+        target_frequency_mhz=5760.0,
+        channel_width_mhz=20.0,
+        sanitizer=sanitizer,
+    )
+
+    deltas = [c["frequency_delta_mhz"] for c in result["detected_conflicts"]]
+    assert deltas == sorted(deltas)
+    assert deltas[0] == 0.0  # CO_CHANNEL first
+    assert result["detected_conflicts"][0]["potential_conflict"] == "CO_CHANNEL"
