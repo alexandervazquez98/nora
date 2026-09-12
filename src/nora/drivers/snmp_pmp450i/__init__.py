@@ -31,7 +31,6 @@ from nora.drivers.snmp_pmp450i.client import SnmpClient
 from nora.drivers.snmp_pmp450i.driver import (
     Pmp450iDriver,
     default_client_factory,
-    nora_session_set_focus,
 )
 from nora.drivers.snmp_pmp450i.report import RadioMetricsReport
 from nora.drivers.snmp_pmp450i.v2c import V2CClient, make_v2c_client
@@ -56,5 +55,4 @@ __all__ = [
     "RadioMetricsReport",
     "Pmp450iDriver",
     "default_client_factory",
-    "nora_session_set_focus",
 ]

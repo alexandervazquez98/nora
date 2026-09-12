@@ -1,7 +1,8 @@
 """Configuration tests — cover every scenario in `specs/secure-configuration/spec.md`.
 
-The tests are written first (RED). They MUST fail until `src/nora/config.py`
-ships a `Settings` class with the documented behaviour.
+The tests verify the trimmed `Settings` shape (7 user-settable fields
+after the thin split), the precedence swap, the `.env.example` contract,
+and the `.env` gitignore rule.
 """
 
 from __future__ import annotations
@@ -11,7 +12,6 @@ import re
 from pathlib import Path
 
 import pytest
-from pydantic import ValidationError
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ENV_EXAMPLE = PROJECT_ROOT / ".env.example"
@@ -75,22 +75,21 @@ def test_settings_loads_provider_from_env_file(tmp_path: Path) -> None:
     env_file = tmp_path / ".env"
     env_file.write_text("NORA_LLM_PROVIDER=lmstudio\nLMSTUDIO_MODEL_ID=test-model\n")
 
-    # Late import so a missing `nora.config` fails the test cleanly.
     from nora.config import Settings
 
     settings = Settings(_env_file=str(env_file))
 
-    assert settings.nora_llm_provider == "lmstudio"
-    assert settings.lmstudio_model_id == "test-model"
+    # Legacy keys are silently ignored; surviving defaults stay.
+    assert settings.nora_oid_catalogs_path == Path("./data/oid-catalogs/")
 
 
 def test_no_os_environ_in_src_nora() -> None:
     """Code under `src/nora/` MUST NOT call `os.environ` directly.
 
     The only allow-listed modules are `config.py` (the Pydantic Settings
-    boundary) and `__main__.py` (the entry point that needs to set process
-    env before importing fastmcp). Every other module must read settings
-    through the Settings instance.
+    boundary), `cli.py` (the entry point that sets process env before
+    importing fastmcp) and `__main__.py` (the deprecation alias). Every
+    other module must read settings through the Settings instance.
     """
     src = PROJECT_ROOT / "src" / "nora"
     allow_list = {"config.py", "__main__.py", "cli.py"}
@@ -113,25 +112,30 @@ def test_extra_unknown_settings_are_ignored(tmp_path: Path) -> None:
     from nora.config import Settings
 
     env_file = tmp_path / ".env"
-    env_file.write_text("NORA_UNKNOWN_KEY=foo\nNORA_LLM_PROVIDER=lmstudio\n")
+    env_file.write_text("NORA_UNKNOWN_KEY=foo\nNORA_OID_CATALOG_SIGNING_KEY=change-me\n")
 
     settings = Settings(_env_file=str(env_file))
-    assert settings.nora_llm_provider == "lmstudio"
+    # No exception means the unknown key was ignored; signing key was loaded.
+    assert settings.nora_oid_catalog_signing_key is not None
 
 
 def test_missing_required_setting_fails_fast() -> None:
-    """`NORA_LLM_PROVIDER=gemini` without `GEMINI_API_KEY` raises ValidationError."""
+    """An empty `nora_oid_catalog_signing_key` with no override is allowed at boot.
+
+    After the thin split the only "required" contract is that the
+    `OidCatalogRegistry.verify_all` boot step fails closed when the
+    signing key is empty. Pydantic itself does NOT enforce a non-None
+    signing key (operators can wire it via `.env`), but the boot
+    verifier rejects an empty value. The `Settings` constructor must
+    NOT raise when the field is absent.
+    """
     from nora.config import Settings
 
-    with pytest.raises(ValidationError) as excinfo:
-        Settings(
-            _env_file=None,
-            nora_llm_provider="gemini",
-        )
-    message = str(excinfo.value)
-    assert "GEMINI_API_KEY" in message or "gemini_api_key" in message, (
-        f"Validation error should name GEMINI_API_KEY; got: {message}"
+    settings = Settings(
+        _env_file=None,
+        _env_file_encoding=None,
     )
+    assert settings.nora_oid_catalog_signing_key is None
 
 
 # --- Requirement: Synthetic `.env.example` ----------------------------------
@@ -188,43 +192,15 @@ def test_env_example_contains_only_synthetic_placeholders() -> None:
     assert offenders == [], f".env.example contains non-synthetic values: {offenders}"
 
 
-# --- Requirement: Provider Credential Isolation -----------------------------
-
-
-def test_lmstudio_active_does_not_require_gemini_api_key(tmp_path: Path) -> None:
-    """When provider=lmstudio, no GEMINI_API_KEY is needed."""
-    from nora.config import Settings
-
-    env_file = tmp_path / ".env"
-    env_file.write_text("NORA_LLM_PROVIDER=lmstudio\n")
-
-    # No exception is the assertion.
-    settings = Settings(_env_file=str(env_file))
-    assert settings.nora_llm_provider == "lmstudio"
-    assert settings.gemini_api_key is None
-
-
-def test_gemini_active_requires_gemini_api_key(tmp_path: Path) -> None:
-    """When provider=gemini and GEMINI_API_KEY is missing, startup aborts."""
-    from nora.config import Settings
-
-    env_file = tmp_path / ".env"
-    env_file.write_text("NORA_LLM_PROVIDER=gemini\n")
-
-    with pytest.raises(ValidationError) as excinfo:
-        Settings(_env_file=str(env_file))
-    assert "gemini_api_key" in str(excinfo.value).lower() or "GEMINI_API_KEY" in str(excinfo.value)
-
-
 # --- Requirement: Credentials Never Appear in String Representations --------
 
 
 def test_repr_masks_secret_fields(tmp_path: Path) -> None:
-    """`repr(Settings())` MUST NOT contain the literal API key value."""
+    """`repr(Settings())` MUST NOT contain the literal signing key value."""
     from nora.config import Settings
 
     env_file = tmp_path / ".env"
-    env_file.write_text("NORA_LLM_PROVIDER=gemini\nGEMINI_API_KEY=do-not-leak-this-key\n")
+    env_file.write_text("NORA_OID_CATALOG_SIGNING_KEY=do-not-leak-this-key\n")
 
     settings = Settings(_env_file=str(env_file))
 
@@ -241,7 +217,7 @@ def test_log_lines_never_contain_secrets(tmp_path: Path, caplog: pytest.LogCaptu
     from nora.config import Settings
 
     env_file = tmp_path / ".env"
-    env_file.write_text("NORA_LLM_PROVIDER=gemini\nGEMINI_API_KEY=hidden-secret-value\n")
+    env_file.write_text("NORA_OID_CATALOG_SIGNING_KEY=hidden-secret-value\n")
     settings = Settings(_env_file=str(env_file))
 
     with caplog.at_level(logging.INFO):
@@ -257,20 +233,19 @@ def test_log_lines_never_contain_secrets(tmp_path: Path, caplog: pytest.LogCaptu
 def test_env_file_takes_precedence_over_process_env(tmp_path: Path, monkeypatch) -> None:
     """`.env` wins over process environment for matching keys.
 
-    We use `LMSTUDIO_MODEL_ID` for the precedence check so the test does not
-    trip the gemini-credential validator; we then separately assert
-    `loaded_from == ".env"`.
+    We use `NORA_OID_CATALOGS_PATH` (a surviving field) for the precedence
+    check; we then separately assert `loaded_from == ".env"`.
     """
     from nora.config import Settings
 
     env_file = tmp_path / ".env"
-    env_file.write_text("NORA_LLM_PROVIDER=lmstudio\nLMSTUDIO_MODEL_ID=from-dotenv\n")
+    env_file.write_text("NORA_OID_CATALOGS_PATH=./data/from-dotenv/\n")
 
     # Process env exports a conflicting value for the same key.
-    monkeypatch.setenv("LMSTUDIO_MODEL_ID", "from-process-env")
+    monkeypatch.setenv("NORA_OID_CATALOGS_PATH", "./data/from-process-env/")
 
     settings = Settings(_env_file=str(env_file))
-    assert settings.lmstudio_model_id == "from-dotenv"
+    assert settings.nora_oid_catalogs_path == Path("./data/from-dotenv/")
     assert settings.loaded_from == ".env"
 
 
@@ -278,12 +253,10 @@ def test_process_env_is_used_when_no_env_file(monkeypatch) -> None:
     """When no `.env` is present, process env vars are loaded."""
     from nora.config import Settings
 
-    monkeypatch.setenv("NORA_LLM_PROVIDER", "lmstudio")
-    monkeypatch.setenv("LMSTUDIO_MODEL_ID", "process-env-model")
+    monkeypatch.setenv("NORA_OID_CATALOGS_PATH", "/etc/nora/from-process-env/")
 
     settings = Settings(_env_file=None, _env_file_encoding=None)
-    assert settings.nora_llm_provider == "lmstudio"
-    assert settings.lmstudio_model_id == "process-env-model"
+    assert settings.nora_oid_catalogs_path == Path("/etc/nora/from-process-env/")
     assert settings.loaded_from == "process_env"
 
 
@@ -300,11 +273,13 @@ def test_defaults_are_explicit_when_nothing_is_set(monkeypatch, tmp_path: Path) 
 
     settings = Settings(_env_file=None, _env_file_encoding=None)
 
-    assert settings.nora_llm_provider == "lmstudio"
-    assert settings.lmstudio_api_host == "localhost:1234"
-    assert settings.lmstudio_model_id == "qwen2.5-7b-instruct"
-    assert settings.gemini_api_key is None
-    assert settings.gemini_model_id == "gemini-2.5-flash"
+    assert settings.nora_oid_catalogs_path == Path("./data/oid-catalogs/")
+    assert settings.nora_devices_inventory_path == Path("./data/devices.yaml")
+    assert settings.nora_oid_catalog_signing_key is None
+    assert settings.nora_prompts_dir is None
+    assert settings.nora_interventions_dir == Path("./var/interventions/")
+    assert settings.nora_interventions_keyword_search_max_records == 1000
+    assert settings.nora_interventions_correlate_scan_limit == 50
     assert settings.loaded_from == "defaults"
 
 
@@ -319,101 +294,9 @@ def test_env_is_listed_in_gitignore() -> None:
     )
 
 
-# --- Requirement: SessionJournal Settings Fields (Phase 2) -----------------
-#
-# Four new env-driven settings. Defaults are safe:
-#   nora_session_journal_dir  = ./var/sessions/
-#   nora_session_trace_max_steps = 50
-#   nora_session_journal_enabled = true
-#   nora_operator_alias = "anonymous"
-
-
-def test_session_journal_settings_have_safe_defaults(tmp_path: Path, monkeypatch) -> None:
-    """All four SessionJournal Settings fields exist with the documented defaults."""
-    # Hermetic env: strip every NORA_/LMSTUDIO_/GEMINI_ var so the test is deterministic.
-    import os
-
-    from nora.config import Settings
-
-    for key in list(os.environ):
-        if key.startswith(("NORA_", "LMSTUDIO_", "GEMINI_")):
-            monkeypatch.delenv(key, raising=False)
-
-    settings = Settings(_env_file=None, _env_file_encoding=None)
-
-    # Field existence + defaults (paths compared via string for portability).
-    assert settings.nora_session_journal_dir == Path("./var/sessions/"), (
-        f"nora_session_journal_dir default wrong: {settings.nora_session_journal_dir!r}"
-    )
-    assert settings.nora_session_trace_max_steps == 50, (
-        f"nora_session_trace_max_steps default wrong: {settings.nora_session_trace_max_steps!r}"
-    )
-    assert settings.nora_session_journal_enabled is True, (
-        f"nora_session_journal_enabled default wrong: {settings.nora_session_journal_enabled!r}"
-    )
-    assert settings.nora_operator_alias == "anonymous", (
-        f"nora_operator_alias default wrong: {settings.nora_operator_alias!r}"
-    )
-
-
-def test_session_journal_settings_override_from_env(tmp_path: Path, monkeypatch) -> None:
-    """Each SessionJournal Settings field is overridable via env."""
-    from nora.config import Settings
-
-    monkeypatch.setenv("NORA_SESSION_TRACE_MAX_STEPS", "7")
-    monkeypatch.setenv("NORA_SESSION_JOURNAL_ENABLED", "false")
-    monkeypatch.setenv("NORA_OPERATOR_ALIAS", "noc-night-shift")
-
-    settings = Settings(
-        _env_file=None,
-        _env_file_encoding=None,
-        nora_session_journal_dir=tmp_path / "sessions",
-    )
-
-    assert settings.nora_session_trace_max_steps == 7
-    assert settings.nora_session_journal_enabled is False
-    assert settings.nora_operator_alias == "noc-night-shift"
-
-
-def test_env_example_lists_session_journal_keys_with_synthetic_values() -> None:
-    """`.env.example` MUST list every new key with a sanitized placeholder.
-
-    No real paths, IPs, MACs, hostnames, or credentials — only synthetic
-    placeholders (`change-me`, `example.com`, `localhost`, `placeholder`).
-    """
-
-    env_text = ENV_EXAMPLE.read_text()
-    declared = set(re.findall(r"^([A-Z][A-Z0-9_]+)\s*=", env_text, re.MULTILINE))
-
-    expected_new_keys = {
-        "NORA_SESSION_JOURNAL_DIR",
-        "NORA_SESSION_TRACE_MAX_STEPS",
-        "NORA_SESSION_JOURNAL_ENABLED",
-        "NORA_OPERATOR_ALIAS",
-    }
-    missing = expected_new_keys - declared
-    assert not missing, f".env.example missing SessionJournal keys: {sorted(missing)}"
-
-    # And the same synthetic-only contract used for the rest of the file.
-    offenders: list[str] = []
-    for line in env_text.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        if key.strip() not in expected_new_keys:
-            continue
-        v = value.strip().strip('"').strip("'")
-        if PRIVATE_IPV4.search(v):
-            offenders.append(f"{key}: private IPv4 literal {v!r}")
-        if re.search(r"(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}", v):
-            offenders.append(f"{key}: MAC literal {v!r}")
-    assert offenders == [], f".env.example has non-synthetic values for new keys: {offenders}"
-
-
 # --- Requirement: Intervention-memory MCP Settings fields (Phase 3) ---------
 #
-# Three new env-driven fields, defaults per spec R8:
+# Three env-driven fields, defaults per spec R8:
 #   nora_interventions_dir                       = ./var/interventions/
 #   nora_interventions_keyword_search_max_records = 1000
 #   nora_interventions_correlate_scan_limit      = 50

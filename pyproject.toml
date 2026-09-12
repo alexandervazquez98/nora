@@ -30,6 +30,7 @@ dependencies = [
 
 [project.scripts]
 nora = "nora.__main__:main"
+nora-mcp = "nora.cli:main"
 
 [dependency-groups]
 dev = [

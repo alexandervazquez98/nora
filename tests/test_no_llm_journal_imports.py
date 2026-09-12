@@ -39,14 +39,18 @@ def _scan_for_banned_imports(py_file: Path) -> list[tuple[int, str, str]]:
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                if any(alias.name == frag or alias.name.startswith(frag + ".")
-                       for frag in _BANNED_FRAGMENTS):
+                if any(
+                    alias.name == frag or alias.name.startswith(frag + ".")
+                    for frag in _BANNED_FRAGMENTS
+                ):
                     offenders.append((node.lineno, "import", alias.name))
         elif isinstance(node, ast.ImportFrom):
             if node.module is None:
                 continue
-            if any(node.module == frag or node.module.startswith(frag + ".")
-                   for frag in _BANNED_FRAGMENTS):
+            if any(
+                node.module == frag or node.module.startswith(frag + ".")
+                for frag in _BANNED_FRAGMENTS
+            ):
                 offenders.append((node.lineno, "importfrom", node.module))
     return offenders
 
@@ -54,14 +58,10 @@ def _scan_for_banned_imports(py_file: Path) -> list[tuple[int, str, str]]:
 def test_server_py_has_no_llm_or_journal_imports() -> None:
     """`src/nora/server.py` MUST NOT import from `nora.llm` or `nora.core.session_*`."""
     offenders = _scan_for_banned_imports(SERVER_PY)
-    assert offenders == [], (
-        f"server.py contains banned LLM/journal imports: {offenders}"
-    )
+    assert offenders == [], f"server.py contains banned LLM/journal imports: {offenders}"
 
 
 def test_main_py_has_no_llm_or_journal_imports() -> None:
     """`src/nora/__main__.py` MUST NOT import from `nora.llm` or `nora.core.session_*`."""
     offenders = _scan_for_banned_imports(MAIN_PY)
-    assert offenders == [], (
-        f"__main__.py contains banned LLM/journal imports: {offenders}"
-    )
+    assert offenders == [], f"__main__.py contains banned LLM/journal imports: {offenders}"

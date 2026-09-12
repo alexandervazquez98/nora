@@ -199,14 +199,12 @@ def _boot_server(
 # ---------------------------------------------------------------------------
 
 
-def test_subprocess_responds_to_tools_list_with_nora_health(tmp_path: Path) -> None:
-    """A real `python -m nora` boot reports `nora_health` in `tools/list`."""
+def test_subprocess_responds_to_tools_list_with_four_tools(tmp_path: Path) -> None:
+    """A real `python -m nora` boot exposes the four-tool surface in `tools/list`."""
     env_file = tmp_path / ".env"
-    env_file.write_text("NORA_LLM_PROVIDER=lmstudio\n")
+    env_file.write_text("NORA_OID_CATALOG_SIGNING_KEY=change-me\n")
 
-    # We can't change the subprocess CWD without breaking the boot, so we
-    # set NORA_LLM_PROVIDER via process env to make the test hermetic.
-    proc, _ = _boot_server(env_file, extra_env={"NORA_LLM_PROVIDER": "lmstudio"})
+    proc, _ = _boot_server(env_file)
 
     assert proc.returncode == 0 or proc.returncode is None, (
         f"Server exited with code {proc.returncode}.\n"
@@ -229,26 +227,28 @@ def test_subprocess_responds_to_tools_list_with_nora_health(tmp_path: Path) -> N
 
     assert parsed_reply is not None, f"No `tools/list` reply found in stdout:\n{proc.stdout}"
 
-    # The reply's `result.tools` array MUST list `nora_health`.
+    # The reply's `result.tools` array MUST list exactly the four thin tools.
     tools = parsed_reply["result"].get("tools", [])
     names = {t.get("name") for t in tools}
-    assert "nora_health" in names, f"`nora_health` missing from tools/list; got {names}"
+    expected = {
+        "snmp_get_pmp450i_radio_metrics",
+        "search_intervention_history",
+        "get_device_lifecycle_summary",
+        "correlate_sector_interference",
+    }
+    assert names == expected, f"Expected exactly the 4 thin tools; got {names}"
 
 
 def test_subprocess_emits_structured_startup_log_on_stderr(tmp_path: Path) -> None:
-    """The server's startup line is on stderr and names the active provider."""
+    """The server's startup line is on stderr and names the boot surface."""
     env_file = tmp_path / ".env"
-    env_file.write_text("NORA_LLM_PROVIDER=lmstudio\n")
-    proc, _ = _boot_server(env_file, extra_env={"NORA_LLM_PROVIDER": "lmstudio"})
+    env_file.write_text("NORA_OID_CATALOG_SIGNING_KEY=change-me\n")
+    proc, _ = _boot_server(env_file)
 
     stderr = proc.stderr
-    # The startup log line names the active provider explicitly.
-    assert "active_provider=lmstudio" in stderr, (
-        f"Startup log missing 'active_provider=lmstudio' on stderr:\n{stderr}"
-    )
-    # The provider's INFO log is also expected.
-    assert "nora boot complete" in stderr, (
-        f"Startup log missing 'nora boot complete' on stderr:\n{stderr}"
+    # The startup log line names the boot surface explicitly.
+    assert "nora-mcp boot complete" in stderr, (
+        f"Startup log missing 'nora-mcp boot complete' on stderr:\n{stderr}"
     )
 
 
@@ -272,7 +272,7 @@ def test_subprocess_keeps_stdout_reserved_for_jsonrpc(tmp_path: Path) -> None:
 def test_subprocess_handles_malformed_json_gracefully(tmp_path: Path) -> None:
     """A malformed frame on stdin does NOT crash the server; it returns a JSON-RPC error."""
     env_file = tmp_path / ".env"
-    env_file.write_text("NORA_LLM_PROVIDER=lmstudio\n")
+    env_file.write_text("NORA_OID_CATALOG_SIGNING_KEY=change-me\n")
     py = _venv_python()
 
     # Ensure the temp dirs/files exist so boot can complete.
@@ -291,7 +291,6 @@ def test_subprocess_handles_malformed_json_gracefully(tmp_path: Path) -> None:
         check=False,
         env={
             **os.environ,
-            "NORA_LLM_PROVIDER": "lmstudio",
             "NORA_OID_CATALOG_SIGNING_KEY": "test-integration-key",
             "NORA_OID_CATALOGS_PATH": str(tmp_path / "tmp-catalogs"),
             "NORA_DEVICES_INVENTORY_PATH": str(tmp_path / "tmp-devices.yaml"),
@@ -306,11 +305,13 @@ def test_subprocess_handles_malformed_json_gracefully(tmp_path: Path) -> None:
     )
 
 
-def test_subprocess_uses_configured_provider_via_dotenv(tmp_path: Path) -> None:
-    """When a temp `.env` names `gemini` and GEMINI_API_KEY is set, the provider is gemini."""
+def test_subprocess_silently_ignores_legacy_llm_env_keys(tmp_path: Path) -> None:
+    """Legacy `NORA_LLM_PROVIDER` / `GEMINI_API_KEY` env vars are silently ignored."""
     env_file = tmp_path / ".env"
-    env_file.write_text("NORA_LLM_PROVIDER=gemini\nGEMINI_API_KEY=test-dotenv-key\n")
-    # We must cd into tmp_path so the subprocess picks up our .env.
+    env_file.write_text(
+        "NORA_LLM_PROVIDER=gemini\nGEMINI_API_KEY=legacy-secret\n"
+        "NORA_OID_CATALOG_SIGNING_KEY=change-me\n"
+    )
     py = _venv_python()
     init_frame = (
         json.dumps(
@@ -327,7 +328,6 @@ def test_subprocess_uses_configured_provider_via_dotenv(tmp_path: Path) -> None:
         )
         + "\n"
     )
-    # Ensure the temp dirs/files exist so boot can complete.
     (tmp_path / "tmp-catalogs").mkdir(exist_ok=True)
     (tmp_path / "tmp-devices.yaml").write_text("# empty\n")
 
@@ -346,9 +346,5 @@ def test_subprocess_uses_configured_provider_via_dotenv(tmp_path: Path) -> None:
             "NORA_DEVICES_INVENTORY_PATH": str(tmp_path / "tmp-devices.yaml"),
         },
     )
-    assert "active_provider=gemini" in proc.stderr, (
-        f"Expected active_provider=gemini in stderr; got:\n{proc.stderr}"
-    )
-    # The API key MUST NOT be echoed anywhere.
-    assert "test-dotenv-key" not in proc.stdout, "API key leaked to stdout"
-    assert "test-dotenv-key" not in proc.stderr, "API key leaked to stderr"
+    assert "legacy-secret" not in proc.stdout, "Legacy API key leaked to stdout"
+    assert "legacy-secret" not in proc.stderr, "Legacy API key leaked to stderr"

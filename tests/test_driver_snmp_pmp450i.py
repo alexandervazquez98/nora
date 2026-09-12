@@ -1,7 +1,10 @@
 """Tests for `Pmp450iDriver.fetch_radio_metrics` + RadioMetricsReport.
 
-Maps Driver-R1 (typed protocol support), R3 (typed return), R4 (focus
-binding), R5 (typed error mapping), R6 (within-call OID cache).
+Maps Driver-R1 (typed protocol support), R3 (typed return), R5 (typed
+error mapping), R6 (within-call OID cache). The SessionJournal focus
+side-effect (Driver-R4) was eliminated as part of the `nora-mcp-thin-split`
+cut — see `test_fetch_radio_metrics_calls_set_focus_first` for the
+regression guard.
 """
 
 from __future__ import annotations
@@ -26,31 +29,6 @@ from nora.drivers.snmp_pmp450i import (
 from nora.drivers.snmp_pmp450i import driver as _driver_mod
 from nora.drivers.snmp_pmp450i.client import SnmpClient
 from nora.drivers.snmp_pmp450i.driver import Pmp450iDriver
-
-
-# Default `nora_session_set_focus` reaches into the live journal; tests
-# stub it out at module-load time so the driver tests do not require
-# the full boot sequence. The test that exercises the real focus
-# binding patches this attribute directly.
-@pytest.fixture(autouse=True)
-def _stub_set_focus() -> Any:
-    captured: list[str] = []
-
-    def _fake(device_id: str) -> dict[str, Any]:
-        captured.append(device_id)
-        return {
-            "session_id": "test-session",
-            "focus_device_id": device_id,
-            "devices_reviewed": [device_id],
-        }
-
-    original = _driver_mod.nora_session_set_focus
-    _driver_mod.nora_session_set_focus = _fake
-    try:
-        yield captured
-    finally:
-        _driver_mod.nora_session_set_focus = original
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -283,11 +261,34 @@ def test_repeated_oid_lookup_within_call_is_cached(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_fetch_radio_metrics_calls_set_focus_first(tmp_path: Path) -> None:
-    """`fetch_radio_metrics` records `device_id` as focus before fetching."""
-    inv = _build_inventory(tmp_path)
-    registry = _build_catalog()
+def test_fetch_radio_metrics_calls_set_focus_first(tmp_path: Path) -> None:  # noqa: ARG001
+    """`fetch_radio_metrics` MUST NOT call `nora_session_set_focus` after the thin split.
 
+    The SessionJournal was eliminated entirely (locked decision 3 + 5).
+    The driver is now a pure typed fetch with no focus side-effect.
+    This test pins the absence: any future re-introduction of the focus
+    call must break this test and trigger a discussion.
+    """
+    import ast
+
+    src = Path(_driver_mod.__file__).read_text()
+    tree = ast.parse(src)
+    offenders: list[tuple[str, int]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            func = node.func
+            # `nora_session_set_focus(...)` direct call.
+            if isinstance(func, ast.Name) and func.id == "nora_session_set_focus":
+                offenders.append((src.splitlines()[node.lineno - 1], node.lineno))
+            # `nora_session_set_focus(...)` attribute call (e.g. inside a wrapper).
+            if isinstance(func, ast.Attribute) and func.attr == "nora_session_set_focus":
+                offenders.append((src.splitlines()[node.lineno - 1], node.lineno))
+    assert offenders == [], f"driver.py must not reference nora_session_set_focus; got {offenders}"
+
+    # Runtime assertion: even if a patched symbol exists in scope, the
+    # driver MUST NOT call it.
+    inv = _build_inventory(Path("/tmp"))
+    registry = _build_catalog()
     fake_client = mock.MagicMock(spec=SnmpClient)
     fake_client.get_oid.side_effect = lambda oid: _fake_values()[oid]
 
@@ -297,13 +298,17 @@ def test_fetch_radio_metrics_calls_set_focus_first(tmp_path: Path) -> None:
         focus_calls.append(device_id)
         return {"focus_device_id": device_id, "devices_reviewed": [device_id]}
 
-    with mock.patch("nora.drivers.snmp_pmp450i.driver.nora_session_set_focus", _set_focus):
+    # Even when the symbol exists in the module (it shouldn't), the
+    # driver must not invoke it.
+    with mock.patch.object(_driver_mod, "nora_session_set_focus", _set_focus, create=True):
         driver = Pmp450iDriver(
             inventory=inv, catalog_registry=registry, client_factory=lambda d: fake_client
         )
         driver.fetch_radio_metrics("ap-7400-01")
 
-    assert focus_calls == ["ap-7400-01"]
+    assert focus_calls == [], (
+        f"fetch_radio_metrics must not invoke the focus callable; calls: {focus_calls}"
+    )
 
 
 # ---------------------------------------------------------------------------

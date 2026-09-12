@@ -203,14 +203,8 @@ def test_full_driver_path_does_not_call_banned_symbols(tmp_path: Path) -> None:
         mock.patch("ssl.SSLContext") as ssl_mock,
         mock.patch("socket.create_connection") as create_conn_mock,
     ):
-        # The driver calls `nora_session_set_focus`; stub it at the
-        # driver module so we don't need a real journal here.
-        with mock.patch(
-            "nora.drivers.snmp_pmp450i.driver.nora_session_set_focus",
-            lambda device_id: {"focus_device_id": device_id, "devices_reviewed": [device_id]},
-        ):
-            report = driver.fetch_radio_metrics("ap-7400-01")
-            assert report.device_id == "ap-7400-01"
+        report = driver.fetch_radio_metrics("ap-7400-01")
+        assert report.device_id == "ap-7400-01"
 
     socket_mock.assert_not_called()
     urlopen_mock.assert_not_called()

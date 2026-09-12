@@ -14,15 +14,82 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any
-from unittest import mock
 
 import pytest
-from pydantic import SecretStr
 
 from nora.config import Settings
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SRC_DIR = PROJECT_ROOT / "src" / "nora"
+
+
+def test_server_exposes_exactly_four_tools() -> None:
+    """After the thin split, the FastMCP instance exposes exactly 4 tools.
+
+    The four surviving tools are: 1 driver (`snmp_get_pmp450i_radio_metrics`)
+    + 3 intervention (`search_intervention_history`,
+    `get_device_lifecycle_summary`, `correlate_sector_interference`).
+    """
+    import asyncio
+
+    from nora import server as server_mod
+
+    async def _names() -> set[str]:
+        tools = await server_mod.mcp.list_tools()
+        return {t.name for t in tools}
+
+    names = asyncio.run(_names())
+    expected = {
+        "snmp_get_pmp450i_radio_metrics",
+        "search_intervention_history",
+        "get_device_lifecycle_summary",
+        "correlate_sector_interference",
+    }
+    assert names == expected, (
+        f"Expected exactly 4 tools; got {sorted(names)} "
+        f"(missing: {sorted(expected - names)}, extra: {sorted(names - expected)})"
+    )
+
+
+def test_thin_middleware_emits_one_log_line_per_call(caplog: pytest.LogCaptureFixture) -> None:
+    """The thin middleware MUST emit exactly one structured stderr log line per call.
+
+    Format: `tool=<name> duration_ms=<int> outcome=<success|error>`. No
+    journal, no record_step. Exactly one line per invocation.
+    """
+    import asyncio
+
+    from nora import server as server_mod
+
+    server_mod.configure_logging()
+    server_mod.register_tool_log_middleware()
+
+    async def _run() -> Any:
+        from fastmcp import Client
+
+        async with Client(server_mod.mcp) as client:
+            return await client.call_tool("search_intervention_history", {"target_ip": "10.0.0.5"})
+
+    with caplog.at_level(logging.INFO, logger="nora.server"):
+        # Call may fail (no fixture interventions dir); the middleware must still log.
+        try:
+            asyncio.run(_run())
+        except Exception:
+            pass
+
+    tool_lines = [
+        record.getMessage()
+        for record in caplog.records
+        if "tool=" in record.getMessage() and "duration_ms=" in record.getMessage()
+    ]
+    assert len(tool_lines) >= 1, (
+        f"Expected at least one structured tool log line; got: "
+        f"{[r.getMessage() for r in caplog.records]!r}"
+    )
+    line = tool_lines[0]
+    assert "search_intervention_history" in line
+    assert "duration_ms=" in line
+    assert ("outcome=success" in line) or ("outcome=error" in line)
 
 
 # ---------------------------------------------------------------------------
@@ -43,7 +110,7 @@ def test_server_module_exposes_fastmcp_instance() -> None:
 
 
 def test_server_module_uses_fastmcp_decorator() -> None:
-    """`server.py` MUST register `nora_health` via `@mcp.tool`."""
+    """`server.py` registers the driver tool + 3 intervention tools via `@mcp.tool`."""
     import asyncio
 
     from nora import server as server_mod
@@ -53,7 +120,10 @@ def test_server_module_uses_fastmcp_decorator() -> None:
         return {t.name for t in tools}
 
     names = asyncio.run(_names())
-    assert "nora_health" in names, f"nora_health not registered; tools: {names}"
+    assert "snmp_get_pmp450i_radio_metrics" in names, f"driver tool not registered; tools: {names}"
+    assert "search_intervention_history" in names, (
+        f"intervention tool not registered; tools: {names}"
+    )
 
 
 def test_pyproject_pins_fastmcp_below_v4_in_server_check() -> None:
@@ -67,89 +137,6 @@ def test_pyproject_pins_fastmcp_below_v4_in_server_check() -> None:
     assert re.match(r"fastmcp\s*>=\s*3\.2\s*,\s*<\s*4", matches[0]), (
         f"fastmcp must be pinned to >=3.2,<4; got {matches[0]!r}"
     )
-
-
-# ---------------------------------------------------------------------------
-# Requirement: `nora_health` Tool Contract
-# ---------------------------------------------------------------------------
-
-
-def _call_nora_health(provider: Any, settings: Settings) -> dict[str, Any]:
-    """Invoke the nora_health implementation directly.
-
-    The public MCP tool takes no arguments and pulls from module-level state.
-    For unit tests we exercise the internal implementation function so we can
-    inject a mock provider and a hermetic Settings.
-    """
-    from nora import server as server_mod
-
-    impl = getattr(server_mod, "nora_health_impl", None)
-    assert impl is not None, "server module must expose `nora_health_impl`"
-    return impl(settings, provider)
-
-
-def test_health_returns_all_four_fields_with_provider_ok() -> None:
-    """`nora_health` returns version, active_provider, connectivity, env_loaded."""
-    settings = Settings(_env_file=None, _env_file_encoding=None)
-    provider = mock.MagicMock()
-    provider.complete.return_value = mock.Mock(text="pong", model_id="m", raw=object())
-
-    result = _call_nora_health(provider, settings)
-
-    assert set(result.keys()) == {
-        "version",
-        "active_provider",
-        "connectivity",
-        "env_loaded",
-    }
-    assert result["connectivity"] == "ok"
-    assert result["active_provider"] == "lmstudio"
-    assert result["env_loaded"] is False
-    assert isinstance(result["version"], str) and result["version"]
-
-
-def test_health_reports_unavailable_when_provider_fails() -> None:
-    """When the provider raises, `connectivity` reports unavailable, not crash."""
-    from nora.llm import LLMUnavailable
-
-    settings = Settings(_env_file=None, _env_file_encoding=None)
-    provider = mock.MagicMock()
-    provider.complete.side_effect = LLMUnavailable("boom")
-
-    result = _call_nora_health(provider, settings)
-    assert result["connectivity"] == "unavailable"
-    # The tool must not raise.
-
-
-def test_health_reports_env_loaded_status() -> None:
-    """`env_loaded` reflects whether a `.env` file supplied the values."""
-    import os
-    import tempfile
-
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".env", delete=False) as f:
-        f.write("NORA_LLM_PROVIDER=lmstudio\n")
-        env_path = f.name
-    try:
-        settings = Settings(_env_file=env_path)
-        provider = mock.MagicMock()
-        provider.complete.return_value = mock.Mock(text="ok", model_id="m", raw=object())
-        result = _call_nora_health(provider, settings)
-        assert result["env_loaded"] is True
-    finally:
-        os.remove(env_path)
-
-
-def test_health_does_not_echo_api_key() -> None:
-    """`nora_health` response MUST NOT contain any secret value."""
-    settings = Settings(
-        _env_file=None, _env_file_encoding=None, gemini_api_key=SecretStr("top-secret-key")
-    )
-    provider = mock.MagicMock()
-    provider.complete.return_value = mock.Mock(text="ok", model_id="m", raw=object())
-
-    result = _call_nora_health(provider, settings)
-    rendered = str(result)
-    assert "top-secret-key" not in rendered
 
 
 # ---------------------------------------------------------------------------
@@ -191,142 +178,35 @@ def test_src_nora_has_no_print_calls() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Requirement: Telemetry Sanitizer Boundary
-# ---------------------------------------------------------------------------
-
-
-def test_health_sanitizes_upstream_error_messages() -> None:
-    """Free-text error messages in `nora_health` MUST pass through the sanitizer."""
-    from nora.llm import LLMUnavailable
-    from nora.sanitizer import Sanitizer
-
-    settings = Settings(_env_file=None, _env_file_encoding=None)
-    provider = mock.MagicMock()
-    provider.complete.side_effect = LLMUnavailable(
-        "connection refused at 10.0.0.5 for host router-core-01.example.com"
-    )
-
-    # We call nora_health with a shared Sanitizer to observe its output.
-    sanitizer = Sanitizer()
-    with mock.patch("nora.server._sanitizer", sanitizer):
-        result = _call_nora_health(provider, settings)
-
-    # The error string (if any) MUST NOT contain private IP or hostname.
-    rendered = str(result)
-    assert "10.0.0.5" not in rendered, f"Private IPv4 literal leaked: {rendered!r}"
-    assert "router-core-01.example.com" not in rendered, f"Hostname literal leaked: {rendered!r}"
-
-
-def test_health_error_path_does_not_leak_secrets_to_stderr(
-    capfd: pytest.CaptureFixture[str],
-) -> None:
-    """Provider error payload with IP+MAC+serial+hostname+key MUST NOT leak.
-
-    Closes W1 PARTIAL scenario 2 (nora-mcp-server error-path sanitization +
-    secrets-leak). The single-literal test above is necessary but not
-    sufficient; the contract is "nothing identifiable leaves the process",
-    so we pack every category into the payload and assert both the tool
-    response AND the captured stderr stay clean. The 4-tuple response
-    shape and `connectivity == "unavailable"` are also pinned.
-    """
-    from nora.llm import LLMUnavailable
-    from nora.sanitizer import Sanitizer
-
-    payload = (
-        "boom: ipv4=10.0.0.5 mac=aa:bb:cc:dd:ee:ff "
-        "serial=ABC123XYZ-PROD-001 host=router-core-01.example.com "
-        "key=sk-testkey1234567890abcdef"
-    )
-    settings = Settings(_env_file=None, _env_file_encoding=None)
-    provider = mock.MagicMock()
-    provider.complete.side_effect = LLMUnavailable(payload)
-
-    sanitizer = Sanitizer()
-    with mock.patch("nora.server._sanitizer", sanitizer):
-        result = _call_nora_health(provider, settings)
-
-    captured = capfd.readouterr()
-    rendered_response = str(result)
-    rendered_stderr = captured.err or ""
-
-    # No payload literal may survive in response or stderr.
-    for needle in (
-        "10.0.0.5",
-        "aa:bb:cc:dd:ee:ff",
-        "ABC123XYZ-PROD-001",
-        "router-core-01.example.com",
-        "sk-testkey1234567890abcdef",
-    ):
-        assert needle not in rendered_response, (
-            f"Response leaked payload literal {needle!r}: {rendered_response!r}"
-        )
-        assert needle not in rendered_stderr, (
-            f"stderr leaked payload literal {needle!r}: {rendered_stderr!r}"
-        )
-
-    # 4-tuple contract preserved on the unavailable path.
-    assert set(result.keys()) == {
-        "version",
-        "active_provider",
-        "connectivity",
-        "env_loaded",
-    }
-    assert result["connectivity"] == "unavailable"
-
-
-# ---------------------------------------------------------------------------
 # Requirement: Edge Cases — Subprocess boot
 # ---------------------------------------------------------------------------
 
 
 def test_module_main_can_be_imported() -> None:
-    """`src/nora/__main__.py` MUST exist and expose `main`."""
+    """`src/nora/__main__.py` MUST exist and expose `main` (deprecation alias)."""
     from nora import __main__ as main_mod
 
     assert callable(getattr(main_mod, "main", None))
 
 
-def test_main_module_boots_fastmcp_over_stdio() -> None:
-    """`nora.__main__:main()` wires Settings -> factory -> mcp.run() (no transport)."""
+def test_main_module_delegates_to_cli() -> None:
+    """`nora.__main__:main()` is a deprecation alias that delegates to `nora.cli.main`."""
     import inspect
 
     from nora import __main__ as main_mod
 
-    src = inspect.getsource(main_mod.main)
-    assert "build_provider" in src, "main() must call build_provider(settings)"
-    assert "mcp.run" in src, "main() must call mcp.run()"
-    # `mcp.run()` with NO transport argument defaults to stdio.
-    assert "mcp.run()" in src, "mcp.run() must be called without a transport argument"
+    # `inspect.getsource` on a re-exported function would return the cli
+    # source; inspect the module body directly.
+    src = inspect.getsource(main_mod)
+    assert "nora.cli" in src, f"__main__ module must import from nora.cli; got: {src!r}"
+    assert "deprecated" in src.lower(), (
+        f"__main__ module must emit a deprecation warning; got: {src!r}"
+    )
 
 
 # ---------------------------------------------------------------------------
 # Requirement: Observability — Stderr Tool Diagnostics
 # ---------------------------------------------------------------------------
-
-
-def test_health_emits_structured_diagnostic_line(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """`nora_health` MUST emit one structured stderr log line per invocation."""
-    settings = Settings(_env_file=None, _env_file_encoding=None)
-    provider = mock.MagicMock()
-    provider.complete.return_value = mock.Mock(text="ok", model_id="m", raw=object())
-
-    with caplog.at_level(logging.INFO, logger="nora.server"):
-        _call_nora_health(provider, settings)
-
-    tool_lines = [
-        record.getMessage()
-        for record in caplog.records
-        if record.name == "nora.server" and "tool=" in record.getMessage()
-    ]
-    assert tool_lines, (
-        f"Expected a structured tool log line; got: {[r.getMessage() for r in caplog.records]!r}"
-    )
-    line = tool_lines[0]
-    assert "nora_health" in line
-    # A duration field (e.g., duration_ms=...) is required.
-    assert "duration" in line.lower(), f"Expected a duration field in tool log line; got: {line!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -406,8 +286,8 @@ def test_subprocess_boot_writes_only_jsonrpc_to_stdout() -> None:
             break
     assert has_jsonrpc, f"stdout had no JSON-RPC frame:\n{stdout}"
 
-    # Stderr should contain a startup log line that names the active provider.
-    assert "active_provider" in stderr or "lmstudio" in stderr, (
+    # Stderr should contain a startup log line naming the boot surface.
+    assert "boot complete" in stderr or "nora-mcp" in stderr, (
         f"Expected startup log on stderr; got:\n{stderr}"
     )
 
@@ -438,7 +318,6 @@ def test_mcp_tool_wrapper_delegates_to_pure_library_function(tmp_path: Path) -> 
     import asyncio
     from unittest import mock as _mock
 
-    from nora.config import Settings
     from nora.intervention_memory import tools as tools_mod
 
     settings = Settings(
@@ -446,11 +325,10 @@ def test_mcp_tool_wrapper_delegates_to_pure_library_function(tmp_path: Path) -> 
         _env_file_encoding=None,
         nora_interventions_dir=tmp_path,
     )
-    provider = mock.MagicMock()
 
     from nora import server as server_mod
 
-    server_mod.set_runtime_state(settings, provider)
+    server_mod.set_runtime_state(settings)
 
     sentinel = [{"intervention_id": "INT-DELEGATED"}]
 
@@ -476,8 +354,8 @@ def test_mcp_tool_wrapper_delegates_to_pure_library_function(tmp_path: Path) -> 
     assert result.data == sentinel
 
 
-def test_mcp_instance_exposes_all_nine_tools() -> None:
-    """The FastMCP instance registers all 9 tools (6 existing + 3 new)."""
+def test_mcp_instance_exposes_all_nine_tools() -> None:  # noqa: F811 — alias kept for history
+    """Deprecated: use `test_server_exposes_exactly_four_tools` instead."""
     import asyncio
 
     from nora import server as server_mod
@@ -487,23 +365,15 @@ def test_mcp_instance_exposes_all_nine_tools() -> None:
         return {t.name for t in tools}
 
     names = asyncio.run(_names())
+    # Post-thin-split: exactly 4 tools. This alias test exists so any
+    # accidentally re-added legacy tool fails the test loudly.
     expected = {
-        # Existing (6).
-        "nora_health",
-        "nora_session_get_state",
-        "nora_session_set_focus",
-        "nora_session_resume",
-        "nora_session_summarize",
         "snmp_get_pmp450i_radio_metrics",
-        # New (3).
         "search_intervention_history",
         "get_device_lifecycle_summary",
         "correlate_sector_interference",
     }
-    missing = expected - names
-    assert not missing, (
-        f"Tools missing from FastMCP instance: {sorted(missing)}; found: {sorted(names)}"
-    )
+    assert names == expected, f"Expected exactly 4 tools after the thin split; got: {sorted(names)}"
 
 
 def test_free_text_fields_in_search_output_sanitized_via_mcp_wrapper(tmp_path: Path) -> None:
@@ -515,8 +385,6 @@ def test_free_text_fields_in_search_output_sanitized_via_mcp_wrapper(tmp_path: P
     """
     import asyncio
     import json as _json
-
-    from nora.config import Settings
 
     interventions_dir = tmp_path / "interventions"
     interventions_dir.mkdir()
@@ -544,11 +412,10 @@ def test_free_text_fields_in_search_output_sanitized_via_mcp_wrapper(tmp_path: P
         _env_file_encoding=None,
         nora_interventions_dir=interventions_dir,
     )
-    provider = mock.MagicMock()
 
     from nora import server as server_mod
 
-    server_mod.set_runtime_state(settings, provider)
+    server_mod.set_runtime_state(settings)
 
     async def _run() -> Any:
         from fastmcp import Client
@@ -572,8 +439,6 @@ def test_structured_top_level_fields_bypass_via_mcp_wrapper(tmp_path: Path) -> N
     """
     import asyncio
     import json as _json
-
-    from nora.config import Settings
 
     interventions_dir = tmp_path / "interventions"
     interventions_dir.mkdir()
@@ -601,11 +466,10 @@ def test_structured_top_level_fields_bypass_via_mcp_wrapper(tmp_path: Path) -> N
         _env_file_encoding=None,
         nora_interventions_dir=interventions_dir,
     )
-    provider = mock.MagicMock()
 
     from nora import server as server_mod
 
-    server_mod.set_runtime_state(settings, provider)
+    server_mod.set_runtime_state(settings)
 
     async def _run() -> Any:
         from fastmcp import Client

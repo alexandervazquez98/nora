@@ -1,13 +1,8 @@
 """Shared pytest fixtures for the NORA test suite.
 
-The `nora.llm.build_provider` factory caches its result in module-level
-state so repeated calls return the SAME provider instance (per
-`llm-provider-interface` spec). Each test that constructs a provider must
-start from a clean cache, otherwise the singleton leaks across tests.
-
-We also expose a hermetic `.env` fixture for the MCP server tests in
-Phase 5/6 and several hermetic directory fixtures for the driver layer
-(catalog + prompt + inventory).
+We expose hermetic directory fixtures for the driver layer (catalogs +
+prompts + inventory) and a `hermetic_settings` factory that builds a
+`Settings` instance bound to a fresh per-test tmp tree.
 """
 
 from __future__ import annotations
@@ -19,17 +14,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-
-from nora import llm as llm_mod
-
-
-@pytest.fixture(autouse=True)
-def _reset_llm_factory_cache() -> None:
-    """Reset the `build_provider` singleton between tests."""
-    llm_mod._reset_factory_cache()
-    yield
-    llm_mod._reset_factory_cache()
-
 
 # ---------------------------------------------------------------------------
 # Driver-layer fixtures — catalogs, prompts, inventory
@@ -151,10 +135,6 @@ def hermetic_settings(tmp_path: Path) -> Any:
     return Settings(
         _env_file=None,
         _env_file_encoding=None,
-        nora_session_journal_dir=tmp_path / "sessions",
-        nora_session_trace_max_steps=3,
-        nora_session_journal_enabled=True,
-        nora_operator_alias="recall-op",
         nora_oid_catalogs_path=catalogs_dir,
         nora_devices_inventory_path=devices_file,
         nora_oid_catalog_signing_key=SAMPLE_CATALOG_KEY,
