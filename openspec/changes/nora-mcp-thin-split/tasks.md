@@ -70,4 +70,49 @@ Single-PR work unit (size:exception). Focused test: `uv run pytest tests/test_no
 - [x] CC.2 `tests/test_no_llm_journal_imports.py` stays green from 0.1 to end.
 - [x] CC.3 Append deprecation note to `SCOPE.md`; `grep -q "nora-mcp" SCOPE.md` succeeds.
 
-Total: 33 tasks (target 25-35). ~1,700 changed lines → size:exception required (~4× 400-line budget). Single PR per locked decision 4. Risks: `python -m nora` consumer breakage (5.5); mypy strict dead imports (6.2); missed monkeypatches (3.4); `.env.example` creep (1.3); tool-list drift (0.1 + 2.1). Ready for `sdd-apply` after orchestrator confirms `size:exception`.
+## Group 7 — Verify-report gap closure (post-apply)
+
+Two gaps were surfaced by `verify-report.md` after the original 33 tasks
+landed:
+
+1. **CRITICAL** — secure-configuration Scenario "accidental staging is
+   rejected" had no implementation: no `.pre-commit-config.yaml`, no
+   `.git/hooks/pre-commit` (only `.sample` stubs). The `.gitignore`
+   blocks `git add -A`, but `git add .env --force` was undefended.
+2. **WARNING** — secure-configuration Scenario "missing required setting
+   fails fast" was only covered at the `Settings()` layer
+   (`tests/test_config.py::test_missing_required_setting_fails_fast`).
+   The boot abort contract (non-zero exit + typed error) was not pinned
+   end-to-end.
+
+Both gaps are now closed with the work units below. All tasks follow
+Strict TDD: RED test commit first, GREEN implementation commit second.
+
+- [x] 7.1 Add `tests/test_precommit_guard.py` (RED) — 17 tests across 3 layers:
+      regex pinning (`^(\.env|.*/\.env)$` matches `.env` and `<dir>/.env`
+      but NOT `.env.example`/`.env.test`/`.env.local`/`.envrc`), script
+      contract (exits 1 with ERROR on `.env`, exits 0 for allowed
+      siblings or empty stdin), and `.pre-commit-config.yaml` wiring
+      (`repo: local`, `id: no-env-staging`, `stages: [pre-commit]`).
+- [x] 7.2 Add `scripts/check-no-env-staged.sh` (GREEN) — bash guard that
+      reads staged paths from `git diff --cached --name-only
+      --diff-filter=ACMRT` (or from stdin in `--from-stdin` test mode)
+      and exits 1 with a clear ERROR message when any path matches
+      `^(\.env|.*/\.env)$`. Executable bit set; shebang `#!/usr/bin/env bash`.
+- [x] 7.3 Add `.pre-commit-config.yaml` (GREEN) — `repos: [local]` with
+      `hooks: [{id: no-env-staging, name: Block .env file staging,
+      entry: scripts/check-no-env-staged.sh, language: script,
+      pass_filenames: false, stages: [pre-commit]}]`.
+- [x] 7.4 Add e2e boot abort tests in `tests/test_integration_boot.py` (RED→GREEN)
+      — `test_subprocess_nora_mcp_exits_nonzero_on_empty_signing_key` and
+      `test_subprocess_python_dash_m_nora_exits_nonzero_on_empty_signing_key`.
+      Both boot their entry point with `NORA_OID_CATALOG_SIGNING_KEY`
+      unset and other required vars set; assert `returncode != 0` and
+      stderr mentions `signing`/`catalog`. Closes the WARNING: the
+      underlying abort at `cli.py:54` (`OidCatalogRegistry.verify_all`
+      raises `CatalogVerificationError`) is now pinned by an end-to-end
+      test that runs against both entry points.
+
+Total: 37 tasks (33 original + 4 gap-closure). All verification gates
+PASS after Group 7 lands: 278 pytest, 85.18% coverage, mypy --strict
+clean, ruff check + format clean, pre-commit guard script tested.

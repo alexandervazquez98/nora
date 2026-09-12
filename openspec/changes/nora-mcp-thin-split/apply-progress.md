@@ -37,6 +37,10 @@
 | 6.2 | `mypy --strict src/nora` | Static type | ✅ baseline | — | ✅ Zero errors | — | — |
 | 6.3 | `ruff check .` + `ruff format --check .` | Static lint | ✅ baseline | — | ✅ Zero violations | — | — |
 | 6.4 | `tests/test_integration_boot.py` | Integration (subprocess x2) | N/A (new) | ✅ Wrote test | ✅ 3 passing | ✅ Boot both entry points + compare | ✅ None |
+| 7.1 | `tests/test_precommit_guard.py` | Unit (regex + script + YAML) | N/A (new) | ✅ 12/17 failing | ✅ 17/17 passing | ✅ 3 layers (regex, script, yaml) | ✅ None |
+| 7.2 | `scripts/check-no-env-staged.sh` | Production (bash) | — | — | ✅ 1315B executable | — | — |
+| 7.3 | `.pre-commit-config.yaml` | Production (config) | — | — | ✅ 882B; `repo: local` + `id: no-env-staging` | — | — |
+| 7.4 | `tests/test_integration_boot.py` (boot abort x2) | Integration (subprocess) | ✅ baseline | ✅ Wrote test | ✅ 2 passing | ✅ Both entry points | ✅ None |
 
 ### Work Unit Evidence (per work-unit-commits)
 
@@ -45,21 +49,24 @@
 | **Artifacts** | `dd97792` | — | — | Delete `openspec/changes/nora-mcp-thin-split/` |
 | **Group 0+1: Settings trim + dep drop** | `715282d` | `uv run pytest tests/test_config.py tests/test_no_llm_journal_imports.py -q` (PASS) | N/A (config-only) | `git revert 715282d` |
 | **Group 2-5: Server trim + module deletes + entry point split** | `66a1583` | `uv run pytest tests/test_server.py tests/test_no_llm_journal_imports.py tests/test_server_driver_tool.py tests/test_driver_snmp_pmp450i.py -q` (PASS) | `nora-mcp` console script boot via `tests/test_integration_boot.py` (PASS) | `git revert 66a1583` |
-| **Group 5+6: Cli/main tests + integration boot + SCOPE note + task ticks** | (pending — see below) | `uv run pytest tests/test_cli.py tests/test_main_alias.py tests/test_integration_boot.py -q` (PASS) | `python -m nora` and `nora-mcp` subprocess boot (PASS) | `git revert` (final commit) |
+| **Group 5+6: Cli/main tests + integration boot + SCOPE note + task ticks** | `2f894b8` | `uv run pytest tests/test_cli.py tests/test_main_alias.py tests/test_integration_boot.py -q` (PASS) | `python -m nora` and `nora-mcp` subprocess boot (PASS) | `git revert 2f894b8` |
+| **PR #8 doc note** | `9d3550e` | — | — | `git revert 9d3550e` |
+| **Group 7.1+7.4 (RED): pre-commit guard + boot abort tests** | `2d76442` | `uv run pytest tests/test_precommit_guard.py tests/test_integration_boot.py -q` (12 failing at HEAD, all green after GREEN commit) | Subprocess boot abort x2 — both entry points — passes against existing `cli.py` abort behavior | `git revert 2d76442` |
+| **Group 7.2+7.3 (GREEN): pre-commit script + config** | (pending — this commit) | `uv run pytest tests/test_precommit_guard.py tests/test_integration_boot.py -q` (all 24 passing) | Manual smoke: `printf '.env\n' \| bash scripts/check-no-env-staged.sh --from-stdin` exits 1 with ERROR; `.env.example` exits 0 | `git revert` (this commit) |
 
 ### Test Summary
 
-- **Total tests written** (apply phase): 27 new tests across 4 new files + 4 new tests added to `tests/test_config.py` and `tests/test_server.py` and `tests/test_driver_snmp_pmp450i.py`.
-- **Total tests passing**: 257 (full suite)
+- **Total tests written** (apply phase): 46 new tests across 5 new files + 4 new tests added to `tests/test_config.py` and `tests/test_server.py` and `tests/test_driver_snmp_pmp450i.py` + 17 new tests in `tests/test_precommit_guard.py` + 2 new tests in `tests/test_integration_boot.py` (boot abort).
+- **Total tests passing**: 278 (full suite)
 - **Skipped**: 2 (slow `snmpsim` integration tests, unchanged from baseline)
 - **Coverage**: 85.18% (threshold 80% — PASS)
 - **Layers used**: Unit, Integration (subprocess)
 - **Approval tests**: None — no refactoring tasks; this is a cut-over.
-- **Pure functions created**: `_ToolLogMiddleware.on_call_tool`, `set_runtime_state`, `get_runtime_state`.
+- **Pure functions created**: `_ToolLogMiddleware.on_call_tool`, `set_runtime_state`, `get_runtime_state`, `check-no-env-staged.sh` regex check.
 
 ## Per-Task Status
 
-All 33 tasks complete. See `tasks.md` for the checkboxes.
+All 37 tasks complete (33 original + 4 gap-closure in Group 7). See `tasks.md` for the checkboxes.
 
 ## Workload / PR Boundary
 
@@ -101,15 +108,21 @@ All 33 tasks complete. See `tasks.md` for the checkboxes.
 
 ```text
 uv run python -m pytest --cov=src/nora --cov-fail-under=80 -q
-  → 257 passed, 2 skipped, coverage 85.18% (>80% threshold)
+  → 278 passed, 2 skipped, coverage 85.18% (>80% threshold)
 uv run mypy --strict src/nora
   → Success: no issues found in 26 source files
 uv run ruff check .
   → All checks passed!
 uv run ruff format --check .
-  → 56 files already formatted
+  → 57 files already formatted
 uv lock
   → Resolved 100 packages (no diff)
+
+# New (Group 7 GREEN):
+printf '.env\n' | bash scripts/check-no-env-staged.sh --from-stdin
+  → ERROR: .env file staged — use .env.example instead / exit=1
+printf '.env.example\n' | bash scripts/check-no-env-staged.sh --from-stdin
+  → exit=0
 ```
 
 ## Deviations from Design
@@ -132,12 +145,14 @@ PR URL: <https://github.com/alexandervazquez98/nora/pull/8>
 - Title: `feat(nora): thin MCP split — drop journal + LLM, expose 4 tools (nora-mcp-thin-split)`
 - Base: `main` ← Head: `feat/nora-mcp-thin-split`
 - State: OPEN
-- Commits: 4 (work-unit: artifacts → settings → server split → cli tests)
+- Commits: 6 (work-unit: artifacts → settings → server split → cli tests → PR note → gap closure: RED tests → GREEN impl)
 
 ## Final Summary
 
-- ✅ All 33 tasks ticked in `tasks.md`
-- ✅ All 4 verification gates pass (pytest, ruff check, ruff format, mypy)
+- ✅ All 37 tasks ticked in `tasks.md` (33 original + 4 Group 7 gap closure)
+- ✅ All 5 verification gates pass (pytest, ruff check, ruff format, mypy, pre-commit hook script)
+- ✅ Pre-commit guard installed (`scripts/check-no-env-staged.sh` + `.pre-commit-config.yaml`)
+- ✅ Boot abort contract pinned by e2e tests for both `nora-mcp` and `python -m nora`
 - ✅ `apply-progress.md` written
 - ✅ Branch pushed (`feat/nora-mcp-thin-split`)
 - ✅ PR open (#8)

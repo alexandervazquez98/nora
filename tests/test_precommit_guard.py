@@ -43,8 +43,7 @@ def _run_hook(stdin_text: str) -> subprocess.CompletedProcess[str]:
     """
     if not HOOK_SCRIPT.exists():
         raise AssertionError(
-            f"Guard script missing: {HOOK_SCRIPT}. "
-            f"Create it before running pre-commit checks."
+            f"Guard script missing: {HOOK_SCRIPT}. Create it before running pre-commit checks."
         )
     return subprocess.run(
         ["bash", str(HOOK_SCRIPT), "--from-stdin"],
@@ -60,9 +59,7 @@ def _run_hook(stdin_text: str) -> subprocess.CompletedProcess[str]:
 
 def test_regex_rejects_top_level_dotenv() -> None:
     """`.env` (no path prefix) MUST be flagged."""
-    assert ENV_PATH_REGEX.fullmatch(".env") is not None, (
-        "Regex MUST match a top-level `.env` path"
-    )
+    assert ENV_PATH_REGEX.fullmatch(".env") is not None, "Regex MUST match a top-level `.env` path"
 
 
 def test_regex_rejects_nested_dotenv() -> None:
@@ -84,16 +81,12 @@ def test_regex_allows_dotenv_example() -> None:
 
 def test_regex_allows_dotenv_test() -> None:
     """`.env.test` MUST NOT be flagged."""
-    assert ENV_PATH_REGEX.fullmatch(".env.test") is None, (
-        "Regex MUST NOT match `.env.test`"
-    )
+    assert ENV_PATH_REGEX.fullmatch(".env.test") is None, "Regex MUST NOT match `.env.test`"
 
 
 def test_regex_allows_dotenv_local() -> None:
     """`.env.local` MUST NOT be flagged (a common sibling convention)."""
-    assert ENV_PATH_REGEX.fullmatch(".env.local") is None, (
-        "Regex MUST NOT match `.env.local`"
-    )
+    assert ENV_PATH_REGEX.fullmatch(".env.local") is None, "Regex MUST NOT match `.env.local`"
 
 
 def test_regex_allows_unrelated_dotenvrc() -> None:
@@ -120,20 +113,15 @@ def test_script_rejects_dotenv_stdin() -> None:
         f"Guard script must exit 1 when `.env` is staged; "
         f"got returncode={proc.returncode}, stderr={proc.stderr!r}"
     )
-    assert ".env" in proc.stderr, (
-        f"Stderr should mention `.env`; got: {proc.stderr!r}"
-    )
-    assert "ERROR" in proc.stderr, (
-        f"Stderr should contain an ERROR prefix; got: {proc.stderr!r}"
-    )
+    assert ".env" in proc.stderr, f"Stderr should mention `.env`; got: {proc.stderr!r}"
+    assert "ERROR" in proc.stderr, f"Stderr should contain an ERROR prefix; got: {proc.stderr!r}"
 
 
 def test_script_rejects_nested_dotenv_stdin() -> None:
     """Feeding `subdir/.env` to the script exits non-zero."""
     proc = _run_hook("subdir/.env\n")
     assert proc.returncode == 1, (
-        f"Guard must reject nested `.env`; "
-        f"got returncode={proc.returncode}, stderr={proc.stderr!r}"
+        f"Guard must reject nested `.env`; got returncode={proc.returncode}, stderr={proc.stderr!r}"
     )
 
 
@@ -141,8 +129,7 @@ def test_script_allows_dotenv_example_stdin() -> None:
     """Feeding `.env.example` to the script exits zero (template is tracked)."""
     proc = _run_hook(".env.example\n")
     assert proc.returncode == 0, (
-        f"Guard must allow `.env.example`; "
-        f"got returncode={proc.returncode}, stderr={proc.stderr!r}"
+        f"Guard must allow `.env.example`; got returncode={proc.returncode}, stderr={proc.stderr!r}"
     )
 
 
@@ -150,8 +137,7 @@ def test_script_allows_empty_stdin() -> None:
     """No staged paths → guard exits zero."""
     proc = _run_hook("")
     assert proc.returncode == 0, (
-        f"Guard must allow empty stdin; "
-        f"got returncode={proc.returncode}, stderr={proc.stderr!r}"
+        f"Guard must allow empty stdin; got returncode={proc.returncode}, stderr={proc.stderr!r}"
     )
 
 
@@ -224,15 +210,12 @@ def test_precommit_config_registers_no_env_staging_hook() -> None:
 def test_precommit_config_runs_at_pre_commit_stage() -> None:
     """The hook MUST run at the `pre-commit` stage."""
     text = PRE_COMMIT_CONFIG.read_text()
-    assert "pre-commit" in text, (
-        f"Hook must run at pre-commit stage. Current content:\n{text}"
-    )
+    assert "pre-commit" in text, f"Hook must run at pre-commit stage. Current content:\n{text}"
 
 
 def test_precommit_config_is_local_repo() -> None:
     """The hook MUST be defined under `repo: local` (no remote dependency)."""
     text = PRE_COMMIT_CONFIG.read_text()
     assert "repo: local" in text, (
-        f"Hook should be defined under `repo: local` (no remote fetch). "
-        f"Current content:\n{text}"
+        f"Hook should be defined under `repo: local` (no remote fetch). Current content:\n{text}"
     )
