@@ -449,3 +449,113 @@ def test_search_with_missing_directory_returns_empty_list(tmp_path: Path) -> Non
     results = search_intervention_history(settings, sanitizer=Sanitizer())
 
     assert results == []
+
+
+# ---------------------------------------------------------------------------
+# R5 — get_device_lifecycle_summary
+# ---------------------------------------------------------------------------
+
+
+def test_lifecycle_summary_no_history_returns_status_marker(tmp_path: Path) -> None:
+    """Empty dir → `{"status": "NO_HISTORY_FOUND", "target_ip": target_ip}` exactly."""
+    from nora.intervention_memory.tools import get_device_lifecycle_summary
+    from nora.sanitizer import Sanitizer
+
+    settings = _settings_for(tmp_path)
+
+    result = get_device_lifecycle_summary(settings, target_ip="10.0.0.99", sanitizer=Sanitizer())
+
+    assert result == {"status": "NO_HISTORY_FOUND", "target_ip": "10.0.0.99"}
+
+
+def test_lifecycle_summary_success_returns_all_six_fields(tmp_path: Path) -> None:
+    """Two matching records → SUCCESS with all 6 fields + correct shape."""
+    from nora.intervention_memory.tools import get_device_lifecycle_summary
+    from nora.sanitizer import Sanitizer
+
+    settings = _settings_for(tmp_path)
+    _write_record(
+        tmp_path / "r1.json",
+        _make_record(
+            intervention_id="INT-1",
+            target_ip="10.0.0.4",
+            timestamp_unix=100,
+            stage="PRE_DIAGNOSTIC",
+            ticket_number="TKT-7400",
+        ),
+    )
+    _write_record(
+        tmp_path / "r2.json",
+        _make_record(
+            intervention_id="INT-2",
+            target_ip="10.0.0.4",
+            timestamp_unix=200,
+            stage="POST_INTERVENTION",
+            ticket_number="TKT-7401",
+        ),
+    )
+    sanitizer = Sanitizer()
+
+    result = get_device_lifecycle_summary(settings, target_ip="10.0.0.4", sanitizer=sanitizer)
+
+    assert result["status"] == "SUCCESS"
+    assert result["target_ip"] == "10.0.0.4"
+    assert result["total_recorded_interventions"] == 2
+    # Stages ordered DESC by timestamp.
+    assert result["stages_recorded"] == ["POST_INTERVENTION", "PRE_DIAGNOSTIC"]
+    # Both tickets in the sorted list.
+    assert sorted(result["associated_tickets"]) == ["TKT-7400", "TKT-7401"]
+    # latest_intervention is the most recent (timestamp_unix=200).
+    assert result["latest_intervention"]["timestamp_unix"] == 200
+    assert result["latest_intervention"]["intervention_id"] == "INT-2"
+    # All 6 keys present.
+    assert set(result.keys()) == {
+        "status",
+        "target_ip",
+        "total_recorded_interventions",
+        "associated_tickets",
+        "stages_recorded",
+        "latest_intervention",
+        "known_pre_existing_offline_subscribers",
+    }
+
+
+def test_known_pre_existing_offline_subscribers_from_latest_pre_diagnostic(tmp_path: Path) -> None:
+    """Two PRE_DIAGNOSTIC records → newer record's subscriber list wins."""
+    from nora.intervention_memory.tools import get_device_lifecycle_summary
+    from nora.sanitizer import Sanitizer
+
+    settings = _settings_for(tmp_path)
+    # Older PRE_DIAGNOSTIC (timestamp 100) with subscriber luid=1.
+    older = _make_record(
+        intervention_id="INT-OLD",
+        target_ip="10.0.0.4",
+        timestamp_unix=100,
+        stage="PRE_DIAGNOSTIC",
+    )
+    older["network_equipment"]["pre_existing_offline_subscribers"] = [
+        {"luid": 1, "mac": "aa:bb:cc:dd:ee:01", "ip": "10.0.0.51", "note": "old"}
+    ]
+    _write_record(tmp_path / "older.json", older)
+    # Newer PRE_DIAGNOSTIC (timestamp 300) with subscriber luid=7.
+    newer = _make_record(
+        intervention_id="INT-NEW",
+        target_ip="10.0.0.4",
+        timestamp_unix=300,
+        stage="PRE_DIAGNOSTIC",
+    )
+    newer["network_equipment"]["pre_existing_offline_subscribers"] = [
+        {"luid": 7, "mac": "aa:bb:cc:dd:ee:02", "ip": "10.0.0.52", "note": "newer"}
+    ]
+    _write_record(tmp_path / "newer.json", newer)
+    sanitizer = Sanitizer()
+
+    result = get_device_lifecycle_summary(settings, target_ip="10.0.0.4", sanitizer=sanitizer)
+
+    assert result["status"] == "SUCCESS"
+    subs = result["known_pre_existing_offline_subscribers"]
+    assert len(subs) == 1
+    assert subs[0]["luid"] == 7
+    # The newer record's MAC literal is masked (sanitized).
+    assert "aa:bb:cc:dd:ee:02" not in subs[0]["mac"]
+    assert "SWITCH_ACC_" in subs[0]["mac"]
