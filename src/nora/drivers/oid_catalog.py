@@ -18,6 +18,13 @@ operator override at ``Settings.nora_oid_catalogs_path``. On a
 ``(vendor, model, firmware)`` collision the operator copy wins. The
 required-OID set is now per-``(vendor, model)`` so a second vendor
 can introduce its own schema without a global rename.
+
+PR 2 (ADR #17 P2): ``resolve`` is semver-aware. It compares the requested
+firmware against the registry via ``packaging.version.Version`` so
+pre-release (``-rc.1``) and build (``+build.5``) metadata are stripped
+before compare (``base_version``); a strict-major mismatch raises
+``CatalogNotFoundError`` naming both majors; a minor mismatch falls back
+to the closest lower minor and emits a literal telemetry warning.
 """
 
 from __future__ import annotations
@@ -25,6 +32,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import sys
 from collections.abc import Iterator
 from pathlib import Path
@@ -35,10 +43,13 @@ if sys.version_info >= (3, 14):
 else:
     from importlib.abc import Traversable
 
+from packaging.version import InvalidVersion, Version
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from nora.config import Settings
 from nora.drivers.exceptions import CatalogNotFoundError, CatalogVerificationError
+
+logger = logging.getLogger("nora.drivers.oid_catalog")
 
 # ---------------------------------------------------------------------------
 # REQUIRED_OIDS — per-(vendor, model) required-OID table.
@@ -109,14 +120,109 @@ class OidCatalogRegistry:
     def resolve(self, ref: tuple[str, str, str]) -> OidCatalog:
         """Return the verified catalog for `(vendor, model, firmware)`.
 
-        Raises `CatalogNotFoundError` if the registry has no entry for
-        the requested triple.
+        PR 2 (ADR #17 P2): semver-aware resolution. The algorithm runs in
+        three passes against the registry:
+
+        1. **Exact-pin lookup** — bit-identical to PR 1's behaviour;
+           returns immediately. Preserves the operator-only test path.
+        2. **Pre-release / build strip** — ``Version(...).base_version``
+           drops ``-rc.1`` and ``+build.5`` so ``15.2.1-rc.1`` matches
+           ``15.2.1``. Returns silently (no warning) when the bare
+           version matches.
+        3. **Strict-major + minor-descending fallback** — major mismatch
+           raises ``CatalogNotFoundError`` with both majors in the
+           message; minor mismatch returns the closest lower minor and
+           emits a literal telemetry warning.
+
+        Raises ``CatalogNotFoundError`` when no candidate matches.
         """
-        try:
+        vendor, model, firmware = ref
+
+        # Pass 1 — exact-pin lookup (bit-identical to PR 1).
+        if ref in self._catalogs:
             return self._catalogs[ref]
-        except KeyError as exc:
-            vendor, model, firmware = ref
-            raise CatalogNotFoundError(ref) from exc
+
+        # Pass 2 — pre-release / build metadata strip via
+        # ``Version(...).base_version``. An invalid firmware string (e.g.
+        # ``"v15.2.1"``) fails ``Version``; we keep ``req_version=None``
+        # and fall through to the strict-major branch, which surfaces
+        # the typed error.
+        try:
+            req_version = Version(firmware)
+        except InvalidVersion:
+            req_version = None
+        if req_version is not None:
+            req_base = req_version.base_version
+            for (v, m, fw), catalog in self._catalogs.items():
+                if v != vendor or m != model:
+                    continue
+                try:
+                    if Version(fw).base_version == req_base:
+                        return catalog
+                except InvalidVersion:
+                    continue
+
+        # Pass 3 — strict-major hard fail. Collect every catalog for
+        # the same (vendor, model); if no entry shares the request's
+        # major, raise ``CatalogNotFoundError`` whose message names
+        # both the requested and the registered majors so an operator
+        # can see at a glance which major line the fleet runs against.
+        candidates: list[tuple[Version, OidCatalog]] = []
+        for (v, m, fw), catalog in self._catalogs.items():
+            if v != vendor or m != model:
+                continue
+            try:
+                candidates.append((Version(fw), catalog))
+            except InvalidVersion:
+                continue
+
+        if req_version is None or not candidates:
+            raise CatalogNotFoundError(ref)
+
+        registered_majors = sorted({fw_version.major for fw_version, _ in candidates})
+        same_major = [
+            (fw_version, catalog)
+            for fw_version, catalog in candidates
+            if fw_version.major == req_version.major
+        ]
+        if not same_major:
+            exc = CatalogNotFoundError(ref)
+            exc.args = (
+                f"major mismatch for {ref}: requested major {req_version.major}, "
+                f"registered majors {registered_majors}",
+            )
+            raise exc
+
+        # Pass 4 — minor descending fallback. Pick the highest registered
+        # version strictly less than the request (deterministic, since
+        # the registry was built deterministically in `verify`) and emit
+        # the literal telemetry warning so an operator reading server
+        # stderr can see which minor line the fleet fell back to.
+        eligible = [
+            (fw_version, catalog) for fw_version, catalog in same_major if fw_version < req_version
+        ]
+        if not eligible:
+            # Same major, but no version is strictly less than the
+            # request — e.g. the registry has only `15.3.1` and the
+            # caller asked for `15.3.0`. Same miss surface as the
+            # major-mismatch branch: typed ``CatalogNotFoundError``
+            # whose message names the requested major.
+            exc = CatalogNotFoundError(ref)
+            exc.args = (
+                f"no catalog <= requested {firmware} in major {req_version.major} "
+                f"(ref={ref}); registered in major: "
+                f"{sorted(fw_version.release for fw_version, _ in same_major)}",
+            )
+            raise exc
+
+        eligible.sort(key=lambda pair: pair[0], reverse=True)
+        chosen_catalog = eligible[0][1]
+        logger.warning(
+            "OID catalog fallback: requested %s, using %s (minor mismatch)",
+            firmware,
+            chosen_catalog.firmware,
+        )
+        return chosen_catalog
 
     # ------------------------------------------------------------------
     # Boot-time construction

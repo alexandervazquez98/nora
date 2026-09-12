@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -108,21 +109,55 @@ def test_resolve_under_explicit_path(
 
 
 # ---------------------------------------------------------------------------
-# R2 — Per-firmware pin (fail-closed)
+# Strict-Major Hard Fail — locking fixture reissued under PR 2 (ADR #17 P2)
 # ---------------------------------------------------------------------------
 
 
 def test_unknown_firmware_raises_catalog_not_found(tmp_catalogs_dir: Path) -> None:
-    """No matching catalog file → `CatalogNotFoundError`, driver does not start."""
+    """Locking fixture reissued under `Strict-Major Hard Fail` (PR 2).
+
+    Spec scenario: ``Strict-Major Hard Fail > major mismatch raises a
+    typed exception``. The ``tmp_catalogs_dir`` fixture is unchanged
+    (operators ship only ``15.x`` catalogs); the request ``99.0.0``
+    triggers the new strict-major branch in ``resolve``. The exception
+    message MUST name both majors so operators grep server logs for
+    ``99`` (requested) and ``15`` (registered).
+
+    Per spec migration note in `oid-catalog/spec.md`: "Test
+    `test_unknown_firmware_raises_catalog_not_found` is reissued under
+    `Strict-Major Hard Fail` — the fixture requests `99.0.0` against
+    only `15.x` catalogs and still raises a typed
+    `CatalogNotFoundError`."
+    """
+    # Write a 15.x catalog so the registry has a registered major;
+    # otherwise the strict-major branch has no registered majors to
+    # name in the message.
+    _write_signed_catalog(
+        tmp_catalogs_dir,
+        vendor="cambium",
+        model="pmp450i",
+        firmware="15.2.1",
+        oids=dict(_SAMPLE_BUILTIN_OIDS),
+        key=SAMPLE_CATALOG_KEY,
+    )
     registry = OidCatalogRegistry.verify(
         built_in_root=None,
         operator_root=tmp_catalogs_dir,
-        signing_key="any-key",
+        signing_key=SAMPLE_CATALOG_KEY,
     )
     with pytest.raises(CatalogNotFoundError) as exc:
         registry.resolve(("cambium", "pmp450i", "99.0.0"))
-    assert "99.0.0" in str(exc.value)
-    assert "cambium" in str(exc.value)
+    message = str(exc.value)
+    assert "99.0.0" in message
+    assert "cambium" in message
+    # PR 2 addition: the strict-major message names both majors so the
+    # operator can see which major line the fleet runs against.
+    assert "99" in message, (
+        f"Strict-major message must name the requested major 99; got: {message!r}"
+    )
+    assert "15" in message, (
+        f"Strict-major message must name the registered major 15; got: {message!r}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -639,6 +674,182 @@ class TestMultiRoot:
         assert ("cambium", "pmp450i", "15.2.1") in {tuple(ref) for ref in registry.loaded_refs}
         catalog = registry.resolve(("cambium", "pmp450i", "15.2.1"))
         assert catalog.oids["ssr"] == "1.3.6.1.4.1.161.19.3.1.1.5.0"
+
+
+# ---------------------------------------------------------------------------
+# PR 2 — Semver-aware firmware resolution (ADR #17 P2)
+# ---------------------------------------------------------------------------
+
+
+class TestSemverResolution:
+    """PR 2: ``resolve`` compares firmware strings semver-aware.
+
+    Each scenario maps directly to a spec acceptance scenario in
+    `openspec/changes/2026-09-12-oid-catalog-hybrid-semver/spec.md`:
+
+    * ``test_exact_match_returns_without_warning`` → ``Semver-Aware
+      Firmware Resolution > exact match returns without warning``.
+    * ``test_pre_release_request_matches_bare_version`` → ``Semver-Aware
+      Firmware Resolution > pre-release request matches the bare
+      version``.
+    * ``test_major_mismatch_raises_typed_exception`` → ``Strict-Major
+      Hard Fail > major mismatch raises a typed exception``.
+    * ``test_minor_mismatch_returns_closest_lower_minor_with_literal_warning`` →
+      ``Minor Descending Fallback With Literal Warning > minor mismatch
+      returns closest lower minor with literal warning``.
+    """
+
+    def test_exact_match_returns_without_warning(
+        self,
+        tmp_catalogs_dir: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Scenario: exact match returns without warning.
+
+        Registry holds ``(cambium, pmp450i, 15.2.1)``. ``resolve`` of
+        the same triple returns the catalog silently — no WARNING-level
+        record is emitted. ADR #17 P2 acceptance: "Firmware idéntico al
+        catálogo: sin warning".
+        """
+        _write_signed_catalog(
+            tmp_catalogs_dir,
+            vendor="cambium",
+            model="pmp450i",
+            firmware="15.2.1",
+            oids=dict(_SAMPLE_BUILTIN_OIDS),
+            key=SAMPLE_CATALOG_KEY,
+        )
+        registry = OidCatalogRegistry.verify(
+            built_in_root=None,
+            operator_root=tmp_catalogs_dir,
+            signing_key=SAMPLE_CATALOG_KEY,
+        )
+
+        with caplog.at_level(logging.WARNING, logger="nora.drivers.oid_catalog"):
+            catalog = registry.resolve(("cambium", "pmp450i", "15.2.1"))
+
+        assert catalog.firmware == "15.2.1"
+        assert all(r.levelno < logging.WARNING for r in caplog.records), (
+            f"Exact match must not emit WARNING; got: {[r.getMessage() for r in caplog.records]!r}"
+        )
+
+    def test_pre_release_request_matches_bare_version(
+        self,
+        tmp_catalogs_dir: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Scenario: pre-release request matches the bare version.
+
+        Registry holds ``(cambium, pmp450i, 15.2.1)``. Requesting
+        ``15.2.1-rc.1`` returns the catalog at ``15.2.1`` without warning
+        (pre-release and build metadata are stripped before compare via
+        ``packaging.version.Version(...).base_version``).
+        """
+        _write_signed_catalog(
+            tmp_catalogs_dir,
+            vendor="cambium",
+            model="pmp450i",
+            firmware="15.2.1",
+            oids=dict(_SAMPLE_BUILTIN_OIDS),
+            key=SAMPLE_CATALOG_KEY,
+        )
+        registry = OidCatalogRegistry.verify(
+            built_in_root=None,
+            operator_root=tmp_catalogs_dir,
+            signing_key=SAMPLE_CATALOG_KEY,
+        )
+
+        with caplog.at_level(logging.WARNING, logger="nora.drivers.oid_catalog"):
+            catalog = registry.resolve(("cambium", "pmp450i", "15.2.1-rc.1"))
+
+        assert catalog.firmware == "15.2.1"
+        assert all(r.levelno < logging.WARNING for r in caplog.records), (
+            "Pre-release strip must not emit WARNING; got: "
+            f"{[r.getMessage() for r in caplog.records]!r}"
+        )
+
+    def test_major_mismatch_raises_typed_exception(self, tmp_catalogs_dir: Path) -> None:
+        """Scenario: major mismatch raises a typed exception.
+
+        Registry holds only ``(cambium, pmp450i, 15.2.1)``. Resolving
+        ``16.0.0`` raises :class:`CatalogNotFoundError` and the message
+        names BOTH majors (requested = 16, registered = 15) so the
+        operator can see which major line the fleet runs against.
+        """
+        _write_signed_catalog(
+            tmp_catalogs_dir,
+            vendor="cambium",
+            model="pmp450i",
+            firmware="15.2.1",
+            oids=dict(_SAMPLE_BUILTIN_OIDS),
+            key=SAMPLE_CATALOG_KEY,
+        )
+        registry = OidCatalogRegistry.verify(
+            built_in_root=None,
+            operator_root=tmp_catalogs_dir,
+            signing_key=SAMPLE_CATALOG_KEY,
+        )
+
+        with pytest.raises(CatalogNotFoundError) as exc:
+            registry.resolve(("cambium", "pmp450i", "16.0.0"))
+
+        message = str(exc.value)
+        # Both majors must appear in the message — the requested one and
+        # the registered one. Operators grep server logs for these.
+        assert "16" in message, (
+            f"Exception message must name the requested major 16; got: {message!r}"
+        )
+        assert "15" in message, (
+            f"Exception message must name the registered major 15; got: {message!r}"
+        )
+
+    def test_minor_mismatch_returns_closest_lower_minor_with_literal_warning(
+        self,
+        tmp_catalogs_dir: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Scenario: minor mismatch returns closest lower minor with literal warning.
+
+        Registry holds ``(cambium, pmp450i, 15.2.1)`` AND
+        ``(cambium, pmp450i, 15.3.0)``. Resolving ``15.3.1`` returns the
+        catalog at ``15.3.0`` (the highest strictly-less-than) and emits
+        the LITERAL telemetry string
+        ``"OID catalog fallback: requested 15.3.1, using 15.3.0 (minor mismatch)"``.
+        ADR #17 P2 acceptance: the literal is locked by the spec scenario
+        and must match byte-for-byte.
+        """
+        _write_signed_catalog(
+            tmp_catalogs_dir,
+            vendor="cambium",
+            model="pmp450i",
+            firmware="15.2.1",
+            oids=dict(_SAMPLE_BUILTIN_OIDS),
+            key=SAMPLE_CATALOG_KEY,
+        )
+        _write_signed_catalog(
+            tmp_catalogs_dir,
+            vendor="cambium",
+            model="pmp450i",
+            firmware="15.3.0",
+            oids=dict(_SAMPLE_BUILTIN_OIDS),
+            key=SAMPLE_CATALOG_KEY,
+        )
+        registry = OidCatalogRegistry.verify(
+            built_in_root=None,
+            operator_root=tmp_catalogs_dir,
+            signing_key=SAMPLE_CATALOG_KEY,
+        )
+
+        with caplog.at_level(logging.WARNING, logger="nora.drivers.oid_catalog"):
+            catalog = registry.resolve(("cambium", "pmp450i", "15.3.1"))
+
+        assert catalog.firmware == "15.3.0"
+        assert len(caplog.records) >= 1, (
+            f"Expected at least one log record; got: {[r.getMessage() for r in caplog.records]!r}"
+        )
+        assert caplog.records[0].message == (
+            "OID catalog fallback: requested 15.3.1, using 15.3.0 (minor mismatch)"
+        )
 
 
 # ---------------------------------------------------------------------------
