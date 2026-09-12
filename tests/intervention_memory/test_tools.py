@@ -807,3 +807,133 @@ def test_correlate_sorts_conflicts_by_frequency_delta_asc(tmp_path: Path) -> Non
     assert deltas == sorted(deltas)
     assert deltas[0] == 0.0  # CO_CHANNEL first
     assert result["detected_conflicts"][0]["potential_conflict"] == "CO_CHANNEL"
+
+
+# ---------------------------------------------------------------------------
+# R10 — shim delegation contract
+# ---------------------------------------------------------------------------
+
+
+def test_shim_tools_class_exposes_three_async_methods() -> None:
+    """R10-S1 — `Tools` class has 3 `async def` methods matching the MCP tool names.
+
+    Uses `inspect.getsource(Tools)` and greps for the three `async def`
+    lines. openchat's deploy script relies on the same shape for
+    `inspect.getsource(Tools)` rendering.
+    """
+    import inspect
+
+    from nora.intervention_memory.shim_webui import Tools
+
+    src = inspect.getsource(Tools)
+    for method in ("search_intervention_history", "get_device_lifecycle_summary", "correlate_sector_interference"):
+        assert f"async def {method}" in src, (
+            f"Shim Tools class missing `async def {method}` line; got source:\n{src}"
+        )
+
+
+def test_shim_methods_delegate_to_tools_module() -> None:
+    """R10-S2 — each shim method delegates to the library function (no drift).
+
+    Monkeypatch `nora.intervention_memory.tools.search_intervention_history`
+    to return a sentinel; call the shim method; assert the patched fn
+    was called once and the result is propagated.
+    """
+    import asyncio
+    from unittest import mock as _mock
+
+    from nora.intervention_memory import tools as tools_mod
+    from nora.intervention_memory.shim_webui import Tools
+
+    sentinel = {"delegated": True, "args": "from-shim-test"}
+
+    with _mock.patch.object(
+        tools_mod,
+        "search_intervention_history",
+        return_value=sentinel,
+    ) as patched:
+        shim = Tools()
+        # Run the async method synchronously for the assertion.
+        result_str = asyncio.run(shim.search_intervention_history(target_ip="10.0.0.5"))
+
+    assert patched.call_count == 1
+    # Verify the kwargs propagated.
+    kwargs = patched.call_args.kwargs
+    assert kwargs["target_ip"] == "10.0.0.5"
+    assert result_str == '{"delegated": true, "args": "from-shim-test"}'
+
+
+def test_shim_methods_delegate_to_lifecycle() -> None:
+    """`get_device_lifecycle_summary` shim method delegates to library."""
+    import asyncio
+    from unittest import mock as _mock
+
+    from nora.intervention_memory import tools as tools_mod
+    from nora.intervention_memory.shim_webui import Tools
+
+    sentinel = {"status": "SUCCESS", "target_ip": "10.0.0.4"}
+
+    with _mock.patch.object(
+        tools_mod,
+        "get_device_lifecycle_summary",
+        return_value=sentinel,
+    ) as patched:
+        shim = Tools()
+        result_str = asyncio.run(shim.get_device_lifecycle_summary(target_ip="10.0.0.4"))
+
+    assert patched.call_count == 1
+    assert patched.call_args.kwargs["target_ip"] == "10.0.0.4"
+    assert "SUCCESS" in result_str
+
+
+def test_shim_methods_delegate_to_correlate() -> None:
+    """`correlate_sector_interference` shim method delegates to library."""
+    import asyncio
+    from unittest import mock as _mock
+
+    from nora.intervention_memory import tools as tools_mod
+    from nora.intervention_memory.shim_webui import Tools
+
+    sentinel = {"is_frequency_clear_on_tower": True, "detected_conflicts": []}
+
+    with _mock.patch.object(
+        tools_mod,
+        "correlate_sector_interference",
+        return_value=sentinel,
+    ) as patched:
+        shim = Tools()
+        result_str = asyncio.run(
+            shim.correlate_sector_interference(tower_name="TWR-ISABEL", target_frequency_mhz=5760.0)
+        )
+
+    assert patched.call_count == 1
+    assert patched.call_args.kwargs["tower_name"] == "TWR-ISABEL"
+    assert patched.call_args.kwargs["target_frequency_mhz"] == 5760.0
+    assert "TWR-ISABEL" in result_str or "is_frequency_clear_on_tower" in result_str
+
+
+def test_shim_accepts_and_ignores_event_emitter() -> None:
+    """`__event_emitter__` kwarg is accepted and ignored (openwebui passes it)."""
+    import asyncio
+    from unittest import mock as _mock
+
+    from nora.intervention_memory import tools as tools_mod
+    from nora.intervention_memory.shim_webui import Tools
+
+    sentinel = {"delegated": True}
+
+    with _mock.patch.object(tools_mod, "search_intervention_history", return_value=sentinel):
+        shim = Tools()
+
+        async def fake_emitter(event: Any) -> None:
+            return None
+
+        # Pass `__event_emitter__` and a wildcard kwarg to confirm both are accepted.
+        result_str = asyncio.run(
+            shim.search_intervention_history(
+                target_ip="10.0.0.5",
+                __event_emitter__=fake_emitter,
+                some_unknown_kwarg="ignored",
+            )
+        )
+    assert result_str == '{"delegated": true}'
