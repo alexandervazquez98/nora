@@ -8,21 +8,19 @@ Defines how NORA loads runtime configuration through Pydantic `Settings`, never 
 
 ### Requirement: Pydantic Settings Is the Only Configuration Source
 
-All runtime configuration MUST be loaded via a single Pydantic `Settings` subclass; code under `src/nora/` MUST NOT call `os.environ` directly.
+All runtime configuration MUST be loaded via a single Pydantic `Settings` subclass; code under `src/nora/` MUST NOT call `os.environ` directly. The class MUST expose exactly seven user-settable fields; the nine former fields MUST NOT be present.
 
 #### Scenario: settings load from `.env`
 
-- GIVEN `.env` sets `NORA_LLM_PROVIDER=lmstudio`
+- GIVEN `.env` sets `NORA_OID_CATALOGS_PATH=./data/oid-catalogs/`
 - WHEN `Settings()` is instantiated
-- THEN the `provider` field equals `lmstudio`
-- AND no `os.environ` call appears anywhere in `src/nora/`
+- THEN `nora_oid_catalogs_path == "./data/oid-catalogs/"` AND no `os.environ` call appears anywhere in `src/nora/`
 
 #### Scenario: missing required setting fails fast
 
-- GIVEN `.env` is absent and the active provider requires `GEMINI_API_KEY`
+- GIVEN `.env` is absent and `nora_oid_catalog_signing_key` has no value
 - WHEN the process starts
-- THEN startup aborts with a typed validation error naming the missing field
-- AND the exit code is non-zero
+- THEN startup aborts with a typed validation error naming `nora_oid_catalog_signing_key` AND the exit code is non-zero
 
 #### Scenario: extra unknown settings are ignored
 
@@ -32,98 +30,19 @@ All runtime configuration MUST be loaded via a single Pydantic `Settings` subcla
 
 ### Requirement: Synthetic `.env.example`
 
-A tracked `.env.example` MUST list every variable the application reads, MUST use clearly synthetic placeholder values, and MUST NOT contain any real credential, IP, hostname, MAC, or serial number.
+A tracked `.env.example` MUST list every variable the application reads (the seven surviving fields), MUST use synthetic placeholder values, MUST NOT exceed 20 lines, and MUST NOT list any of the nine former LLM or journal keys.
 
 #### Scenario: `.env.example` contains placeholders only
 
 - GIVEN `.env.example` is committed
 - WHEN a reviewer greps it for `=` values
-- THEN every value is a placeholder such as `change-me` or an RFC 5737 documentation IP
-- AND no value matches a private IPv4 pattern
+- THEN every value is a placeholder such as `change-me` or an RFC 5737 documentation IP AND no value matches a private IPv4 pattern
 
 #### Scenario: `.env.example` mirrors every read variable
 
-- GIVEN a new field is added to `Settings`
-- WHEN the implementation lands
-- THEN the same key appears in `.env.example`
-- AND a checklist or test flags a mismatch
-
-### Requirement: Provider Credential Isolation
-
-Only the active provider's credential MUST be required at startup; inactive providers' credentials MUST NOT be loaded, logged, or transmitted.
-
-#### Scenario: `lmstudio` active does not require `GEMINI_API_KEY`
-
-- GIVEN `NORA_LLM_PROVIDER=lmstudio` and no `GEMINI_API_KEY` in `.env`
-- WHEN the process starts
-- THEN startup succeeds
-- AND no Gemini credential is read or echoed
-
-#### Scenario: `gemini` active requires `GEMINI_API_KEY`
-
-- GIVEN `NORA_LLM_PROVIDER=gemini` and no `GEMINI_API_KEY` in `.env`
-- WHEN the process starts
-- THEN startup aborts with a validation error naming `GEMINI_API_KEY`
-
-### Requirement: Credentials Never Appear in String Representations
-
-`repr()` and `str()` of any `Settings` instance, log line, or MCP tool response MUST NOT contain the value of any secret field.
-
-#### Scenario: `repr(settings)` masks secrets
-
-- GIVEN `Settings()` with `GEMINI_API_KEY=secret-value`
-- WHEN `repr(settings)` is evaluated
-- THEN the literal `secret-value` is NOT present
-- AND the masked form is shown instead
-
-#### Scenario: log lines never contain secrets
-
-- GIVEN the application logs `Settings loaded`
-- WHEN a developer inspects the log
-- THEN no line contains the value of any secret field
-
-#### Scenario: tool responses never contain secrets
-
-- GIVEN `nora_health` is invoked
-- WHEN the tool response is serialised
-- THEN no credential value appears in any field
-
-### Requirement: Settings Load Status Is Observable
-
-`Settings` MUST expose a `loaded_from` field; `nora_health` MUST surface it.
-
-#### Scenario: `.env` precedence over process environment
-
-- GIVEN `.env` sets `NORA_LLM_PROVIDER=gemini`
-- AND the process env exports `NORA_LLM_PROVIDER=lmstudio`
-- WHEN `Settings()` is instantiated
-- THEN `provider == "gemini"` (`.env` wins)
-- AND `loaded_from` lists `.env`
-
-#### Scenario: defaults are explicit when nothing is set
-
-- GIVEN no `.env` and no relevant env vars are present
-- WHEN `Settings()` is instantiated
-- THEN every field has the documented default
-- AND `loaded_from` lists `defaults`
-
-### Requirement: Telemetry Path Sanitization Boundary
-
-Before any user-supplied value leaves the process (LLM request, MCP tool payload), the telemetry sanitizer MUST be invoked; configuration values MUST never be passed to the sanitizer as user content.
-
-#### Scenario: settings values flow untouched to providers
-
-- GIVEN `Settings.model_id == "some-model"`
-- WHEN the LLM provider client is built
-- THEN `model_id` is passed verbatim to the SDK
-- AND the sanitizer is NOT applied to `model_id`
-
-#### Scenario: user-supplied prompt is sanitized before send
-
-- GIVEN a user prompt contains a private IPv4 literal
-- WHEN the LLM provider receives the prompt
-- THEN the literal has been replaced by a synthetic alias
-- AND the SDK never observes the original literal
+- GIVEN the seven Settings fields
+- WHEN the file is inspected
+- THEN each field appears exactly once AND the file is at most 20 lines long
 
 ### Requirement: `.env` Is Never Tracked
 
@@ -140,3 +59,63 @@ Before any user-supplied value leaves the process (LLM request, MCP tool payload
 - GIVEN a developer runs `git add .env --force`
 - WHEN the pre-commit hook runs
 - THEN the commit is rejected with a clear message
+
+### Requirement: Operator Can Boot With Only The Seven Surviving Env Vars
+
+`nora-mcp` MUST start successfully when `Settings()` is instantiated with only the seven surviving fields present in the environment; it MUST NOT require any of the nine former fields. `pyproject.toml` MUST NOT list `lmstudio` or `google-genai` in `[project.dependencies]`.
+
+#### Scenario: pyproject.toml has no LLM SDK dependencies
+
+- GIVEN `pyproject.toml`
+- WHEN its `[project.dependencies]` block is parsed
+- THEN `lmstudio` and `google-genai` are NOT listed
+
+#### Scenario: nora-mcp boots with only the surviving env vars
+
+- GIVEN only `NORA_OID_CATALOGS_PATH`, `NORA_DEVICES_INVENTORY_PATH`, `NORA_OID_CATALOG_SIGNING_KEY`, `NORA_INTERVENTIONS_DIR`, `NORA_INTERVENTIONS_KEYWORD_SEARCH_MAX_RECORDS`, `NORA_INTERVENTIONS_CORRELATE_SCAN_LIMIT` are exported
+- WHEN `nora-mcp` is invoked as a subprocess
+- THEN the process starts without error AND the four-tool surface is reachable over stdio
+### Requirement: Credentials Never Appear in String Representations
+
+`repr()`, `str()`, or any log line emitted by `Settings` MUST NOT contain the value of any secret field. This contract is scoped to in-process string representations and log output; MCP tool response redaction is owned by `nora-mcp-server > Security Boundary — No Secrets in Tool Responses` and is intentionally NOT re-stated here.
+
+#### Scenario: `repr(settings)` masks secrets
+
+- GIVEN `Settings()` is instantiated with `nora_oid_catalog_signing_key` set to `do-not-leak-this-key`
+- WHEN `repr(settings)` is evaluated
+- THEN the literal `do-not-leak-this-key` is NOT present AND the masked `SecretStr` form (`**********`) IS present
+
+#### Scenario: log lines never contain secrets
+
+- GIVEN `Settings()` is loaded with `nora_oid_catalog_signing_key` set to `hidden-secret-value`
+- WHEN the application logs the `Settings` object via `%r` formatting
+- THEN the literal `hidden-secret-value` is NOT present in any captured log line
+
+### Requirement: Settings Load Status Is Observable
+
+`Settings` MUST expose a `loaded_from` field whose value is one of the literals `.env`, `process_env`, or `defaults`. The custom-source precedence (`.env` > process env > defaults) MUST apply to every surviving user-settable field.
+
+#### Scenario: `.env` precedence over process environment
+
+- GIVEN `.env` sets `NORA_OID_CATALOGS_PATH=./data/from-dotenv/`
+- AND the process environment exports `NORA_OID_CATALOGS_PATH=./data/from-process-env/`
+- WHEN `Settings()` is instantiated
+- THEN `nora_oid_catalogs_path == "./data/from-dotenv/"` AND `loaded_from == ".env"`
+
+#### Scenario: process_env branch when no `.env`
+
+- GIVEN no `.env` file is present
+- AND the process environment exports `NORA_OID_CATALOGS_PATH=/etc/nora/from-process-env/`
+- WHEN `Settings()` is instantiated
+- THEN `nora_oid_catalogs_path == "/etc/nora/from-process-env/"` AND `loaded_from == "process_env"`
+
+#### Scenario: defaults are explicit when nothing is set
+
+- GIVEN no `.env` file is present
+- AND no `NORA_*`, `LMSTUDIO_*`, or `GEMINI_*` env vars are set
+- WHEN `Settings()` is instantiated
+- THEN every surviving field has the documented default AND `loaded_from == "defaults"`
+
+## Cross-References
+
+- Tool-response secret redaction: `nora-mcp-server > Security Boundary — No Secrets in Tool Responses`

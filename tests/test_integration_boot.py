@@ -149,11 +149,16 @@ def _drive_tools_list(
 
 def _boot_env(tmp_path: Path) -> dict[str, str]:
     """A hermetic env that boots the thin MCP without network deps."""
+    from nora.data import BUILTIN_BASELINE_SIGNING_KEY
+
     (tmp_path / "catalogs").mkdir(exist_ok=True)
     (tmp_path / "devices.yaml").write_text("# empty\n")
     return {
         **os.environ,
-        "NORA_OID_CATALOG_SIGNING_KEY": "test-boot-key",
+        # PR 1 (ADR #17): boot must verify the shipped built-in baseline
+        # with the placeholder key it was signed with. See
+        # `nora.data.BUILTIN_BASELINE_SIGNING_KEY`.
+        "NORA_OID_CATALOG_SIGNING_KEY": BUILTIN_BASELINE_SIGNING_KEY,
         "NORA_OID_CATALOGS_PATH": str(tmp_path / "catalogs"),
         "NORA_DEVICES_INVENTORY_PATH": str(tmp_path / "devices.yaml"),
     }

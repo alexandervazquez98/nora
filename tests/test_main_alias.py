@@ -61,9 +61,15 @@ def test_python_dash_m_nora_emits_deprecation_warning(tmp_path: Path) -> None:
     """
     py = _venv_python()
 
+    # PR 1 (ADR #17): the registry also HMAC-verifies the shipped
+    # built-in baseline at `src/nora/data/oid-catalogs/`. The key here
+    # MUST match the placeholder that baseline was signed with, otherwise
+    # the server aborts at boot. See `nora.data.BUILTIN_BASELINE_SIGNING_KEY`.
+    from nora.data import BUILTIN_BASELINE_SIGNING_KEY
+
     env = {
         **os.environ,
-        "NORA_OID_CATALOG_SIGNING_KEY": "test-alias-key",
+        "NORA_OID_CATALOG_SIGNING_KEY": BUILTIN_BASELINE_SIGNING_KEY,
         "NORA_OID_CATALOGS_PATH": str(tmp_path / "catalogs"),
         "NORA_DEVICES_INVENTORY_PATH": str(tmp_path / "devices.yaml"),
     }

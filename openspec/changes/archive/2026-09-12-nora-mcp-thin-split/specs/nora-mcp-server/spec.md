@@ -1,5 +1,11 @@
 # Delta for nora-mcp-server
 
+## RENAMED Requirements
+
+### Requirement: R-NEW-1 — Three Read-Only Tools on the Global MCP Instance → R-NEW-1 — Four `@mcp.tool` Registrations
+
+(Reason: Surface grew from three read-only tools to four tools during the cycle; renamed to reflect the new tool count and the explicit `@mcp.tool` registration mechanism.)
+
 ## REMOVED Requirements
 
 ### Requirement: `nora_health` Tool Contract
@@ -9,14 +15,6 @@
 ### Requirement: Edge Cases
 
 (Reason: `provider timeout` scenario depended on `nora_health`.)
-
-### Requirement: R-NEW-1 / R-NEW-2 / R-NEW-3 / R-NEW-4
-
-(Reason: Original three-tool scope changed to four-tool; auto-trace middleware removed. Re-issued under MODIFIED.)
-
-### Requirement: Stderr-Only Logging, Telemetry Sanitizer Boundary, Security Boundary, Observability
-
-(Reason: Example text referenced removed tools. Re-issued under MODIFIED below.)
 
 ## MODIFIED Requirements
 

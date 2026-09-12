@@ -19,6 +19,8 @@ from pathlib import Path
 
 import pytest
 
+from nora.data import BUILTIN_BASELINE_SIGNING_KEY
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -96,10 +98,13 @@ def _boot_server(
         env.update(extra_env)
     for k in ("NORA_LLM_PROVIDER", "LMSTUDIO_MODEL_ID", "GEMINI_API_KEY"):
         env.pop(k, None)
-    # Provide a non-empty signing key for the OID catalog verifier so
-    # boot reaches the FastMCP layer (the test scenarios exercise the
-    # nora_health tool, which doesn't need catalog data).
-    env.setdefault("NORA_OID_CATALOG_SIGNING_KEY", "test-integration-key")
+    # Provide the signing key the shipped built-in baseline was signed
+    # with (PR 1 / ADR #17). Pre-PR1 any non-empty key worked because
+    # `verify_all` only scanned the (empty) operator root; post-PR1 the
+    # built-in is HMAC-verified too.
+    from nora.data import BUILTIN_BASELINE_SIGNING_KEY
+
+    env.setdefault("NORA_OID_CATALOG_SIGNING_KEY", BUILTIN_BASELINE_SIGNING_KEY)
     # Empty catalogs dir per call: the registry scans an empty path and
     # resolves nothing — the test surface never invokes the driver.
     import tempfile
@@ -291,7 +296,7 @@ def test_subprocess_handles_malformed_json_gracefully(tmp_path: Path) -> None:
         check=False,
         env={
             **os.environ,
-            "NORA_OID_CATALOG_SIGNING_KEY": "test-integration-key",
+            "NORA_OID_CATALOG_SIGNING_KEY": BUILTIN_BASELINE_SIGNING_KEY,
             "NORA_OID_CATALOGS_PATH": str(tmp_path / "tmp-catalogs"),
             "NORA_DEVICES_INVENTORY_PATH": str(tmp_path / "tmp-devices.yaml"),
         },
@@ -341,7 +346,7 @@ def test_subprocess_silently_ignores_legacy_llm_env_keys(tmp_path: Path) -> None
         check=False,
         env={
             **{k: v for k, v in os.environ.items() if k != "GEMINI_API_KEY"},
-            "NORA_OID_CATALOG_SIGNING_KEY": "test-integration-key",
+            "NORA_OID_CATALOG_SIGNING_KEY": BUILTIN_BASELINE_SIGNING_KEY,
             "NORA_OID_CATALOGS_PATH": str(tmp_path / "tmp-catalogs"),
             "NORA_DEVICES_INVENTORY_PATH": str(tmp_path / "tmp-devices.yaml"),
         },
