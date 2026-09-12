@@ -199,9 +199,7 @@ class OidCatalogRegistry:
         # the literal telemetry warning so an operator reading server
         # stderr can see which minor line the fleet fell back to.
         eligible = [
-            (fw_version, catalog)
-            for fw_version, catalog in same_major
-            if fw_version < req_version
+            (fw_version, catalog) for fw_version, catalog in same_major if fw_version < req_version
         ]
         if not eligible:
             # Same major, but no version is strictly less than the
@@ -218,7 +216,7 @@ class OidCatalogRegistry:
             raise exc
 
         eligible.sort(key=lambda pair: pair[0], reverse=True)
-        chosen_version, chosen_catalog = eligible[0]
+        chosen_catalog = eligible[0][1]
         logger.warning(
             "OID catalog fallback: requested %s, using %s (minor mismatch)",
             firmware,
