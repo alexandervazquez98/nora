@@ -18,7 +18,8 @@ from nora.drivers.exceptions import (
     CatalogNotFoundError,
     CatalogVerificationError,
 )
-from nora.drivers.oid_catalog import (
+from nora.drivers.oid_catalog import (  # noqa: PLC0415
+    _REQUIRED_OIDS_BY_VENDOR_MODEL,
     REQUIRED_OIDS,
     OidCatalog,
     OidCatalogRegistry,
@@ -261,6 +262,74 @@ def test_oid_catalog_module_is_network_free() -> None:
         elif isinstance(node, ast.ImportFrom):
             module = node.module or ""
             assert not any(module.startswith(b) for b in banned), module
+
+
+# ---------------------------------------------------------------------------
+# PR 1 — Per-(vendor, model) REQUIRED_OIDS table (ADR #17 schema fix)
+# ---------------------------------------------------------------------------
+
+
+class TestMultiRoot:
+    """PR 1: per-(vendor, model) required-OID table + multi-root scan."""
+
+    def test_required_oids_by_vendor_model_covers_pmp450i(self) -> None:
+        """`_REQUIRED_OIDS_BY_VENDOR_MODEL` covers the v1 PMP 450i triple.
+
+        Spec: `Catalog Schema Validation > missing OID fails verification
+        per triple` requires the per-(vendor, model) scoping to be
+        observable from the module surface.
+        """
+        assert ("cambium", "pmp450i") in _REQUIRED_OIDS_BY_VENDOR_MODEL
+        pmp450i_required = _REQUIRED_OIDS_BY_VENDOR_MODEL[("cambium", "pmp450i")]
+        assert isinstance(pmp450i_required, frozenset)
+        # Six well-known RF metrics the driver folds into a typed report.
+        expected = {
+            "radioDownlinkRate",
+            "radioUplinkRate",
+            "signalStrengthRx",
+            "signalStrengthTx",
+            "ssr",
+            "modulationMode",
+        }
+        assert expected.issubset(pmp450i_required)
+
+    def test_required_oids_alias_matches_pmp450i_table(self) -> None:
+        """`REQUIRED_OIDS` is the derived alias for the PMP 450i triple.
+
+        Driver import (`from nora.drivers.oid_catalog import REQUIRED_OIDS`)
+        stays untouched; the alias is what the existing R5 test asserts
+        against. PR 1 swaps the source from a hand-written frozenset to
+        `_REQUIRED_OIDS_BY_VENDOR_MODEL[("cambium", "pmp450i")]`.
+        """
+        assert REQUIRED_OIDS is _REQUIRED_OIDS_BY_VENDOR_MODEL[("cambium", "pmp450i")]
+
+    def test_missing_oid_fails_per_triple(
+        self, tmp_catalogs_dir: Path, sample_catalog: dict[str, Any]
+    ) -> None:
+        """Scenario: missing OID fails verification per triple.
+
+        Build a catalog that lacks `radioDownlinkRate` and re-sign it so
+        the HMAC matches the truncated `oids` map. The verifier MUST
+        raise `CatalogVerificationError` naming the missing key.
+        """
+        # Strip `radioDownlinkRate` from the catalog body.
+        payload = json.loads(sample_catalog["path"].read_text())
+        payload["oids"].pop("radioDownlinkRate")
+        canonical_body = json.dumps(
+            payload["oids"], sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        payload["hmac_sha256"] = hmac.new(
+            sample_catalog["key"].encode(), canonical_body, hashlib.sha256
+        ).hexdigest()
+        sample_catalog["path"].write_text(json.dumps(payload))
+
+        with pytest.raises(CatalogVerificationError) as exc:
+            OidCatalogRegistry.verify(
+                built_in_root=None,
+                operator_root=tmp_catalogs_dir,
+                signing_key=sample_catalog["key"],
+            )
+        assert "radioDownlinkRate" in str(exc.value)
 
 
 # ---------------------------------------------------------------------------
