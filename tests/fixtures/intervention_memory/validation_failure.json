@@ -1,0 +1,14 @@
+{
+  "intervention_id": "INT-INVALID",
+  "timestamp_iso": "2026-01-01T12:00:00+00:00",
+  "timestamp_unix": 1700002000,
+  "ticket_number": "TKT-9999",
+  "target_ip": "192.0.2.99",
+  "stage": "BOGUS_STAGE",
+  "record_name": "This record carries a bogus stage literal",
+  "status": "COMPLETED",
+  "agent_name": "netops-bot-test",
+  "findings_and_dictamen": "Storage layer MUST skip this file at read time.",
+  "created_at": "2026-01-01T12:00:00+00:00",
+  "network_equipment": {}
+}

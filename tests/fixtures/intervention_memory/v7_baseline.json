@@ -1,0 +1,30 @@
+{
+  "intervention_id": "INT-1-192.0.2.10-1700000000-V7",
+  "timestamp_iso": "2026-01-01T12:00:00+00:00",
+  "timestamp_unix": 1700000000,
+  "ticket_number": "TKT-7400",
+  "target_ip": "192.0.2.10",
+  "stage": "PRE_DIAGNOSTIC",
+  "record_name": "Pre-diagnostic baseline for 192.0.2.10",
+  "status": "COMPLETED",
+  "agent_name": "netops-bot-v7",
+  "findings_and_dictamen": "Interference observed on host TWR-ISABEL-5GHZ-A near 192.0.2.10.",
+  "created_at": "2026-01-01T12:00:00+00:00",
+  "network_equipment": {
+    "target_ip": "192.0.2.10",
+    "system_name": "TWR-ISABEL-5GHZ-A",
+    "carrier_frequency_mhz": 5760.0,
+    "total_provisioned_sms": 100,
+    "active_online_sms_count": 92,
+    "pre_existing_offline_sms_count": 8,
+    "pre_existing_offline_subscribers": [
+      {
+        "luid": 7,
+        "mac": "aa:bb:cc:dd:ee:01",
+        "ip": "192.0.2.51",
+        "uptime": "12d 3h",
+        "note": "dormant, mac aa:bb:cc:dd:ee:01"
+      }
+    ]
+  }
+}

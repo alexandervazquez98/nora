@@ -274,3 +274,80 @@ def test_disable_switch_makes_explicit_tools_raise(disabled_settings: Settings) 
         asyncio.run(_expect("nora_session_summarize", {}))
     finally:
         server_mod.unregister_auto_trace_middleware()
+
+
+# ---------------------------------------------------------------------------
+# R-NEW-1 ADDED Scenario 3 — auto-trace records new tool invocations.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "tool_name, tool_args",
+    [
+        ("search_intervention_history", {"target_ip": "10.0.0.5"}),
+        ("get_device_lifecycle_summary", {"target_ip": "10.0.0.5"}),
+        (
+            "correlate_sector_interference",
+            {"tower_name": "TWR-ISABEL", "target_frequency_mhz": 5760.0},
+        ),
+    ],
+)
+def test_auto_trace_records_intervention_memory_tool_call(
+    tool_name: str,
+    tool_args: dict[str, Any],
+    hermetic_settings: Settings,
+    fresh_journal,  # noqa: ANN001
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R-NEW-1-S3 — driving each new tool produces one journal step with outcome=success."""
+    from nora import server as server_mod
+
+    # Stub the library functions so the test does NOT depend on real
+    # intervention JSON files on disk.
+    from nora.intervention_memory import tools as tools_mod
+
+    if tool_name == "search_intervention_history":
+        monkeypatch.setattr(tools_mod, "search_intervention_history", lambda **kw: [])
+    elif tool_name == "get_device_lifecycle_summary":
+        monkeypatch.setattr(
+            tools_mod,
+            "get_device_lifecycle_summary",
+            lambda **kw: {"status": "NO_HISTORY_FOUND", "target_ip": kw.get("target_ip")},
+        )
+    elif tool_name == "correlate_sector_interference":
+        monkeypatch.setattr(
+            tools_mod,
+            "correlate_sector_interference",
+            lambda **kw: {"is_frequency_clear_on_tower": True, "detected_conflicts": []},
+        )
+
+    provider = mock.MagicMock()
+    server_mod.set_runtime_state(hermetic_settings, provider)
+    server_mod.init_session_journal(hermetic_settings)
+    server_mod.register_auto_trace_middleware()
+    try:
+
+        async def _run() -> Any:
+            from fastmcp import Client
+
+            async with Client(server_mod.mcp) as client:
+                return await client.call_tool(tool_name, tool_args)
+
+        asyncio.run(_run())
+
+        # Exactly one step recorded for the tool call.
+        test_journal_dir = hermetic_settings.nora_session_journal_dir
+        journal_files = list(test_journal_dir.glob("*.json"))
+        assert len(journal_files) == 1, (
+            f"Expected one journal file after {tool_name}; got {journal_files!r}"
+        )
+        with journal_files[0].open() as f:
+            state = json.load(f)
+        assert len(state["trace"]) == 1, (
+            f"Expected one step after {tool_name}; got {state['trace']!r}"
+        )
+        step = state["trace"][0]
+        assert step["tool"] == tool_name
+        assert step["outcome"] == "success"
+    finally:
+        server_mod.unregister_auto_trace_middleware()
