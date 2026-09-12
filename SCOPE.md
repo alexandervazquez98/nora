@@ -107,3 +107,18 @@ NORA incorpora un motor de inferencia desacoplado mediante un patrón de fábric
 | **Fase 4** | **Interfaces FastMCP & API REST** | Servidor FastMCP para asistentes de IA y microservicio FastAPI para integración con sistemas de monitoreo y bots de campo. |
 | **Fase 5** | **Diagnóstico Avanzado & Módulos RF** | Integración con datos de perfiles de enlace, estimación de diversidad espacial y herramientas de análisis de interferencia. |
 
+---
+
+## 7. Nota Operativa — Thin MCP Split (nora-mcp-thin-split)
+
+A partir del split `nora-mcp-thin-split`, la superficie de NORA queda reducida a un servidor MCP delgado (`nora-mcp`) que expone **cuatro herramientas**:
+
+1. `snmp_get_pmp450i_radio_metrics` — Driver SNMP PMP 450i (lectura única).
+2. `search_intervention_history` — Búsqueda de intervenciones (sólo lectura).
+3. `get_device_lifecycle_summary` — Resumen de ciclo de vida del dispositivo.
+4. `correlate_sector_interference` — Correlación de interferencia entre sectores.
+
+Las herramientas `nora_health` y las cuatro `nora_session_*` fueron eliminadas junto con el módulo LLM (`lmstudio`, `gemini`) y el `SessionJournal`. El punto de entrada canónico es el script de consola `nora-mcp` (wired a `nora.cli.main`). `python -m nora` se conserva como alias deprecado y será removido en la siguiente minor release; los operadores deben migrar a `nora-mcp` antes de esa fecha.
+
+Configuración reducida a 7 claves (de 16): toda la sección LLM/Provider y SessionJournal fue removida del `.env.example`.
+

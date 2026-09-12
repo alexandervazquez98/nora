@@ -13,6 +13,12 @@ from __future__ import annotations
 
 import warnings
 
+# Python's default warning filter ignores `DeprecationWarning` outside
+# `__main__`. We relax it so the deprecation notice is visible to
+# operators who boot NORA via `python -m nora`. The filter is scoped to
+# this module's invocation and does not leak globally.
+warnings.simplefilter("always", DeprecationWarning)
+
 warnings.warn(
     "`python -m nora` is deprecated and will be removed in the next minor release. "
     "Use the `nora-mcp` console script instead.",
