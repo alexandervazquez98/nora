@@ -1,0 +1,118 @@
+# Tasks: nora-mcp-thin-split
+
+> Strict-TDD breakdown. Ordering follows `design.md` §11.
+
+## Review Workload Forecast
+
+~1,700 changed lines (≈1,500 deletions + 200 additions). 400-line budget risk: High. Chained PRs recommended: No (locked decision 4). Chain strategy: size-exception. Delivery strategy: ask-on-risk.
+
+Decision needed before apply: Yes
+Chained PRs recommended: No
+Chain strategy: size-exception
+400-line budget risk: High
+
+Single-PR work unit (size:exception). Focused test: `uv run pytest tests/test_no_llm_journal_imports.py tests/test_config.py tests/test_server.py tests/test_integration_boot.py -q`. Runtime harness: `nora-mcp` + `python -m nora` via `tests/test_integration_boot.py`. Rollback: `git revert` merge (orphan NDJSON non-destructive).
+
+## Group 0 — AST guard
+
+- [x] 0.1 Add `tests/test_no_llm_journal_imports.py` (RED) — AST scan over `src/nora/server.py` + `src/nora/__main__.py` rejecting `nora.llm` / `nora.core.session_journal` / `nora.core.session_*`. RED today; GREEN after 1.2, 2.2, 4.1–4.4.
+
+## Group 1 — Settings trim + dep drop
+
+- [x] 1.1 Add `tests/test_config.py::test_settings_has_seven_user_fields` (RED) — `len(Settings.model_fields) == 8`; 9 forbidden names absent.
+- [x] 1.2 Trim `src/nora/config.py` (GREEN) — DELETE 9 LLM/journal fields, `ProviderName`, `_DEFAULT_OPERATOR_ALIAS`, `_check_provider_credential`; rewrite `__all__`.
+- [x] 1.3 Regenerate `.env.example` — ≤20 lines, 7 keys. Verify `wc -l .env.example` ≤ 20.
+- [x] 1.4 Add `tests/test_config.py::test_pyproject_has_no_llm_sdk_deps` (RED) then drop `lmstudio>=1,<2` + `google-genai>=1,<3` from `pyproject.toml:24-31` (GREEN); run `uv lock`.
+- [x] 1.5 Update `tests/test_config.py::test_no_os_environ_in_src_nora` allow-list — add `cli.py`.
+
+## Group 2 — Tool removal + server.py trim
+
+- [x] 2.1 Add `tests/test_server.py::test_server_exposes_exactly_four_tools` (RED) — names == {driver + 3 intervention}.
+- [x] 2.2 Strip `src/nora/server.py` (GREEN) — DELETE `nora_health` + 4 `nora_session_*` + `nora_health_impl` + `_HEALTH_PROBE_SYSTEM` + `_state_to_payload` + `_current_provider` + `_AutoTraceMiddleware` + `_derive_summary` + LLM/journal imports. Rewrite `set_runtime_state(settings)` / `get_runtime_state() -> Settings`. Rewrite 3 intervention tool bodies. Trim `__all__`.
+- [x] 2.3 Add `tests/test_server.py::test_thin_middleware_emits_one_log_line_per_call` (RED).
+- [x] 2.4 Replace `_AutoTraceMiddleware` with `_ToolLogMiddleware` (~15L, GREEN) — `Middleware` subclass emitting one `logger.info` per call. NO journal.
+- [x] 2.5 Update `tests/test_server.py` — DELETE 5 `nora_health` tests + `_call_nora_health`; RENAME nine-tools → four-tools; REWRITE boot-smoke (no `build_provider`); UPDATE 3 `set_runtime_state(settings, provider)` → single-arg.
+- [x] 2.6 Update `tests/conftest.py::hermetic_settings` + `tests/test_server_driver_tool.py::_wired_driver_env` — DELETE 4 journal kwargs + `_reset_llm_factory_cache` autouse.
+- [x] 2.7 DELETE 13 journal-flavoured test files (`tests/test_{session_journal_airgap,server_auto_trace,server_session_tools,llm}.py` + `tests/core/*`). Verify `grep -r "session_journal\|nora.llm" tests/` clean.
+
+## Group 3 — Driver seam removal
+
+- [x] 3.1 Add `tests/test_driver_snmp_pmp450i.py::test_fetch_radio_metrics_does_not_call_session_journal` (RED) — AST + runtime.
+- [x] 3.2 Cut seam in `src/nora/drivers/snmp_pmp450i/driver.py` (GREEN) — DELETE `_default_set_focus` (L37-52), alias (L55-57), call (L115), docstring step; rewrite `__all__`.
+- [x] 3.3 Remove re-export from `src/nora/drivers/snmp_pmp450i/__init__.py` (L34, L59).
+- [x] 3.4 Update 4 driver tests — DELETE `mock.patch("...nora_session_set_focus", ...)` in `tests/test_driver_snmpsim_v2c.py:234`, `tests/test_driver_snmpsim_v3.py:183`, `tests/test_driver_airgap.py:209`, `tests/test_driver_snmp_pmp450i.py:300`; DELETE `_stub_set_focus` autouse (L35-52).
+
+## Group 4 — Module deletions
+
+- [x] 4.1 `git rm src/nora/llm.py` (261L).
+- [x] 4.2 `git rm src/nora/core/session_journal.py` (567L).
+- [x] 4.3 `git rm src/nora/core/{session_models,session_paths,session_redaction,session_rotation}.py` (359L).
+- [x] 4.4 `git rm src/nora/core/__init__.py`.
+
+## Group 5 — Entry point split
+
+- [x] 5.1 Add `tests/test_cli.py::test_cli_module_exists_and_exports_main` (RED).
+- [x] 5.2 Create `src/nora/cli.py` (~30L, GREEN) — sets `FASTMCP_SHOW_SERVER_BANNER=false`; `main()` wires `configure_logging → Settings → set_runtime_state(settings) → PromptRegistry → OidCatalogRegistry.verify_all → Inventory.from_yaml → set_driver(Pmp450iDriver(...)) → mcp.run(show_banner=False)`.
+- [x] 5.3 Replace `src/nora/__main__.py` with 12-line deprecation alias — `warnings.warn("`python -m nora` is deprecated and will be removed in the next minor release. Use `nora-mcp` instead.", DeprecationWarning, stacklevel=2)` + `from nora.cli import main`.
+- [x] 5.4 Update `pyproject.toml:34` — add `nora-mcp = "nora.cli:main"`; keep `nora = "nora.__main__:main"`.
+- [x] 5.5 Add `tests/test_main_alias.py::test_python_dash_m_nora_emits_deprecation_warning` — subprocess `python -m nora`; assert stderr contains `DeprecationWarning` + `will be removed in the next minor release`.
+
+## Group 6 — Integration verification
+
+- [x] 6.1 `uv run python -m pytest --cov=src/nora --cov-report=term-missing -q` — all green.
+- [x] 6.2 `uv run mypy --strict src/nora` — zero errors.
+- [x] 6.3 `uv run ruff check .` + `uv run ruff format --check .` — zero violations.
+- [x] 6.4 Add `tests/test_integration_boot.py` with `test_subprocess_nora_mcp_exposes_four_tools` + `test_subprocess_python_dash_m_nora_exposes_same_tools` + `test_subprocess_both_entry_points_expose_identical_tool_lists` — boot each entry point, JSON-RPC `initialize` + `tools/list`; assert 4-tool set in same order + `DeprecationWarning` on stderr for the alias.
+
+## Cross-cutting guards + forecast
+
+- [x] CC.1 `tests/intervention_memory/test_no_writes.py` stays green throughout.
+- [x] CC.2 `tests/test_no_llm_journal_imports.py` stays green from 0.1 to end.
+- [x] CC.3 Append deprecation note to `SCOPE.md`; `grep -q "nora-mcp" SCOPE.md` succeeds.
+
+## Group 7 — Verify-report gap closure (post-apply)
+
+Two gaps were surfaced by `verify-report.md` after the original 33 tasks
+landed:
+
+1. **CRITICAL** — secure-configuration Scenario "accidental staging is
+   rejected" had no implementation: no `.pre-commit-config.yaml`, no
+   `.git/hooks/pre-commit` (only `.sample` stubs). The `.gitignore`
+   blocks `git add -A`, but `git add .env --force` was undefended.
+2. **WARNING** — secure-configuration Scenario "missing required setting
+   fails fast" was only covered at the `Settings()` layer
+   (`tests/test_config.py::test_missing_required_setting_fails_fast`).
+   The boot abort contract (non-zero exit + typed error) was not pinned
+   end-to-end.
+
+Both gaps are now closed with the work units below. All tasks follow
+Strict TDD: RED test commit first, GREEN implementation commit second.
+
+- [x] 7.1 Add `tests/test_precommit_guard.py` (RED) — 17 tests across 3 layers:
+      regex pinning (`^(\.env|.*/\.env)$` matches `.env` and `<dir>/.env`
+      but NOT `.env.example`/`.env.test`/`.env.local`/`.envrc`), script
+      contract (exits 1 with ERROR on `.env`, exits 0 for allowed
+      siblings or empty stdin), and `.pre-commit-config.yaml` wiring
+      (`repo: local`, `id: no-env-staging`, `stages: [pre-commit]`).
+- [x] 7.2 Add `scripts/check-no-env-staged.sh` (GREEN) — bash guard that
+      reads staged paths from `git diff --cached --name-only
+      --diff-filter=ACMRT` (or from stdin in `--from-stdin` test mode)
+      and exits 1 with a clear ERROR message when any path matches
+      `^(\.env|.*/\.env)$`. Executable bit set; shebang `#!/usr/bin/env bash`.
+- [x] 7.3 Add `.pre-commit-config.yaml` (GREEN) — `repos: [local]` with
+      `hooks: [{id: no-env-staging, name: Block .env file staging,
+      entry: scripts/check-no-env-staged.sh, language: script,
+      pass_filenames: false, stages: [pre-commit]}]`.
+- [x] 7.4 Add e2e boot abort tests in `tests/test_integration_boot.py` (RED→GREEN)
+      — `test_subprocess_nora_mcp_exits_nonzero_on_empty_signing_key` and
+      `test_subprocess_python_dash_m_nora_exits_nonzero_on_empty_signing_key`.
+      Both boot their entry point with `NORA_OID_CATALOG_SIGNING_KEY`
+      unset and other required vars set; assert `returncode != 0` and
+      stderr mentions `signing`/`catalog`. Closes the WARNING: the
+      underlying abort at `cli.py:54` (`OidCatalogRegistry.verify_all`
+      raises `CatalogVerificationError`) is now pinned by an end-to-end
+      test that runs against both entry points.
+
+Total: 37 tasks (33 original + 4 gap-closure). All verification gates
+PASS after Group 7 lands: 278 pytest, 85.18% coverage, mypy --strict
+clean, ruff check + format clean, pre-commit guard script tested.

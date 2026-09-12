@@ -4,13 +4,17 @@ Single read-only surface exposed to the MCP layer. Construction is via
 dependency injection: the inventory, the catalog registry, and the
 `client_factory` (used to choose v2c vs v3 from the device's
 `snmp_version`) are passed in. Tests inject fakes; production wires
-the registry into the boot sequence in `__main__.py`.
+the registry into the boot sequence in `cli.py`.
 
-Flow (Driver-R1, R4, R5, R6):
+Flow (Driver-R1, R5, R6):
 
-    set_focus(device_id) -> resolve catalog -> get values for required OIDs ->
-    fold into `RadioMetricsReport`. The within-call OID cache ensures
-    repeated lookups for the same OID only emit one wire GET.
+    resolve catalog -> get values for required OIDs -> fold into
+    `RadioMetricsReport`. The within-call OID cache ensures repeated
+    lookups for the same OID only emit one wire GET.
+
+After the `nora-mcp-thin-split` cut, the driver no longer calls
+`nora_session_set_focus` — the SessionJournal was eliminated from the
+codebase entirely (locked decision 3 + 5).
 """
 
 from __future__ import annotations
@@ -30,31 +34,6 @@ from nora.drivers.snmp_pmp450i.client import SnmpClient
 from nora.drivers.snmp_pmp450i.report import RadioMetricsReport
 
 logger = logging.getLogger("nora.drivers.snmp_pmp450i")
-
-
-# `nora_session_set_focus` is injected at runtime; we import lazily so
-# tests that patch it at the module level still see the patched symbol.
-def _default_set_focus(device_id: str) -> dict[str, object]:
-    """Lazy import of the real `nora_session_set_focus` MCP tool.
-
-    Returning a dict mirrors the MCP tool's documented payload shape;
-    when a test patches this module attribute, the patched callable
-    runs instead.
-    """
-    from nora.core.session_journal import get_journal
-
-    journal = get_journal()
-    state = journal.set_focus(device_id)
-    return {
-        "session_id": state.session_id,
-        "focus_device_id": state.focus_device_id,
-        "devices_reviewed": list(state.devices_reviewed),
-    }
-
-
-# Module-level alias so tests can monkey-patch `nora_session_set_focus`
-# at the attribute level. `_default_set_focus` is the production path.
-nora_session_set_focus = _default_set_focus
 
 
 class _ClientFactory(Protocol):
@@ -102,18 +81,15 @@ class Pmp450iDriver:
 
         Steps:
 
-        1. `nora_session_set_focus(device_id)` — Driver-R4.
-        2. `Inventory.get(device_id)` — `DeviceNotFoundError` on miss.
-        3. Resolve the catalog for `(vendor, model, firmware)` — the
+        1. `Inventory.get(device_id)` — `DeviceNotFoundError` on miss.
+        2. Resolve the catalog for `(vendor, model, firmware)` — the
            catalog registry was verified at boot, so this is a pure
            lookup.
-        4. Open a client (v2c or v3) and fetch one value per required
+        3. Open a client (v2c or v3) and fetch one value per required
            OID. A within-call LRU cache deduplicates identical OIDs
            (`Driver-R6`).
-        5. `RadioMetricsReport.fold` produces the typed return.
+        4. `RadioMetricsReport.fold` produces the typed return.
         """
-        nora_session_set_focus(device_id)
-
         device = self._inventory.get(device_id)
         catalog = self._catalog_registry.resolve((device.vendor, device.model, device.firmware))
 
@@ -169,4 +145,4 @@ class Pmp450iDriver:
         return values
 
 
-__all__ = ["Pmp450iDriver", "nora_session_set_focus", "default_client_factory"]
+__all__ = ["Pmp450iDriver", "default_client_factory"]

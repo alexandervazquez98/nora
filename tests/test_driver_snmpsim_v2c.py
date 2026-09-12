@@ -215,7 +215,6 @@ def _build_driver(
 def test_v2c_full_fetch_returns_typed_report(snmpsim_v2c: dict[str, Any], tmp_path: Path) -> None:
     """`Pmp450iDriver.fetch_radio_metrics` returns a typed report over v2c."""
     _probe_agent_or_skip(snmpsim_v2c["host"], snmpsim_v2c["port"])
-    from unittest import mock
 
     from nora.config import Settings
 
@@ -230,11 +229,7 @@ def test_v2c_full_fetch_returns_typed_report(snmpsim_v2c: dict[str, Any], tmp_pa
     )
     _ = settings  # silence unused-warning
 
-    with mock.patch(
-        "nora.drivers.snmp_pmp450i.driver.nora_session_set_focus",
-        lambda device_id: {"focus_device_id": device_id, "devices_reviewed": [device_id]},
-    ):
-        report = driver.fetch_radio_metrics("ap-7400-01")
+    report = driver.fetch_radio_metrics("ap-7400-01")
 
     assert report.device_id == "ap-7400-01"
     assert report.radio_dl_rate_bps == 54000000

@@ -1,16 +1,24 @@
-"""NORA FastMCP server.
+"""NORA FastMCP server — thin split.
 
-Boots a FastMCP instance named "nora" over stdio and exposes a single tool,
-`nora_health`, that surfaces server metadata to LLM agents. The server
-contract demands that:
+Boots a FastMCP instance named "nora" over stdio and exposes exactly
+four `@mcp.tool` registrations:
+
+* `snmp_get_pmp450i_radio_metrics`         — PMP 450i SNMP driver.
+* `search_intervention_history`           — read-only intervention memory.
+* `get_device_lifecycle_summary`          — read-only intervention memory.
+* `correlate_sector_interference`         — read-only intervention memory.
+
+The thin server contract demands that:
 
 - All logging goes to stderr (stdout is reserved for JSON-RPC frames).
 - The tool response never echoes any secret read from `Settings`.
 - Free-text error messages are sanitized before they appear in tool output.
 
-The boot sequence is `Settings() -> build_provider() -> mcp.run()` and lives
-in `__main__.py`; this module only owns the server, the logging config,
-and the tool implementation.
+The boot sequence is `Settings() -> set_runtime_state(settings) ->
+OidCatalogRegistry.verify_all -> Inventory.from_yaml -> set_driver ->
+mcp.run()` and lives in `cli.py`; this module only owns the server,
+the logging config, the four tools, and a thin log-only middleware that
+emits one structured stderr line per tool call.
 """
 
 from __future__ import annotations
@@ -18,32 +26,22 @@ from __future__ import annotations
 import logging
 import sys
 import time
-from datetime import datetime, timezone
 from typing import Any
 
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 
-from nora import __version__
 from nora.config import Settings
-from nora.core.session_journal import (
-    SessionJournal,
-    SessionJournalError,
-    get_journal,
-    init_session_journal,
-)
 from nora.drivers import get_driver
 from nora.intervention_memory import tools as intervention_tools
-from nora.llm import LLMProvider
 from nora.sanitizer import Sanitizer
 
 logger = logging.getLogger("nora.server")
 
 mcp = FastMCP("nora")
 
-# Module-level state set during boot (`__main__.py`) or by tests.
+# Module-level state set during boot (`cli.py`) or by tests.
 _current_settings: Settings | None = None
-_current_provider: LLMProvider | None = None
 _sanitizer = Sanitizer()
 
 
@@ -68,157 +66,27 @@ def configure_logging() -> None:
     root.setLevel(logging.INFO)
 
 
-def set_runtime_state(settings: Settings, provider: LLMProvider) -> None:
-    """Inject runtime dependencies (used by `__main__` and by tests)."""
-    global _current_settings, _current_provider
+def set_runtime_state(settings: Settings) -> None:
+    """Inject runtime settings (used by `cli` and by tests)."""
+    global _current_settings
     _current_settings = settings
-    _current_provider = provider
 
 
-def get_runtime_state() -> tuple[Settings, LLMProvider]:
-    """Return the boot-time `(settings, provider)` pair.
+def get_runtime_state() -> Settings:
+    """Return the boot-time `Settings` instance.
 
     Raises if the server has not been initialised — this is the production
-    safety net against `nora_health` being called before `__main__` ran.
+    safety net against a tool being called before `cli.main()` ran.
     """
-    if _current_settings is None or _current_provider is None:
+    if _current_settings is None:
         raise RuntimeError(
             "NORA server state is not initialised; call nora.server.set_runtime_state() in main()"
         )
-    return _current_settings, _current_provider
+    return _current_settings
 
 
 # ---------------------------------------------------------------------------
-# `nora_health` tool
-# ---------------------------------------------------------------------------
-
-
-# System prompt used for the connectivity probe. Kept short and stable.
-_HEALTH_PROBE_SYSTEM = "You are a connectivity probe. Respond with a single short word."
-
-
-def nora_health_impl(settings: Settings, provider: LLMProvider) -> dict[str, Any]:
-    """Compute the `nora_health` response from `settings` and `provider`.
-
-    The public MCP tool (`nora_health`) wraps this; tests inject `settings`
-    and `provider` directly so we never need a subprocess for unit tests.
-    """
-    start = time.monotonic()
-    env_loaded = settings.loaded_from == ".env"
-    connectivity: str = "ok"
-    try:
-        provider.complete("ping", system=_HEALTH_PROBE_SYSTEM)
-    except Exception as exc:  # noqa: BLE001 - we surface as `unavailable`
-        sanitized = _sanitizer.sanitize(str(exc)).text
-        logger.warning(
-            "nora_health provider call failed: %s",
-            sanitized,
-        )
-        connectivity = "unavailable"
-
-    duration_ms = int((time.monotonic() - start) * 1000)
-    logger.info(
-        "tool=nora_health duration_ms=%d outcome=%s",
-        duration_ms,
-        connectivity,
-    )
-
-    return {
-        "version": __version__,
-        "active_provider": settings.nora_llm_provider,
-        "connectivity": connectivity,
-        "env_loaded": env_loaded,
-    }
-
-
-@mcp.tool
-def nora_health() -> dict[str, Any]:
-    """Return NORA's version, active provider, connectivity, and .env status.
-
-    The tool is read-only: it calls `provider.complete("ping")` with a fixed
-    system prompt and reports success or failure as `connectivity`.
-    """
-    settings, provider = get_runtime_state()
-    return nora_health_impl(settings, provider)
-
-
-# ---------------------------------------------------------------------------
-# SessionJournal explicit recall tools (R7, R9-S2, R14, R16).
-#
-# Three `@mcp.tool`s registered on the global `mcp` instance. They share
-# the module-level `_journal` singleton (set up by `init_session_journal`).
-# ---------------------------------------------------------------------------
-
-
-def _state_to_payload(state: Any) -> dict[str, Any]:
-    """Serialise `SessionState` (or compatible model) to a JSON-safe dict."""
-    import json
-
-    payload: dict[str, Any] = json.loads(json.dumps(state.model_dump(mode="json")))
-    return payload
-
-
-@mcp.tool
-def nora_session_get_state(include_rotated: bool = False) -> dict[str, Any]:
-    """Return the current `SessionState` as a JSON-safe dict.
-
-    On a missing canonical file, this call CREATES one with the empty
-    default state (R7-S2). When `include_rotated` is True, NDJSON steps
-    are merged into `trace` in `step` order (R16-S1).
-
-    Idempotent: consecutive calls return equivalent state (R7-S1).
-    """
-    journal = get_journal()
-    state = journal.get_state(include_rotated=include_rotated)
-    return _state_to_payload(state)
-
-
-@mcp.tool
-def nora_session_set_focus(device_id: str) -> dict[str, Any]:
-    """Record `device_id` as the active focus and append to `devices_reviewed`.
-
-    Idempotent on the same device id (R7-S4). Advances `last_updated`
-    (R14). The state is persisted atomically.
-    """
-    journal = get_journal()
-    state = journal.set_focus(device_id)
-    return _state_to_payload(state)
-
-
-@mcp.tool
-def nora_session_resume(session_id: str) -> dict[str, Any]:
-    """Load the named session as the active session.
-
-    R7-S5 / R9-S2 — the previously-active session is NOT mutated. The
-    in-memory `_session_id` is replaced; subsequent tool calls land on
-    the resumed session's canonical file.
-
-    R7-S6 — raises `SessionNotFoundError` if the named file is missing.
-    """
-    journal = get_journal()
-    state = journal.resume(session_id)
-    return _state_to_payload(state)
-
-
-@mcp.tool
-def nora_session_summarize() -> str:
-    """Return a non-empty Markdown digest of the current session.
-
-    Covers `focus_device_id`, `devices_reviewed`, and the last 10 step
-    summaries (R17). Pure projection — does NOT mutate the canonical
-    file or record a step.
-    """
-    journal = get_journal()
-    return journal.summarize()
-
-
-# ---------------------------------------------------------------------------
-# PMP 450i SNMP driver tool (Phase 2 — Driver Layer)
-#
-# Single `@mcp.tool` exposing the typed `RadioMetricsReport` returned by
-# `Pmp450iDriver.fetch_radio_metrics`. The tool body delegates to the
-# driver singleton injected at boot by `__main__.py` (or by tests via
-# `nora.drivers.registry.set_driver`).
+# PMP 450i SNMP driver tool
 # ---------------------------------------------------------------------------
 
 
@@ -227,8 +95,8 @@ def snmp_get_pmp450i_radio_metrics(device_id: str) -> dict[str, Any]:
     """Fetch a typed `RadioMetricsReport` for the named PMP 450i device.
 
     The tool body delegates to `Pmp450iDriver.fetch_radio_metrics`,
-    which sets the session focus before fetching (Driver-R4) and
-    surfaces typed driver exceptions on every wire failure (Driver-R5).
+    which surfaces typed driver exceptions on every wire failure
+    (Driver-R5).
 
     Returns a JSON-serialisable dict (no `dict` / `Any` shape — every
     field is a typed scalar from `RadioMetricsReport.model_dump(mode="json")`).
@@ -239,17 +107,7 @@ def snmp_get_pmp450i_radio_metrics(device_id: str) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Intervention memory MCP tools (Phase 3 — read-only).
-#
-# Three `@mcp.tool`s registered on the global `mcp` instance. Each is a
-# 3-line body that calls `get_runtime_state()` then delegates to the
-# source-of-truth library function in `nora.intervention_memory.tools`.
-# `_AutoTraceMiddleware` records every invocation for free (no
-# middleware change required — R-NEW-1 ADDED Scenario 3).
-#
-# Read-only guarantee: these tools ONLY read on-disk intervention JSON
-# files written by openchat. NORA never writes. The hard rule is
-# enforced structurally by `tests/intervention_memory/test_no_writes.py`.
+# Intervention memory MCP tools (read-only).
 # ---------------------------------------------------------------------------
 
 
@@ -280,7 +138,7 @@ def search_intervention_history(
     directory. The hard read-only rule is enforced structurally by an
     AST scan under `tests/intervention_memory/test_no_writes.py`.
     """
-    settings, _ = get_runtime_state()
+    settings = get_runtime_state()
     return intervention_tools.search_intervention_history(
         settings=settings,
         target_ip=target_ip,
@@ -307,7 +165,7 @@ def get_device_lifecycle_summary(target_ip: str) -> dict[str, Any]:
     Read-only — see `search_intervention_history` for the read-only
     guarantee and the AST-guard location.
     """
-    settings, _ = get_runtime_state()
+    settings = get_runtime_state()
     return intervention_tools.get_device_lifecycle_summary(
         settings=settings,
         target_ip=target_ip,
@@ -336,7 +194,7 @@ def correlate_sector_interference(
 
     Read-only — see `search_intervention_history`.
     """
-    settings, _ = get_runtime_state()
+    settings = get_runtime_state()
     return intervention_tools.correlate_sector_interference(
         settings=settings,
         tower_name=tower_name,
@@ -347,121 +205,46 @@ def correlate_sector_interference(
 
 
 # ---------------------------------------------------------------------------
-# Auto-trace middleware (Phase 2 — SessionJournal)
-#
-# Wraps every `@mcp.tool` invocation in the FastMCP dispatcher. Records
-# exactly one `SessionStep` per call, AFTER the tool body returns (or
-# raises) — the recording is durability-backed so a crash between the
-# tool body and the middleware returning leaves either old or new content
-# on disk, never a torn mix (R3).
-#
-# The middleware is registered exactly once via `register_auto_trace_middleware`,
-# typically called from `__main__.py` after `init_session_journal(...)`.
-# Tests that need the middleware call it explicitly.
+# Thin log-only middleware.
 # ---------------------------------------------------------------------------
 
 
-class _AutoTraceMiddleware(Middleware):
-    """Records every `@mcp.tool` call into the module-level `_journal` singleton.
+class _ToolLogMiddleware(Middleware):
+    """Emits exactly one structured stderr line per `@mcp.tool` invocation.
 
-    R3 — `record_step` (atomic JSON write) returns BEFORE this middleware
-    returns, so the on-disk state is one step ahead of the in-flight tool.
-
-    R12 — the middleware never mutates `result`. On a tool body exception
-    the middleware records with `outcome="error"` then RE-RAISES so the
-    JSON-RPC error surface is preserved.
+    Replaces `_AutoTraceMiddleware` from the pre-thin server. NO journal,
+    NO `record_step`; the contract is one `logger.info` line per call
+    shaped `tool=<name> duration_ms=<int> outcome=<success|error>`.
     """
 
-    def __init__(self, journal: SessionJournal) -> None:
-        self._journal = journal
-
     async def on_call_tool(self, context: Any, call_next: Any) -> Any:
-        # Lazy import keeps `server.py` importable in environments without
-        # the auto-trace test setup (e.g., tests that don't exercise it).
-        ts = datetime.now(timezone.utc)
         start = time.monotonic()
-        message = context.message
-        tool = getattr(message, "name", "<unknown>")
-        args = getattr(message, "arguments", None) or {}
-
+        tool = getattr(getattr(context, "message", None), "name", "<unknown>")
         try:
             result = await call_next(context)
-        except Exception as exc:
+        except Exception:
             duration_ms = int((time.monotonic() - start) * 1000)
-            sanitized = self._journal._sanitizer.sanitize(str(exc)).text
-            try:
-                self._journal.record_step(
-                    tool=tool,
-                    input_args=args,
-                    result_summary=sanitized,
-                    duration_ms=duration_ms,
-                    outcome="error",
-                    ts=ts,
-                )
-            except SessionJournalError as log_exc:  # pragma: no cover - defensive
-                logger.warning("auto-trace failed to record error step: %s", log_exc)
+            logger.info("tool=%s duration_ms=%d outcome=error", tool, duration_ms)
             raise
-
         duration_ms = int((time.monotonic() - start) * 1000)
-        summary = _derive_summary(result)
-        try:
-            self._journal.record_step(
-                tool=tool,
-                input_args=args,
-                result_summary=summary,
-                duration_ms=duration_ms,
-                outcome="success",
-                ts=ts,
-            )
-        except SessionJournalError as log_exc:  # pragma: no cover - defensive
-            logger.warning("auto-trace failed to record success step: %s", log_exc)
+        logger.info("tool=%s duration_ms=%d outcome=success", tool, duration_ms)
         return result
 
 
-def _derive_summary(result: Any) -> str:
-    """Return a short string summary for `result`.
+_tool_log_registered: bool = False
 
-    Strings pass through (truncated to 256 chars). Other values are
-    `repr()`d. The summary is later sanitized on write, so private IPv4 /
-    MAC / hostname literals in the string get masked before persistence.
+
+def register_tool_log_middleware() -> None:
+    """Register the `_ToolLogMiddleware` against the global `mcp` instance.
+
+    Idempotent: a second call is a no-op. Called from `cli.main()` and
+    from tests that exercise the middleware.
     """
-    if isinstance(result, str):
-        return result[:256]
-    return repr(result)[:256]
-
-
-_auto_trace_registered: bool = False
-
-
-def register_auto_trace_middleware(journal: SessionJournal | None = None) -> None:
-    """Register the `_AutoTraceMiddleware` against the global `mcp` instance.
-
-    Idempotent: a second call is a no-op (the same middleware stays
-    registered for the lifetime of the process). Pass `journal` to use a
-    non-default journal; otherwise `get_journal()` is consulted lazily
-    on every tool call (so swapping the module-level singleton also swaps
-    the journal the middleware writes to).
-    """
-    global _auto_trace_registered
-    if _auto_trace_registered:
+    global _tool_log_registered
+    if _tool_log_registered:
         return
-    middleware = _AutoTraceMiddleware(journal or get_journal())
-    mcp.add_middleware(middleware)
-    _auto_trace_registered = True
-    logger.info("auto-trace middleware registered")
-
-
-def unregister_auto_trace_middleware() -> None:
-    """Test-only hook — remove the auto-trace middleware from the global mcp.
-
-    Resets the `_auto_trace_registered` flag so a subsequent call to
-    `register_auto_trace_middleware()` re-adds a fresh instance.
-    """
-    global _auto_trace_registered
-    _auto_trace_registered = False
-    # Best-effort: drop any `_AutoTraceMiddleware` from the chain.
-    if hasattr(mcp, "middleware"):
-        mcp.middleware = [mw for mw in mcp.middleware if not isinstance(mw, _AutoTraceMiddleware)]
+    mcp.add_middleware(_ToolLogMiddleware())
+    _tool_log_registered = True
 
 
 __all__ = [
@@ -469,13 +252,9 @@ __all__ = [
     "configure_logging",
     "set_runtime_state",
     "get_runtime_state",
-    "nora_health_impl",
-    "_AutoTraceMiddleware",
-    "register_auto_trace_middleware",
-    "unregister_auto_trace_middleware",
-    "init_session_journal",  # re-exported for callers that need to wire up
-    # Phase 3 — Intervention memory MCP tools (re-exported for test discoverability).
+    "snmp_get_pmp450i_radio_metrics",
     "search_intervention_history",
     "get_device_lifecycle_summary",
     "correlate_sector_interference",
+    "register_tool_log_middleware",
 ]

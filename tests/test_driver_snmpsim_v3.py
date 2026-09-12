@@ -169,7 +169,6 @@ def test_v3_auth_priv_full_fetch_returns_typed_report(
 ) -> None:
     """A v3 auth+priv fetch against snmpsim returns a typed report."""
     _probe_agent_or_skip(snmpsim_v3["host"], snmpsim_v3["port"])
-    from unittest import mock
 
     driver = _build_v3_driver(
         tmp_path,
@@ -179,11 +178,7 @@ def test_v3_auth_priv_full_fetch_returns_typed_report(
         priv_password="change-me-priv",
     )
 
-    with mock.patch(
-        "nora.drivers.snmp_pmp450i.driver.nora_session_set_focus",
-        lambda device_id: {"focus_device_id": device_id, "devices_reviewed": [device_id]},
-    ):
-        report = driver.fetch_radio_metrics("sm-7400-02")
+    report = driver.fetch_radio_metrics("sm-7400-02")
 
     assert report.device_id == "sm-7400-02"
     assert report.radio_dl_rate_bps == 87000000

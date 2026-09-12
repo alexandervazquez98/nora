@@ -11,8 +11,7 @@ Precedence (per `specs/secure-configuration/spec.md`):
 3. Process environment variables
 4. Field defaults (lowest)
 
-`loaded_from` records which source actually supplied the configuration so the
-MCP `nora_health` tool can surface it.
+`loaded_from` records which source actually supplied the configuration.
 """
 
 from __future__ import annotations
@@ -24,15 +23,10 @@ from typing import Any, Literal
 from pydantic import SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-ProviderName = Literal["lmstudio", "gemini"]
 LoadSource = Literal[".env", "process_env", "defaults"]
 
 # Prefix used to detect process-env contribution in `loaded_from`.
 _PROCESS_ENV_PREFIX = "NORA_"
-
-# Default `nora_operator_alias`. Bounded by R13 to 64 chars; the field has
-# its own Pydantic constraint that the default MUST satisfy.
-_DEFAULT_OPERATOR_ALIAS: str = "anonymous"
 
 
 def _has_nora_env_var() -> bool:
@@ -48,27 +42,6 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
     )
-
-    nora_llm_provider: ProviderName = "lmstudio"
-    lmstudio_api_host: str = "localhost:1234"
-    lmstudio_model_id: str = "qwen2.5-7b-instruct"
-    gemini_api_key: SecretStr | None = None
-    gemini_model_id: str = "gemini-2.5-flash"
-
-    # --- SessionJournal (Phase 2) -------------------------------------------
-    # Per-process directory of canonical session files. Atomic writes, owner-
-    # only mode. Sanitizer keeps a separate alias map per session.
-    nora_session_journal_dir: Path = Path("./var/sessions/")
-    # Cap on the in-memory `trace` length before oldest steps are displaced to
-    # NDJSON. Operator disk budget is the only ceiling beyond this.
-    nora_session_trace_max_steps: int = 50
-    # Operator-controlled opt-out: when `false`, the auto-trace middleware
-    # skips recording entirely and the 3 explicit tools raise
-    # `JournalDisabledError`. Defaults to True so an empty value still records.
-    nora_session_journal_enabled: bool = True
-    # Operator identity written into `SessionState.operator_alias`. SHALL be
-    # ≤ 64 chars (per R13); the field is also constrained by Pydantic.
-    nora_operator_alias: str = _DEFAULT_OPERATOR_ALIAS
 
     # --- Driver layer (Phase 2 — PMP 450i driver) ---------------------------
     # Directory holding per-vendor/per-firmware OID catalog JSON files.
@@ -164,13 +137,6 @@ class Settings(BaseSettings):
         else:
             super().__init__()
 
-    @model_validator(mode="after")
-    def _check_provider_credential(self) -> "Settings":
-        """Gemini MUST have its API key when active; lmstudio has no credential."""
-        if self.nora_llm_provider == "gemini" and self.gemini_api_key is None:
-            raise ValueError("GEMINI_API_KEY is required when NORA_LLM_PROVIDER=gemini")
-        return self
-
     @classmethod
     def settings_customise_sources(
         cls,
@@ -193,4 +159,4 @@ class Settings(BaseSettings):
         )
 
 
-__all__ = ["Settings", "ProviderName", "LoadSource"]
+__all__ = ["Settings", "LoadSource"]
