@@ -128,4 +128,16 @@ None — all 33 tasks landed on first cut after RED → GREEN cycling.
 
 ## PR
 
-PR URL: see `gh pr view feat/nora-mcp-thin-split --json url` after push.
+PR URL: <https://github.com/alexandervazquez98/nora/pull/8>
+- Title: `feat(nora): thin MCP split — drop journal + LLM, expose 4 tools (nora-mcp-thin-split)`
+- Base: `main` ← Head: `feat/nora-mcp-thin-split`
+- State: OPEN
+- Commits: 4 (work-unit: artifacts → settings → server split → cli tests)
+
+## Final Summary
+
+- ✅ All 33 tasks ticked in `tasks.md`
+- ✅ All 4 verification gates pass (pytest, ruff check, ruff format, mypy)
+- ✅ `apply-progress.md` written
+- ✅ Branch pushed (`feat/nora-mcp-thin-split`)
+- ✅ PR open (#8)
