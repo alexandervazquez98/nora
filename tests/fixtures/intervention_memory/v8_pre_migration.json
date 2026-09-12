@@ -1,0 +1,41 @@
+{
+  "intervention_id": "INT-2-192.0.2.11-1700001000-V8",
+  "timestamp_iso": "2026-01-01T12:30:00+00:00",
+  "timestamp_unix": 1700001000,
+  "ticket_number": "TKT-7401",
+  "target_ip": "192.0.2.11",
+  "stage": "POST_INTERVENTION",
+  "record_name": "Post-intervention check for 192.0.2.11",
+  "status": "COMPLETED",
+  "agent_name": "netops-bot-v8",
+  "findings_and_dictamen": "Migration completed; signal stable.",
+  "created_at": "2026-01-01T12:30:00+00:00",
+  "recommended_action": "schedule follow-up diagnostic in 7 days",
+  "network_equipment": {
+    "target_ip": "192.0.2.11",
+    "system_name": "TWR-ISABEL-5GHZ-B",
+    "hardware_band": "5GHZ",
+    "carrier_frequency_mhz": 5770.0,
+    "total_provisioned_sms": 120,
+    "active_online_sms_count": 115,
+    "pre_existing_offline_sms_count": 5,
+    "frame_utilization_dl_pct": 42.5,
+    "frame_utilization_ul_pct": 31.0,
+    "pre_existing_offline_subscribers": [
+      {
+        "luid": 9,
+        "mac_address": "aa:bb:cc:dd:ee:02",
+        "ip": "192.0.2.61",
+        "uptime": "9d 1h",
+        "note": "dormant, mac aa:bb:cc:dd:ee:02"
+      },
+      {
+        "luid": 10,
+        "mac": "aa:bb:cc:dd:ee:03",
+        "ip": "192.0.2.62",
+        "uptime": "1d 4h",
+        "note": "recently offline"
+      }
+    ]
+  }
+}
