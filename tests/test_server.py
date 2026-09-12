@@ -410,3 +410,216 @@ def test_subprocess_boot_writes_only_jsonrpc_to_stdout() -> None:
     assert "active_provider" in stderr or "lmstudio" in stderr, (
         f"Expected startup log on stderr; got:\n{stderr}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Requirement: Intervention-Memory MCP Tools (Phase 3)
+# ---------------------------------------------------------------------------
+
+
+def test_server_module_exports_three_new_tool_names() -> None:
+    """R-NEW-1-S1 — `nora.server` re-exports the three intervention-memory tool names."""
+    from nora import server as server_mod
+
+    # The names MUST be importable from `nora.server`.
+    from nora.server import (  # type: ignore[attr-defined]
+        correlate_sector_interference,
+        get_device_lifecycle_summary,
+        search_intervention_history,
+    )
+
+    # And they MUST appear in `__all__` for test discoverability.
+    assert "search_intervention_history" in server_mod.__all__
+    assert "get_device_lifecycle_summary" in server_mod.__all__
+    assert "correlate_sector_interference" in server_mod.__all__
+
+
+def test_mcp_tool_wrapper_delegates_to_pure_library_function(tmp_path: Path) -> None:
+    """R-NEW-1-S2 — the MCP wrapper delegates to the library function with the same kwargs.
+
+    Monkeypatches `nora.intervention_memory.tools.search_intervention_history`
+    and asserts the wrapper calls it once with the same kwargs.
+    """
+    import asyncio
+    from unittest import mock as _mock
+
+    from nora.config import Settings
+    from nora.intervention_memory import tools as tools_mod
+
+    settings = Settings(
+        _env_file=None,
+        _env_file_encoding=None,
+        nora_interventions_dir=tmp_path,
+    )
+    provider = mock.MagicMock()
+
+    from nora import server as server_mod
+
+    server_mod.set_runtime_state(settings, provider)
+
+    sentinel = [{"intervention_id": "INT-DELEGATED"}]
+
+    with _mock.patch.object(
+        tools_mod,
+        "search_intervention_history",
+        return_value=sentinel,
+    ) as patched:
+        # Call the registered MCP tool via the FastMCP client.
+        async def _run() -> Any:
+            from fastmcp import Client
+
+            async with Client(server_mod.mcp) as client:
+                return await client.call_tool(
+                    "search_intervention_history", {"target_ip": "10.0.0.5"}
+                )
+
+        result = asyncio.run(_run())
+
+    assert patched.call_count == 1
+    assert patched.call_args.kwargs["target_ip"] == "10.0.0.5"
+    # FastMCP wraps the library return value; the sentinel list should be present.
+    assert result.data == sentinel
+
+
+def test_mcp_instance_exposes_all_nine_tools() -> None:
+    """The FastMCP instance registers all 9 tools (6 existing + 3 new)."""
+    import asyncio
+
+    from nora import server as server_mod
+
+    async def _names() -> set[str]:
+        tools = await server_mod.mcp.list_tools()
+        return {t.name for t in tools}
+
+    names = asyncio.run(_names())
+    expected = {
+        # Existing (6).
+        "nora_health",
+        "nora_session_get_state",
+        "nora_session_set_focus",
+        "nora_session_resume",
+        "nora_session_summarize",
+        "snmp_get_pmp450i_radio_metrics",
+        # New (3).
+        "search_intervention_history",
+        "get_device_lifecycle_summary",
+        "correlate_sector_interference",
+    }
+    missing = expected - names
+    assert not missing, f"Tools missing from FastMCP instance: {sorted(missing)}; found: {sorted(names)}"
+
+
+def test_free_text_fields_in_search_output_sanitized_via_mcp_wrapper(tmp_path: Path) -> None:
+    """R-NEW-2-S1 — free-text fields sanitized at the MCP boundary.
+
+    Seed a fixture with `record_name` containing a private IP, invoke
+    the MCP tool, assert the output's `record_name` carries the alias
+    (not the literal IP).
+    """
+    import asyncio
+    import json as _json
+
+    from nora.config import Settings
+
+    interventions_dir = tmp_path / "interventions"
+    interventions_dir.mkdir()
+    (interventions_dir / "r1.json").write_text(
+        _json.dumps(
+            {
+                "intervention_id": "INT-1",
+                "timestamp_iso": "2026-01-01T12:00:00+00:00",
+                "timestamp_unix": 1700000000,
+                "ticket_number": "TKT-7400",
+                "target_ip": "10.0.0.5",
+                "stage": "PRE_DIAGNOSTIC",
+                "record_name": "Investigating 10.0.0.5 today",
+                "status": "COMPLETED",
+                "agent_name": "test-agent",
+                "findings_and_dictamen": "no findings",
+                "created_at": "2026-01-01T12:00:00+00:00",
+                "network_equipment": {},
+            }
+        )
+    )
+
+    settings = Settings(
+        _env_file=None,
+        _env_file_encoding=None,
+        nora_interventions_dir=interventions_dir,
+    )
+    provider = mock.MagicMock()
+
+    from nora import server as server_mod
+
+    server_mod.set_runtime_state(settings, provider)
+
+    async def _run() -> Any:
+        from fastmcp import Client
+
+        async with Client(server_mod.mcp) as client:
+            return await client.call_tool("search_intervention_history", {})
+
+    result = asyncio.run(_run())
+    first_record = result.data[0]
+    assert "10.0.0.5" not in first_record["record_name"], (
+        f"Private IP leaked in MCP tool output: {first_record['record_name']!r}"
+    )
+    assert "RADIO_NODE_" in first_record["record_name"]
+
+
+def test_structured_top_level_fields_bypass_via_mcp_wrapper(tmp_path: Path) -> None:
+    """R-NEW-2-S2 — structured fields bypass sanitization at the MCP boundary.
+
+    The fixture's `intervention_id` contains an RFC 1918 IP-shaped
+    substring; the MCP tool output preserves it byte-identical.
+    """
+    import asyncio
+    import json as _json
+
+    from nora.config import Settings
+
+    interventions_dir = tmp_path / "interventions"
+    interventions_dir.mkdir()
+    (interventions_dir / "r1.json").write_text(
+        _json.dumps(
+            {
+                "intervention_id": "INT-1-10.0.0.5-1700000000-V7",
+                "timestamp_iso": "2026-01-01T12:00:00+00:00",
+                "timestamp_unix": 1700000000,
+                "ticket_number": "TKT-7400",
+                "target_ip": "10.0.0.5",
+                "stage": "PRE_DIAGNOSTIC",
+                "record_name": "test",
+                "status": "COMPLETED",
+                "agent_name": "test-agent",
+                "findings_and_dictamen": "no findings",
+                "created_at": "2026-01-01T12:00:00+00:00",
+                "network_equipment": {},
+            }
+        )
+    )
+
+    settings = Settings(
+        _env_file=None,
+        _env_file_encoding=None,
+        nora_interventions_dir=interventions_dir,
+    )
+    provider = mock.MagicMock()
+
+    from nora import server as server_mod
+
+    server_mod.set_runtime_state(settings, provider)
+
+    async def _run() -> Any:
+        from fastmcp import Client
+
+        async with Client(server_mod.mcp) as client:
+            return await client.call_tool("search_intervention_history", {})
+
+    result = asyncio.run(_run())
+    first_record = result.data[0]
+    assert first_record["intervention_id"] == "INT-1-10.0.0.5-1700000000-V7", (
+        f"intervention_id must bypass sanitization; got: {first_record['intervention_id']!r}"
+    )
+    assert first_record["timestamp_unix"] == 1700000000
+    assert first_record["stage"] == "PRE_DIAGNOSTIC"
