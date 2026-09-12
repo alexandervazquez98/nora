@@ -60,12 +60,19 @@ def _is_existing_dir(path: Path) -> bool:
     return path.is_dir()
 
 
-def read_records(settings: Any) -> list[InterventionMemoryRecord]:
+def read_records(settings: Any, limit: int | None = None) -> list[InterventionMemoryRecord]:
     """Glob `*.json` under `settings.nora_interventions_dir` and parse each file.
 
     Returns `[]` if the directory is absent (does NOT create it). Per-file
     errors (corrupt JSON, validation failure, I/O error) log a WARNING
     and skip the file — never raises.
+
+    Args:
+        settings: NORA `Settings` instance.
+        limit: Optional cap on the number of records returned. When set,
+            the function stops reading files once the limit is reached.
+            Use this to bound I/O on a large directory (R7 keyword cap,
+            R6 correlate scan cap).
     """
     base_dir: Path = Path(settings.nora_interventions_dir)
     if not _is_existing_dir(base_dir):
@@ -73,6 +80,8 @@ def read_records(settings: Any) -> list[InterventionMemoryRecord]:
 
     records: list[InterventionMemoryRecord] = []
     for path in sorted(base_dir.glob("*.json")):
+        if limit is not None and len(records) >= limit:
+            break
         record = _load_one(path)
         if record is not None:
             records.append(record)

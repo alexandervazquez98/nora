@@ -85,6 +85,20 @@ class Settings(BaseSettings):
     # `src/nora/prompts/` (Prompt-R3).
     nora_prompts_dir: Path | None = None
 
+    # --- Intervention memory MCP (Phase 3) -----------------------------------
+    # On-disk directory of intervention JSON records. NORA reads from this
+    # dir; openchat's `intervention_memory_tool` writes to it. The default
+    # is relative so no production path enters the repo; the operator wires
+    # the real `.22` path in `.env` (R8 / secure-configuration).
+    nora_interventions_dir: Path = Path("./var/interventions/")
+    # Cap on keyword-search I/O. When `search_intervention_history` is
+    # called with a `keyword`, at most this many files are read; WARNING
+    # logged when the cap fires (R7).
+    nora_interventions_keyword_search_max_records: int = 1000
+    # Cap on correlate-scan I/O. `correlate_sector_interference` walks at
+    # most this many of the most-recent records (R6).
+    nora_interventions_correlate_scan_limit: int = 50
+
     loaded_from: LoadSource = "defaults"
 
     @model_validator(mode="before")
