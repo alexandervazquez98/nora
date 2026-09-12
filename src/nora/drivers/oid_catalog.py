@@ -210,8 +210,14 @@ class OidCatalogRegistry:
         )
 
     @classmethod
-    def _verify_one(cls, path: Path, key_bytes: bytes) -> tuple[str, str, str, OidCatalog] | None:
-        """Verify `path` against `key_bytes`; return the catalog or raise."""
+    def _verify_one(cls, path: Path, key_bytes: bytes) -> tuple[str, str, str, OidCatalog]:
+        """Verify `path` against `key_bytes`; return the catalog or raise.
+
+        Raises :class:`CatalogVerificationError` on any failure mode
+        (invalid JSON, missing envelope fields, HMAC mismatch, missing
+        required OIDs). Callers MUST be ready to propagate the exception
+        — there is no silent-drop branch.
+        """
         try:
             envelope = json.loads(path.read_text())
         except json.JSONDecodeError as exc:
@@ -247,7 +253,13 @@ class OidCatalogRegistry:
                 path=path, reason="HMAC-SHA256 signature mismatch (tampered or wrong key)"
             )
 
-        missing = _REQUIRED_OIDS_BY_VENDOR_MODEL[(vendor, model)] - oids.keys()
+        required = _REQUIRED_OIDS_BY_VENDOR_MODEL.get((vendor, model))
+        if required is None:
+            raise CatalogVerificationError(
+                path=path,
+                reason=f"no required-OID table registered for (vendor={vendor}, model={model})",
+            )
+        missing = required - oids.keys()
         if missing:
             missing_str = ", ".join(sorted(missing))
             raise CatalogVerificationError(

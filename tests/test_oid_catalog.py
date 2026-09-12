@@ -55,8 +55,11 @@ def test_resolve_reads_pinned_catalog_path(
     tmp_catalogs_dir: Path, sample_catalog: dict[str, Any]
 ) -> None:
     """Boot resolves `<path>/<vendor>/<model>/<firmware>.json`."""
-    settings = _build_settings(tmp_catalogs_dir, sample_catalog["key"])
-    registry = OidCatalogRegistry.verify_all(settings)
+    registry = OidCatalogRegistry.verify(
+        built_in_root=None,
+        operator_root=tmp_catalogs_dir,
+        signing_key=sample_catalog["key"],
+    )
     catalog = registry.resolve(
         (sample_catalog["vendor"], sample_catalog["model"], sample_catalog["firmware"])
     )
@@ -98,8 +101,11 @@ def test_resolve_under_explicit_path(
 
 def test_unknown_firmware_raises_catalog_not_found(tmp_catalogs_dir: Path) -> None:
     """No matching catalog file → `CatalogNotFoundError`, driver does not start."""
-    settings = _build_settings(tmp_catalogs_dir, "any-key")
-    registry = OidCatalogRegistry.verify_all(settings)
+    registry = OidCatalogRegistry.verify(
+        built_in_root=None,
+        operator_root=tmp_catalogs_dir,
+        signing_key="any-key",
+    )
     with pytest.raises(CatalogNotFoundError) as exc:
         registry.resolve(("cambium", "pmp450i", "99.0.0"))
     assert "99.0.0" in str(exc.value)
@@ -115,8 +121,11 @@ def test_valid_signed_catalog_verifies(
     tmp_catalogs_dir: Path, sample_catalog: dict[str, Any]
 ) -> None:
     """Catalog signed with the matching key passes verification and loads."""
-    settings = _build_settings(tmp_catalogs_dir, sample_catalog["key"])
-    registry = OidCatalogRegistry.verify_all(settings)
+    registry = OidCatalogRegistry.verify(
+        built_in_root=None,
+        operator_root=tmp_catalogs_dir,
+        signing_key=sample_catalog["key"],
+    )
     catalog = registry.resolve(
         (sample_catalog["vendor"], sample_catalog["model"], sample_catalog["firmware"])
     )
@@ -133,14 +142,17 @@ def test_tampered_catalog_raises_catalog_verification_error(
     tmp_catalogs_dir: Path, sample_catalog: dict[str, Any]
 ) -> None:
     """Bytes no longer match the HMAC → `CatalogVerificationError`."""
-    settings = _build_settings(tmp_catalogs_dir, sample_catalog["key"])
     # Replace the catalog body with the wrong bytes; the original signature
     # no longer matches.
     payload = json.loads(sample_catalog["path"].read_text())
     payload["oids"]["ssr"] = "1.2.3.4.5.6.7.8"
     sample_catalog["path"].write_text(json.dumps(payload))
     with pytest.raises(CatalogVerificationError) as exc:
-        OidCatalogRegistry.verify_all(settings)
+        OidCatalogRegistry.verify(
+            built_in_root=None,
+            operator_root=tmp_catalogs_dir,
+            signing_key=sample_catalog["key"],
+        )
     assert "hmac" in exc.value.reason.lower() or "signature" in exc.value.reason.lower()
     assert exc.value.path == sample_catalog["path"]
 
@@ -149,9 +161,12 @@ def test_missing_key_raises_catalog_verification_error(
     tmp_catalogs_dir: Path, sample_catalog: dict[str, Any]
 ) -> None:
     """Empty / unset key → `CatalogVerificationError`, driver does not start."""
-    settings = _build_settings(tmp_catalogs_dir, "")
     with pytest.raises(CatalogVerificationError) as exc:
-        OidCatalogRegistry.verify_all(settings)
+        OidCatalogRegistry.verify(
+            built_in_root=None,
+            operator_root=tmp_catalogs_dir,
+            signing_key="",
+        )
     assert "key" in exc.value.reason.lower()
 
 
@@ -164,7 +179,6 @@ def test_key_rotation_invalidates_previously_signed_catalog(
     tmp_catalogs_dir: Path, sample_catalog: dict[str, Any]
 ) -> None:
     """Catalog signed with KEY_A fails when boot uses KEY_B."""
-    old_settings = _build_settings(tmp_catalogs_dir, "KEY_A")
     # Re-sign with KEY_A so the catalog is valid for that key.
     canonical_body = json.dumps(
         sample_catalog["data"], sort_keys=True, separators=(",", ":")
@@ -181,18 +195,29 @@ def test_key_rotation_invalidates_previously_signed_catalog(
     sample_catalog["path"].write_text(json.dumps(envelope))
 
     # KEY_A signs it: passes
-    OidCatalogRegistry.verify_all(old_settings)
+    OidCatalogRegistry.verify(
+        built_in_root=None,
+        operator_root=tmp_catalogs_dir,
+        signing_key="KEY_A",
+    )
 
     # KEY_B rejects it: typed exception
-    new_settings = _build_settings(tmp_catalogs_dir, "KEY_B")
     with pytest.raises(CatalogVerificationError):
-        OidCatalogRegistry.verify_all(new_settings)
+        OidCatalogRegistry.verify(
+            built_in_root=None,
+            operator_root=tmp_catalogs_dir,
+            signing_key="KEY_B",
+        )
 
     # Re-sign with KEY_B: passes again
     sig_b = hmac.new(b"KEY_B", canonical_body, hashlib.sha256).hexdigest()
     envelope["hmac_sha256"] = sig_b
     sample_catalog["path"].write_text(json.dumps(envelope))
-    registry = OidCatalogRegistry.verify_all(new_settings)
+    registry = OidCatalogRegistry.verify(
+        built_in_root=None,
+        operator_root=tmp_catalogs_dir,
+        signing_key="KEY_B",
+    )
     catalog = registry.resolve(
         (sample_catalog["vendor"], sample_catalog["model"], sample_catalog["firmware"])
     )
@@ -220,9 +245,12 @@ def test_missing_required_oid_raises_catalog_verification_error(
     ).hexdigest()
     sample_catalog["path"].write_text(json.dumps(payload))
 
-    settings = _build_settings(tmp_catalogs_dir, sample_catalog["key"])
     with pytest.raises(CatalogVerificationError) as exc:
-        OidCatalogRegistry.verify_all(settings)
+        OidCatalogRegistry.verify(
+            built_in_root=None,
+            operator_root=tmp_catalogs_dir,
+            signing_key=sample_catalog["key"],
+        )
     assert "radioDownlinkRate" in str(exc.value)
 
 
@@ -335,18 +363,3 @@ class TestMultiRoot:
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
-
-
-def _build_settings(catalogs_dir: Path, signing_key: str) -> Any:
-    """A minimal Settings for catalog-only tests."""
-    from nora.config import Settings
-
-    devices_file = catalogs_dir.parent / "devices.yaml"
-    devices_file.write_text("# empty\n")
-    return Settings(
-        _env_file=None,
-        _env_file_encoding=None,
-        nora_oid_catalogs_path=catalogs_dir,
-        nora_devices_inventory_path=devices_file,
-        nora_oid_catalog_signing_key=signing_key or None,
-    )
