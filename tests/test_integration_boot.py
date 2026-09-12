@@ -234,3 +234,84 @@ def test_subprocess_both_entry_points_expose_identical_tool_lists(tmp_path: Path
         f"`nora-mcp` and `python -m nora` must expose identical tool lists; "
         f"canonical: {canonical!r}, alias: {alias!r}"
     )
+
+
+# --- Boot abort contract (secure-configuration: "missing required setting fails fast")
+
+
+def _boot_env_no_signing_key(tmp_path: Path) -> dict[str, str]:
+    """Hermetic env that boots nora-mcp with empty signing key (boot abort).
+
+    Other required env vars are set so the boot abort fires at the
+    `OidCatalogRegistry.verify_all` step (cli.py:54), not earlier on a
+    different missing field. `NORA_OID_CATALOG_SIGNING_KEY` is popped
+    (and not set) so it defaults to `None` per `Settings`.
+    """
+    (tmp_path / "catalogs").mkdir(exist_ok=True)
+    (tmp_path / "devices.yaml").write_text("# empty\n")
+    env = os.environ.copy()
+    # Pop the signing key so boot fails closed with a typed validation error.
+    env.pop("NORA_OID_CATALOG_SIGNING_KEY", None)
+    env["NORA_OID_CATALOGS_PATH"] = str(tmp_path / "catalogs")
+    env["NORA_DEVICES_INVENTORY_PATH"] = str(tmp_path / "devices.yaml")
+    env["NORA_INTERVENTIONS_DIR"] = str(tmp_path / "interventions")
+    return env
+
+
+def test_subprocess_nora_mcp_exits_nonzero_on_empty_signing_key(tmp_path: Path) -> None:
+    """Booting `nora-mcp` with empty `NORA_OID_CATALOG_SIGNING_KEY` exits non-zero.
+
+    Closes the WARNING in `verify-report.md` — the boot abort contract from
+    secure-configuration Scenario "missing required setting fails fast" is
+    pinned by an end-to-end subprocess test. The CLI's boot step
+    `OidCatalogRegistry.verify_all(settings)` raises `CatalogVerificationError`
+    on an empty key; Python exits with a non-zero code and the traceback
+    mentions the missing key on stderr.
+    """
+    nora_mcp = PROJECT_ROOT / ".venv" / "bin" / "nora-mcp"
+    if not nora_mcp.exists():
+        pytest.skip("nora-mcp console script not installed")
+
+    proc = subprocess.run(
+        [str(nora_mcp)],
+        cwd=str(PROJECT_ROOT),
+        env=_boot_env_no_signing_key(tmp_path),
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert proc.returncode != 0, (
+        f"`nora-mcp` must exit non-zero when signing key is empty; "
+        f"got returncode={proc.returncode}, stderr={proc.stderr!r}"
+    )
+    stderr_lower = proc.stderr.lower()
+    assert "signing" in stderr_lower or "catalog" in stderr_lower, (
+        f"stderr should mention signing/catalog; got: {proc.stderr!r}"
+    )
+
+
+def test_subprocess_python_dash_m_nora_exits_nonzero_on_empty_signing_key(tmp_path: Path) -> None:
+    """Booting `python -m nora` with empty `NORA_OID_CATALOG_SIGNING_KEY` exits non-zero.
+
+    Same contract as the canonical entry point, exercised through the
+    deprecation alias path (`__main__.py` → `cli.main`). The alias emits
+    `DeprecationWarning` on stderr first, then the boot abort traceback.
+    """
+    py = _venv_python()
+
+    proc = subprocess.run(
+        [py, "-m", "nora"],
+        cwd=str(PROJECT_ROOT),
+        env=_boot_env_no_signing_key(tmp_path),
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert proc.returncode != 0, (
+        f"`python -m nora` must exit non-zero when signing key is empty; "
+        f"got returncode={proc.returncode}, stderr={proc.stderr!r}"
+    )
+    stderr_lower = proc.stderr.lower()
+    assert "signing" in stderr_lower or "catalog" in stderr_lower, (
+        f"stderr should mention signing/catalog; got: {proc.stderr!r}"
+    )
