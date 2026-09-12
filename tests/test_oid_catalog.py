@@ -734,6 +734,41 @@ class TestSemverResolution:
             f"{[r.getMessage() for r in caplog.records]!r}"
         )
 
+    def test_major_mismatch_raises_typed_exception(self, tmp_catalogs_dir: Path) -> None:
+        """Scenario: major mismatch raises a typed exception.
+
+        Registry holds only ``(cambium, pmp450i, 15.2.1)``. Resolving
+        ``16.0.0`` raises :class:`CatalogNotFoundError` and the message
+        names BOTH majors (requested = 16, registered = 15) so the
+        operator can see which major line the fleet runs against.
+        """
+        _write_signed_catalog(
+            tmp_catalogs_dir,
+            vendor="cambium",
+            model="pmp450i",
+            firmware="15.2.1",
+            oids=dict(_SAMPLE_BUILTIN_OIDS),
+            key=SAMPLE_CATALOG_KEY,
+        )
+        registry = OidCatalogRegistry.verify(
+            built_in_root=None,
+            operator_root=tmp_catalogs_dir,
+            signing_key=SAMPLE_CATALOG_KEY,
+        )
+
+        with pytest.raises(CatalogNotFoundError) as exc:
+            registry.resolve(("cambium", "pmp450i", "16.0.0"))
+
+        message = str(exc.value)
+        # Both majors must appear in the message — the requested one and
+        # the registered one. Operators grep server logs for these.
+        assert "16" in message, (
+            f"Exception message must name the requested major 16; got: {message!r}"
+        )
+        assert "15" in message, (
+            f"Exception message must name the registered major 15; got: {message!r}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # helpers

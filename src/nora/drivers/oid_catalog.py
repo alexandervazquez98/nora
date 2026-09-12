@@ -144,8 +144,9 @@ class OidCatalogRegistry:
 
         # Pass 2 — pre-release / build metadata strip via
         # ``Version(...).base_version``. An invalid firmware string (e.g.
-        # ``"v15.2.1"``) fails ``Version`` and falls through to the
-        # strict-major branch, which surfaces the typed error.
+        # ``"v15.2.1"``) fails ``Version``; we keep ``req_version=None``
+        # and fall through to the strict-major branch, which surfaces
+        # the typed error.
         try:
             req_version = Version(firmware)
         except InvalidVersion:
@@ -161,11 +162,41 @@ class OidCatalogRegistry:
                 except InvalidVersion:
                     continue
 
-        # Pass 3 — strict-major + minor-descending fallback. The full
-        # algorithm (major hard-fail + minor fallback + literal warning)
-        # ships in WU 2.2 + 2.3; this stub raises the same typed error
-        # the pre-PR2 path raised so WU 2.1's two scenarios (which never
-        # reach this branch) stay green.
+        # Pass 3 — strict-major hard fail. Collect every catalog for
+        # the same (vendor, model); if no entry shares the request's
+        # major, raise ``CatalogNotFoundError`` whose message names
+        # both the requested and the registered majors so an operator
+        # can see at a glance which major line the fleet runs against.
+        candidates: list[tuple[Version, OidCatalog]] = []
+        for (v, m, fw), catalog in self._catalogs.items():
+            if v != vendor or m != model:
+                continue
+            try:
+                candidates.append((Version(fw), catalog))
+            except InvalidVersion:
+                continue
+
+        if req_version is None or not candidates:
+            raise CatalogNotFoundError(ref)
+
+        registered_majors = sorted({fw_version.major for fw_version, _ in candidates})
+        same_major = [
+            (fw_version, catalog)
+            for fw_version, catalog in candidates
+            if fw_version.major == req_version.major
+        ]
+        if not same_major:
+            exc = CatalogNotFoundError(ref)
+            exc.args = (
+                f"major mismatch for {ref}: requested major {req_version.major}, "
+                f"registered majors {registered_majors}",
+            )
+            raise exc
+
+        # Pass 4 — minor descending fallback. Full algorithm (highest
+        # registered version strictly less than the request + literal
+        # telemetry warning) ships in WU 2.3; for now we raise the
+        # same typed error so the strict-major scenario stays green.
         raise CatalogNotFoundError(ref)
 
     # ------------------------------------------------------------------
