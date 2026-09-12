@@ -20,6 +20,7 @@ import json
 from typing import Any, Optional
 
 from nora.config import Settings
+
 # Import the module (not the names) so tests can monkey-patch
 # `tools.search_intervention_history` and the shim picks up the patched
 # call via attribute access. Local-name imports would create a static
@@ -70,7 +71,7 @@ class Tools:
         __event_emitter__: Any = None,
         **_unused: Any,
     ) -> str:
-        """Mirror of MCP `search_intervention_history`. Returns JSON string (webui.db convention)."""
+        """Mirror of MCP `search_intervention_history`. JSON string (webui.db convention)."""
         settings = _settings_from_env_or_singleton()
         results = tools_mod.search_intervention_history(
             settings=settings,

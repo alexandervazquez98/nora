@@ -56,18 +56,20 @@ def test_corrupt_json_file_is_skipped(tmp_path: Path) -> None:
 
     # 3 valid records.
     for idx in range(3):
-        _write_record(tmp_path / f"rec-{idx}.json", _make_valid_record(intervention_id=f"INT-{idx}"))
+        _write_record(
+            tmp_path / f"rec-{idx}.json", _make_valid_record(intervention_id=f"INT-{idx}")
+        )
     # 1 corrupt record — filename intentionally starts with `}`.
     (tmp_path / "}.invalid.json").write_text("{not json")
 
     records = read_records(settings)
 
-    assert len(records) == 3, (
-        f"Expected 3 valid records (corrupt skipped); got: {len(records)}"
-    )
+    assert len(records) == 3, f"Expected 3 valid records (corrupt skipped); got: {len(records)}"
 
 
-def test_corrupt_json_emits_warning_with_filename(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+def test_corrupt_json_emits_warning_with_filename(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     """R3-S1 — WARNING log line names the corrupt file."""
     from nora.intervention_memory.storage import read_records
 
@@ -97,7 +99,13 @@ def test_validation_error_is_skipped(tmp_path: Path) -> None:
     settings = type("S", (), {"nora_interventions_dir": tmp_path})()
     _write_record(tmp_path / "ok.json", _make_valid_record(intervention_id="INT-OK"))
     # validation_failure.json has `stage: BOGUS_STAGE` → ValidationError.
-    fixture = Path(__file__).resolve().parent.parent.parent / "tests" / "fixtures" / "intervention_memory" / "validation_failure.json"
+    fixture = (
+        Path(__file__).resolve().parent.parent.parent
+        / "tests"
+        / "fixtures"
+        / "intervention_memory"
+        / "validation_failure.json"
+    )
     (tmp_path / "validation_failure.json").write_text(fixture.read_text())
 
     records = read_records(settings)
@@ -106,13 +114,21 @@ def test_validation_error_is_skipped(tmp_path: Path) -> None:
     assert records[0].intervention_id == "INT-OK"
 
 
-def test_validation_error_emits_warning_with_filename(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+def test_validation_error_emits_warning_with_filename(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     """R3-S2 — WARNING log line names the validation-failing file."""
     from nora.intervention_memory.storage import read_records
 
     settings = type("S", (), {"nora_interventions_dir": tmp_path})()
     _write_record(tmp_path / "ok.json", _make_valid_record(intervention_id="INT-OK"))
-    fixture = Path(__file__).resolve().parent.parent.parent / "tests" / "fixtures" / "intervention_memory" / "validation_failure.json"
+    fixture = (
+        Path(__file__).resolve().parent.parent.parent
+        / "tests"
+        / "fixtures"
+        / "intervention_memory"
+        / "validation_failure.json"
+    )
     (tmp_path / "bad.json").write_text(fixture.read_text())
 
     with caplog.at_level(logging.WARNING, logger="nora.intervention_memory.storage"):

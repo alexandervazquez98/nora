@@ -27,7 +27,13 @@ def sanitizer():
 
 
 def _load_fixture(name: str) -> dict:
-    path = Path(__file__).resolve().parent.parent.parent / "tests" / "fixtures" / "intervention_memory" / name
+    path = (
+        Path(__file__).resolve().parent.parent.parent
+        / "tests"
+        / "fixtures"
+        / "intervention_memory"
+        / name
+    )
     import json
 
     return json.loads(path.read_text())
@@ -66,7 +72,7 @@ def test_ipv4_in_record_name_is_masked(sanitizer) -> None:
 
 
 def test_mac_in_subscriber_note_is_masked(sanitizer) -> None:
-    """MAC address in `network_equipment.pre_existing_offline_subscribers[*].note` → `SWITCH_ACC_*` alias."""
+    """MAC in subscriber `note` → `SWITCH_ACC_*` alias."""
     from nora.intervention_memory.models import InterventionMemoryRecord
     from nora.intervention_memory.sanitize import sanitize_record_payload
 
@@ -140,7 +146,7 @@ def test_target_ip_bypass_returns_value_verbatim(sanitizer) -> None:
 
 
 def test_stage_status_timestamps_bypass(sanitizer) -> None:
-    """`stage`, `status`, `timestamp_unix`, `timestamp_iso`, `created_at`, `ticket_number` all bypass."""
+    """`stage`, `status`, timestamps, `created_at`, `ticket_number` all bypass."""
     from nora.intervention_memory.models import InterventionMemoryRecord
     from nora.intervention_memory.sanitize import sanitize_record_payload
 

@@ -23,7 +23,9 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-FIXTURES_DIR = Path(__file__).resolve().parent.parent.parent / "tests" / "fixtures" / "intervention_memory"
+FIXTURES_DIR = (
+    Path(__file__).resolve().parent.parent.parent / "tests" / "fixtures" / "intervention_memory"
+)
 
 
 def _load_fixture(name: str) -> dict:
@@ -75,7 +77,7 @@ def test_v7_record_exposes_required_top_level_fields() -> None:
 
 
 def test_v8_record_with_mac_address_alias_is_tolerated() -> None:
-    """v8 fixture: `mac_address` (legacy alias) is silently dropped; no raise, `record.mac is None`."""
+    """v8 fixture: `mac_address` (legacy alias) is silently dropped; no raise."""
     from nora.intervention_memory.models import InterventionMemoryRecord
 
     fixture = _load_fixture("v8_pre_migration.json")

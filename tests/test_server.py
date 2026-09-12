@@ -422,11 +422,6 @@ def test_server_module_exports_three_new_tool_names() -> None:
     from nora import server as server_mod
 
     # The names MUST be importable from `nora.server`.
-    from nora.server import (  # type: ignore[attr-defined]
-        correlate_sector_interference,
-        get_device_lifecycle_summary,
-        search_intervention_history,
-    )
 
     # And they MUST appear in `__all__` for test discoverability.
     assert "search_intervention_history" in server_mod.__all__
@@ -506,7 +501,9 @@ def test_mcp_instance_exposes_all_nine_tools() -> None:
         "correlate_sector_interference",
     }
     missing = expected - names
-    assert not missing, f"Tools missing from FastMCP instance: {sorted(missing)}; found: {sorted(names)}"
+    assert not missing, (
+        f"Tools missing from FastMCP instance: {sorted(missing)}; found: {sorted(names)}"
+    )
 
 
 def test_free_text_fields_in_search_output_sanitized_via_mcp_wrapper(tmp_path: Path) -> None:

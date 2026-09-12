@@ -12,9 +12,6 @@ structured `tower` field is the future fix (out of scope).
 
 from __future__ import annotations
 
-import pytest
-
-
 # ---------------------------------------------------------------------------
 # `match_tower`
 # ---------------------------------------------------------------------------

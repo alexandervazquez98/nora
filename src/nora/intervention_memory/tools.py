@@ -123,7 +123,7 @@ def search_intervention_history(
     cap = settings.nora_interventions_keyword_search_max_records if keyword is not None else None
     records = read_records(settings, limit=cap)
     if keyword is not None and cap is not None and len(records) >= cap:
-        # Cap fired — log the warning so an operator can tune `nora_interventions_keyword_search_max_records`.
+        # Cap fired — log so an operator can tune the env var.
         logger.warning(
             "intervention_memory: keyword search cap reached: cap=%d records_read=%d; "
             "further files skipped",
@@ -163,7 +163,10 @@ def _pick_offline_subscribers(
     """
     for record in records:
         if record.stage == "PRE_DIAGNOSTIC":
-            return [sub.model_dump(mode="json") for sub in record.network_equipment.pre_existing_offline_subscribers]
+            return [
+                sub.model_dump(mode="json")
+                for sub in record.network_equipment.pre_existing_offline_subscribers
+            ]
     return []
 
 
@@ -255,7 +258,7 @@ def correlate_sector_interference(
     *,
     sanitizer: Sanitizer,
 ) -> dict[str, Any]:
-    """Find carriers on `tower_name` whose frequency is within `channel_width_mhz` of `target_frequency_mhz`.
+    """Find carriers on `tower_name` near `target_frequency_mhz`.
 
     Walks the most recent
     `Settings.nora_interventions_correlate_scan_limit` records. For

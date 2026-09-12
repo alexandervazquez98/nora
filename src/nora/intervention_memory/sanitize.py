@@ -83,7 +83,8 @@ def sanitize_record_payload(
     sanitized = _sanitize_value(raw, sanitizer)
     # Round-trip through JSON to strip Pydantic-specific markers and
     # ensure the result is `dict[str, Any]` (no `dict[Any, Any]`).
-    return json.loads(json.dumps(sanitized))
+    result: dict[str, Any] = json.loads(json.dumps(sanitized))
+    return result
 
 
 __all__ = [

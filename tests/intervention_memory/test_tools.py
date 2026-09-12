@@ -90,9 +90,18 @@ def test_search_target_ip_exact_match(tmp_path: Path) -> None:
     from nora.sanitizer import Sanitizer
 
     settings = _settings_for(tmp_path)
-    _write_record(tmp_path / "r1.json", _make_record(intervention_id="INT-1", target_ip="10.0.0.4", timestamp_unix=100))
-    _write_record(tmp_path / "r2.json", _make_record(intervention_id="INT-2", target_ip="10.0.0.5", timestamp_unix=200))
-    _write_record(tmp_path / "r3.json", _make_record(intervention_id="INT-3", target_ip="10.0.0.5", timestamp_unix=300))
+    _write_record(
+        tmp_path / "r1.json",
+        _make_record(intervention_id="INT-1", target_ip="10.0.0.4", timestamp_unix=100),
+    )
+    _write_record(
+        tmp_path / "r2.json",
+        _make_record(intervention_id="INT-2", target_ip="10.0.0.5", timestamp_unix=200),
+    )
+    _write_record(
+        tmp_path / "r3.json",
+        _make_record(intervention_id="INT-3", target_ip="10.0.0.5", timestamp_unix=300),
+    )
     sanitizer = Sanitizer()
 
     results = search_intervention_history(settings, target_ip="10.0.0.5", sanitizer=sanitizer)
@@ -109,7 +118,10 @@ def test_search_target_ip_no_match_returns_empty(tmp_path: Path) -> None:
     from nora.sanitizer import Sanitizer
 
     settings = _settings_for(tmp_path)
-    _write_record(tmp_path / "r1.json", _make_record(intervention_id="INT-1", target_ip="10.0.0.4", timestamp_unix=100))
+    _write_record(
+        tmp_path / "r1.json",
+        _make_record(intervention_id="INT-1", target_ip="10.0.0.4", timestamp_unix=100),
+    )
     sanitizer = Sanitizer()
 
     results = search_intervention_history(settings, target_ip="10.0.0.99", sanitizer=sanitizer)
@@ -123,7 +135,7 @@ def test_search_target_ip_no_match_returns_empty(tmp_path: Path) -> None:
 
 
 def test_search_keyword_substring_match_uses_json_dumps_lowering(tmp_path: Path) -> None:
-    """`keyword="interference"` matches records whose serialised form contains the substring (lowercased)."""
+    """`keyword="interference"` matches serialised records containing the substring."""
     from nora.intervention_memory.tools import search_intervention_history
     from nora.sanitizer import Sanitizer
 
@@ -188,9 +200,18 @@ def test_results_sorted_by_timestamp_unix_descending(tmp_path: Path) -> None:
 
     settings = _settings_for(tmp_path)
     # Inserted in non-sorted order.
-    _write_record(tmp_path / "a.json", _make_record(intervention_id="INT-A", target_ip="10.0.0.1", timestamp_unix=100))
-    _write_record(tmp_path / "c.json", _make_record(intervention_id="INT-C", target_ip="10.0.0.3", timestamp_unix=300))
-    _write_record(tmp_path / "b.json", _make_record(intervention_id="INT-B", target_ip="10.0.0.2", timestamp_unix=200))
+    _write_record(
+        tmp_path / "a.json",
+        _make_record(intervention_id="INT-A", target_ip="10.0.0.1", timestamp_unix=100),
+    )
+    _write_record(
+        tmp_path / "c.json",
+        _make_record(intervention_id="INT-C", target_ip="10.0.0.3", timestamp_unix=300),
+    )
+    _write_record(
+        tmp_path / "b.json",
+        _make_record(intervention_id="INT-B", target_ip="10.0.0.2", timestamp_unix=200),
+    )
     sanitizer = Sanitizer()
 
     results = search_intervention_history(settings, sanitizer=sanitizer)
@@ -289,9 +310,7 @@ def test_keyword_search_cap_enforced_and_warning_logged(
     storage_mod._load_one = counting_load_one
     try:
         with caplog.at_level(logging.WARNING, logger="nora.intervention_memory.tools"):
-            results = search_intervention_history(
-                settings, keyword="anything", sanitizer=Sanitizer()
-            )
+            search_intervention_history(settings, keyword="anything", sanitizer=Sanitizer())
     finally:
         storage_mod._load_one = original_load_one
 
@@ -384,11 +403,21 @@ def test_ticket_number_filter_is_substring(tmp_path: Path) -> None:
     settings = _settings_for(tmp_path)
     _write_record(
         tmp_path / "r1.json",
-        _make_record(intervention_id="INT-1", target_ip="10.0.0.4", timestamp_unix=100, ticket_number="TKT-7400"),
+        _make_record(
+            intervention_id="INT-1",
+            target_ip="10.0.0.4",
+            timestamp_unix=100,
+            ticket_number="TKT-7400",
+        ),
     )
     _write_record(
         tmp_path / "r2.json",
-        _make_record(intervention_id="INT-2", target_ip="10.0.0.5", timestamp_unix=200, ticket_number="TKT-9999"),
+        _make_record(
+            intervention_id="INT-2",
+            target_ip="10.0.0.5",
+            timestamp_unix=200,
+            ticket_number="TKT-9999",
+        ),
     )
     sanitizer = Sanitizer()
 
@@ -406,11 +435,21 @@ def test_stage_filter_is_case_insensitive_equality(tmp_path: Path) -> None:
     settings = _settings_for(tmp_path)
     _write_record(
         tmp_path / "r1.json",
-        _make_record(intervention_id="INT-1", target_ip="10.0.0.4", timestamp_unix=100, stage="PRE_DIAGNOSTIC"),
+        _make_record(
+            intervention_id="INT-1",
+            target_ip="10.0.0.4",
+            timestamp_unix=100,
+            stage="PRE_DIAGNOSTIC",
+        ),
     )
     _write_record(
         tmp_path / "r2.json",
-        _make_record(intervention_id="INT-2", target_ip="10.0.0.5", timestamp_unix=200, stage="POST_INTERVENTION"),
+        _make_record(
+            intervention_id="INT-2",
+            target_ip="10.0.0.5",
+            timestamp_unix=200,
+            stage="POST_INTERVENTION",
+        ),
     )
     sanitizer = Sanitizer()
 
@@ -648,7 +687,7 @@ def test_correlate_nearby_carrier_returns_adjacent_channel(tmp_path: Path) -> No
 
 
 def test_correlate_tower_mismatch_returns_zero_conflicts(tmp_path: Path) -> None:
-    """Tower substring doesn't match → `detected_conflicts == []`, `is_frequency_clear_on_tower is True`."""
+    """Tower substring mismatch → empty conflicts, frequency is clear."""
     from nora.intervention_memory.tools import correlate_sector_interference
     from nora.sanitizer import Sanitizer
 
@@ -826,7 +865,11 @@ def test_shim_tools_class_exposes_three_async_methods() -> None:
     from nora.intervention_memory.shim_webui import Tools
 
     src = inspect.getsource(Tools)
-    for method in ("search_intervention_history", "get_device_lifecycle_summary", "correlate_sector_interference"):
+    for method in (
+        "search_intervention_history",
+        "get_device_lifecycle_summary",
+        "correlate_sector_interference",
+    ):
         assert f"async def {method}" in src, (
             f"Shim Tools class missing `async def {method}` line; got source:\n{src}"
         )

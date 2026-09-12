@@ -26,7 +26,9 @@ import re
 import shutil
 from pathlib import Path
 
-INTERVENTION_MEMORY_DIR = Path(__file__).resolve().parent.parent.parent / "src" / "nora" / "intervention_memory"
+INTERVENTION_MEMORY_DIR = (
+    Path(__file__).resolve().parent.parent.parent / "src" / "nora" / "intervention_memory"
+)
 
 # Modes that open a file for writing. "r" / "rb" and the implicit-read default
 # (no mode arg) are NOT flagged.
@@ -151,7 +153,9 @@ def _find_writes_in_file(py_file: Path) -> list[tuple[int, str]]:
             if line_no in flagged_lines:
                 continue
             # Skip matches on lines that are purely comments.
-            line_text = text.splitlines()[line_no - 1] if line_no - 1 < len(text.splitlines()) else ""
+            line_text = (
+                text.splitlines()[line_no - 1] if line_no - 1 < len(text.splitlines()) else ""
+            )
             if line_text.lstrip().startswith("#"):
                 continue
             regex_offenders.append((line_no, pattern))
@@ -233,9 +237,7 @@ def test_open_read_mode_is_allowed(tmp_path: Path) -> None:
         offenders = _find_writes_in_file(synthetic)
     finally:
         synthetic.unlink()
-    assert offenders == [], (
-        f"Read-mode open() calls were incorrectly flagged: {offenders}"
-    )
+    assert offenders == [], f"Read-mode open() calls were incorrectly flagged: {offenders}"
 
 
 def test_production_modules_do_not_import_pytest() -> None:
@@ -248,9 +250,7 @@ def test_production_modules_do_not_import_pytest() -> None:
             top = module.split(".")[0]
             if top in {"pytest", "_pytest", "monkeypatch"}:
                 offenders.append((str(py.relative_to(py.parents[2])), lineno, kind, module))
-    assert offenders == [], (
-        f"Test-only imports found in production code: {offenders}"
-    )
+    assert offenders == [], f"Test-only imports found in production code: {offenders}"
 
 
 def test_production_modules_do_not_import_shim_webui() -> None:
@@ -276,9 +276,11 @@ def test_production_modules_do_not_import_nora_server_or_drivers() -> None:
         if py.name == "__init__.py":
             continue
         for lineno, kind, module in _find_banned_imports_in_file(py):
-            if module in {"nora.server", "nora.drivers"} or module.startswith(
-                "nora.server."
-            ) or module.startswith("nora.drivers."):
+            if (
+                module in {"nora.server", "nora.drivers"}
+                or module.startswith("nora.server.")
+                or module.startswith("nora.drivers.")
+            ):
                 offenders.append((str(py.relative_to(py.parents[2])), lineno, kind, module))
             # Also catch `from nora import server` / `from nora import drivers`.
             top = module.split(".")[0]
@@ -297,9 +299,7 @@ def test_production_modules_do_not_import_nora_server_or_drivers() -> None:
                                         f"nora.{alias.name}",
                                     )
                                 )
-    assert offenders == [], (
-        f"Production code imports from nora.server or nora.drivers: {offenders}"
-    )
+    assert offenders == [], f"Production code imports from nora.server or nora.drivers: {offenders}"
 
 
 # ---------------------------------------------------------------------------
@@ -316,7 +316,6 @@ def test_injected_write_text_call_is_detected(tmp_path: Path) -> None:
     expected `(relative_path, lineno, call_name)` triple. The package
     itself remains untouched.
     """
-    from pathlib import Path as _Path
 
     if not INTERVENTION_MEMORY_DIR.exists():
         # The scaffold is missing — there is nothing to copy. The detector
@@ -352,9 +351,7 @@ def test_injected_write_text_call_is_detected(tmp_path: Path) -> None:
             )
 
     write_text_offenders = [o for o in offenders if o[2] == "write_text"]
-    assert write_text_offenders, (
-        f"Poison did not produce a 'write_text' offender; got: {offenders}"
-    )
+    assert write_text_offenders, f"Poison did not produce a 'write_text' offender; got: {offenders}"
     # The poison is at the end of the file — assert the lineno is greater
     # than the original file length so we know we caught the injected call
     # and not an unrelated existing match.

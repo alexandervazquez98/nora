@@ -286,7 +286,10 @@ def test_disable_switch_makes_explicit_tools_raise(disabled_settings: Settings) 
     [
         ("search_intervention_history", {"target_ip": "10.0.0.5"}),
         ("get_device_lifecycle_summary", {"target_ip": "10.0.0.5"}),
-        ("correlate_sector_interference", {"tower_name": "TWR-ISABEL", "target_frequency_mhz": 5760.0}),
+        (
+            "correlate_sector_interference",
+            {"tower_name": "TWR-ISABEL", "target_frequency_mhz": 5760.0},
+        ),
     ],
 )
 def test_auto_trace_records_intervention_memory_tool_call(

@@ -392,10 +392,10 @@ def test_intervention_memory_settings_have_safe_defaults(monkeypatch: pytest.Mon
         f"nora_interventions_dir default wrong: {settings.nora_interventions_dir!r}"
     )
     assert settings.nora_interventions_keyword_search_max_records == 1000, (
-        f"nora_interventions_keyword_search_max_records default wrong: {settings.nora_interventions_keyword_search_max_records!r}"
+        f"keyword_search default wrong: {settings.nora_interventions_keyword_search_max_records!r}"
     )
     assert settings.nora_interventions_correlate_scan_limit == 50, (
-        f"nora_interventions_correlate_scan_limit default wrong: {settings.nora_interventions_correlate_scan_limit!r}"
+        f"correlate_scan default wrong: {settings.nora_interventions_correlate_scan_limit!r}"
     )
 
 

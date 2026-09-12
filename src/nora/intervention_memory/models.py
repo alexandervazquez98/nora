@@ -77,7 +77,9 @@ class NetworkEquipmentBlock(BaseModel):
     pre_existing_offline_sms_count: Optional[int] = None
     frame_utilization_dl_pct: Optional[float] = None
     frame_utilization_ul_pct: Optional[float] = None
-    pre_existing_offline_subscribers: list[PreExistingOfflineSubscriber] = Field(default_factory=list)
+    pre_existing_offline_subscribers: list[PreExistingOfflineSubscriber] = Field(
+        default_factory=list
+    )
 
 
 class InterventionMemoryRecord(BaseModel):
