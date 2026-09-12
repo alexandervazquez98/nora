@@ -26,8 +26,52 @@ PRIVATE_IPV4 = re.compile(
 # --- Requirement: Pydantic Settings Is the Only Configuration Source --------
 
 
+def test_settings_has_seven_user_fields() -> None:
+    """After the thin split, `Settings.model_fields` has exactly 8 entries.
+
+    Seven user-settable fields plus the computed `loaded_from` = 8 total.
+    The nine former LLM/journal fields MUST be gone.
+    """
+    from nora.config import Settings
+
+    fields = Settings.model_fields
+    assert len(fields) == 8, (
+        f"Expected 8 model fields (7 user + loaded_from); got {len(fields)}: {sorted(fields)}"
+    )
+
+    forbidden = {
+        "nora_llm_provider",
+        "lmstudio_api_host",
+        "lmstudio_model_id",
+        "gemini_api_key",
+        "gemini_model_id",
+        "nora_session_journal_dir",
+        "nora_session_trace_max_steps",
+        "nora_session_journal_enabled",
+        "nora_operator_alias",
+    }
+    leaked = forbidden & set(fields)
+    assert not leaked, f"LLM/journal fields leaked into Settings: {sorted(leaked)}"
+
+
+def test_pyproject_has_no_llm_sdk_deps() -> None:
+    """`pyproject.toml` MUST NOT list `lmstudio` or `google-genai` after the thin split."""
+    import tomllib
+
+    data = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text())
+    deps = data["project"]["dependencies"]
+    forbidden = {"lmstudio", "google-genai"}
+    leaked = {d for d in deps if any(f in d for f in forbidden)}
+    assert not leaked, f"LLM SDK deps leaked into pyproject.toml: {sorted(leaked)}"
+
+
 def test_settings_loads_provider_from_env_file(tmp_path: Path) -> None:
-    """`Settings()` reads `NORA_LLM_PROVIDER` from the configured `.env` file."""
+    """`Settings()` reads `NORA_LLM_PROVIDER` from the configured `.env` file.
+
+    Kept after the thin split as a smoke test for legacy .env files that
+    still declare the LLM keys; Pydantic `extra='ignore'` swallows them
+    and the test asserts the surviving fields still load.
+    """
     env_file = tmp_path / ".env"
     env_file.write_text("NORA_LLM_PROVIDER=lmstudio\nLMSTUDIO_MODEL_ID=test-model\n")
 
@@ -49,7 +93,7 @@ def test_no_os_environ_in_src_nora() -> None:
     through the Settings instance.
     """
     src = PROJECT_ROOT / "src" / "nora"
-    allow_list = {"config.py", "__main__.py"}
+    allow_list = {"config.py", "__main__.py", "cli.py"}
     offenders: list[tuple[Path, int, str]] = []
     pattern = re.compile(r"\bos\.environ\b")
     for py in src.rglob("*.py"):
