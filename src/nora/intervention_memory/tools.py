@@ -67,29 +67,6 @@ def _filter_record(
     return True
 
 
-def _enforce_keyword_cap(
-    records: list[InterventionMemoryRecord],
-    *,
-    cap: int,
-    keyword: Optional[str],
-) -> list[InterventionMemoryRecord]:
-    """Trim `records` to at most `cap` entries when `keyword` is set.
-
-    Returns the trimmed list. Logs WARNING when the cap kicks in.
-    """
-    if keyword is None or cap <= 0:
-        return records
-    if len(records) <= cap:
-        return records
-    logger.warning(
-        "intervention_memory: keyword search cap reached: cap=%d records_read=%d; "
-        "further files skipped",
-        cap,
-        len(records),
-    )
-    return records[:cap]
-
-
 def search_intervention_history(
     settings: Settings,
     target_ip: Optional[str] = None,
@@ -334,6 +311,5 @@ __all__ = [
     "get_device_lifecycle_summary",
     "correlate_sector_interference",
     "_filter_record",
-    "_enforce_keyword_cap",
     "_pick_offline_subscribers",
 ]
