@@ -109,21 +109,55 @@ def test_resolve_under_explicit_path(
 
 
 # ---------------------------------------------------------------------------
-# R2 — Per-firmware pin (fail-closed)
+# Strict-Major Hard Fail — locking fixture reissued under PR 2 (ADR #17 P2)
 # ---------------------------------------------------------------------------
 
 
 def test_unknown_firmware_raises_catalog_not_found(tmp_catalogs_dir: Path) -> None:
-    """No matching catalog file → `CatalogNotFoundError`, driver does not start."""
+    """Locking fixture reissued under `Strict-Major Hard Fail` (PR 2).
+
+    Spec scenario: ``Strict-Major Hard Fail > major mismatch raises a
+    typed exception``. The ``tmp_catalogs_dir`` fixture is unchanged
+    (operators ship only ``15.x`` catalogs); the request ``99.0.0``
+    triggers the new strict-major branch in ``resolve``. The exception
+    message MUST name both majors so operators grep server logs for
+    ``99`` (requested) and ``15`` (registered).
+
+    Per spec migration note in `oid-catalog/spec.md`: "Test
+    `test_unknown_firmware_raises_catalog_not_found` is reissued under
+    `Strict-Major Hard Fail` — the fixture requests `99.0.0` against
+    only `15.x` catalogs and still raises a typed
+    `CatalogNotFoundError`."
+    """
+    # Write a 15.x catalog so the registry has a registered major;
+    # otherwise the strict-major branch has no registered majors to
+    # name in the message.
+    _write_signed_catalog(
+        tmp_catalogs_dir,
+        vendor="cambium",
+        model="pmp450i",
+        firmware="15.2.1",
+        oids=dict(_SAMPLE_BUILTIN_OIDS),
+        key=SAMPLE_CATALOG_KEY,
+    )
     registry = OidCatalogRegistry.verify(
         built_in_root=None,
         operator_root=tmp_catalogs_dir,
-        signing_key="any-key",
+        signing_key=SAMPLE_CATALOG_KEY,
     )
     with pytest.raises(CatalogNotFoundError) as exc:
         registry.resolve(("cambium", "pmp450i", "99.0.0"))
-    assert "99.0.0" in str(exc.value)
-    assert "cambium" in str(exc.value)
+    message = str(exc.value)
+    assert "99.0.0" in message
+    assert "cambium" in message
+    # PR 2 addition: the strict-major message names both majors so the
+    # operator can see which major line the fleet runs against.
+    assert "99" in message, (
+        f"Strict-major message must name the requested major 99; got: {message!r}"
+    )
+    assert "15" in message, (
+        f"Strict-major message must name the registered major 15; got: {message!r}"
+    )
 
 
 # ---------------------------------------------------------------------------
