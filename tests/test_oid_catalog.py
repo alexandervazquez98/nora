@@ -537,6 +537,81 @@ class TestMultiRoot:
             )
         assert "duplicate" in str(exc.value).lower() or "collision" in str(exc.value).lower()
 
+    def test_invalid_hmac_in_any_root_raises_catalog_verification_error(
+        self,
+        tmp_builtin_root: Path,
+        tmp_catalogs_dir: Path,
+    ) -> None:
+        """Scenario: invalid HMAC in any root aborts boot.
+
+        Built-in has a valid catalog; operator root contains one catalog
+        whose HMAC was signed with a *different* key. ``verify`` MUST
+        raise :class:`CatalogVerificationError` — the driver MUST NOT
+        start. Symmetrically, a tampered built-in also aborts even when
+        the operator root is empty.
+        """
+        # Built-in: valid signed catalog.
+        _write_signed_catalog(
+            tmp_builtin_root,
+            vendor="cambium",
+            model="pmp450i",
+            firmware="15.2.1",
+            oids=dict(_SAMPLE_BUILTIN_OIDS),
+            key=SAMPLE_CATALOG_KEY,
+        )
+        # Operator: catalog signed with the wrong key.
+        _write_signed_catalog(
+            tmp_catalogs_dir,
+            vendor="cambium",
+            model="pmp450i",
+            firmware="15.3.0",
+            oids=dict(_SAMPLE_BUILTIN_OIDS),
+            key="WRONG-KEY",
+        )
+
+        with pytest.raises(CatalogVerificationError) as exc:
+            OidCatalogRegistry.verify(
+                built_in_root=tmp_builtin_root,
+                operator_root=tmp_catalogs_dir,
+                signing_key=SAMPLE_CATALOG_KEY,
+            )
+        assert (
+            "hmac" in exc.value.reason.lower() or "signature" in exc.value.reason.lower()
+        )
+        # The path in the exception MUST point at the operator file
+        # (that's the one whose HMAC is invalid); ``_verify_one``
+        # aborts the loop as soon as it sees a mismatch.
+        assert str(exc.value.path).endswith("15.3.0.json")
+
+    def test_invalid_hmac_in_builtin_raises_when_operator_root_empty(
+        self,
+        tmp_builtin_root: Path,
+        tmp_catalogs_dir: Path,
+    ) -> None:
+        """Symmetric half of the fail-fast contract.
+
+        A tampered built-in (wrong HMAC) aborts boot even when the
+        operator root is empty. Verifies ``_verify_one`` is reused
+        verbatim across both roots — the same ``hmac.compare_digest``
+        failure surfaces from the built-in scan.
+        """
+        _write_signed_catalog(
+            tmp_builtin_root,
+            vendor="cambium",
+            model="pmp450i",
+            firmware="15.2.1",
+            oids=dict(_SAMPLE_BUILTIN_OIDS),
+            key="WRONG-KEY",
+        )
+
+        with pytest.raises(CatalogVerificationError) as exc:
+            OidCatalogRegistry.verify(
+                built_in_root=tmp_builtin_root,
+                operator_root=tmp_catalogs_dir,
+                signing_key=SAMPLE_CATALOG_KEY,
+            )
+        assert "hmac" in exc.value.reason.lower() or "signature" in exc.value.reason.lower()
+
 
 # ---------------------------------------------------------------------------
 # helpers
