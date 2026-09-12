@@ -239,13 +239,16 @@ def test_subprocess_boot_writes_only_jsonrpc_to_stdout() -> None:
     }
     payload = json.dumps(init_frame) + "\n"
 
-    # Provide a non-empty signing key so `OidCatalogRegistry.verify_all`
-    # does not abort boot. The empty catalog path means the registry is
-    # empty (no firmwares loaded) — the driver raises at fetch time, not
-    # at boot, so the JSON-RPC layer still responds.
+    # Provide a signing key that matches the shipped built-in baseline
+    # (PR 1 ADR #17). Pre-PR1 this test used any non-empty key because
+    # `verify_all` only scanned the (empty) operator root; post-PR1 the
+    # built-in baseline is also HMAC-verified, so the key has to match
+    # the placeholder shipped under `src/nora/data/oid-catalogs/`.
+    from nora.data import BUILTIN_BASELINE_SIGNING_KEY
+
     env = {
         **os.environ,
-        "NORA_OID_CATALOG_SIGNING_KEY": "test-server-subprocess-key",
+        "NORA_OID_CATALOG_SIGNING_KEY": BUILTIN_BASELINE_SIGNING_KEY,
         "NORA_OID_CATALOGS_PATH": str(PROJECT_ROOT / "data" / "oid-catalogs-tmp"),
         "NORA_DEVICES_INVENTORY_PATH": str(PROJECT_ROOT / "data" / "devices-tmp.yaml"),
     }

@@ -77,3 +77,10 @@ pythonpath = ["src"]
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
 ]
+filterwarnings = [
+    # `importlib.abc.Traversable` is deprecated in 3.12 and slated for
+    # removal in 3.14; we import it conditionally because the canonical
+    # `importlib.resources.abc.Traversable` only landed in 3.14. The
+    # warning fires once at module import and has no functional impact.
+    "ignore:'importlib.abc.Traversable' is deprecated:DeprecationWarning",
+]

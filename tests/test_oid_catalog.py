@@ -356,9 +356,9 @@ class TestMultiRoot:
         # Strip `radioDownlinkRate` from the catalog body.
         payload = json.loads(sample_catalog["path"].read_text())
         payload["oids"].pop("radioDownlinkRate")
-        canonical_body = json.dumps(
-            payload["oids"], sort_keys=True, separators=(",", ":")
-        ).encode("utf-8")
+        canonical_body = json.dumps(payload["oids"], sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
         payload["hmac_sha256"] = hmac.new(
             sample_catalog["key"].encode(), canonical_body, hashlib.sha256
         ).hexdigest()
@@ -575,9 +575,7 @@ class TestMultiRoot:
                 operator_root=tmp_catalogs_dir,
                 signing_key=SAMPLE_CATALOG_KEY,
             )
-        assert (
-            "hmac" in exc.value.reason.lower() or "signature" in exc.value.reason.lower()
-        )
+        assert "hmac" in exc.value.reason.lower() or "signature" in exc.value.reason.lower()
         # The path in the exception MUST point at the operator file
         # (that's the one whose HMAC is invalid); ``_verify_one``
         # aborts the loop as soon as it sees a mismatch.
@@ -611,6 +609,36 @@ class TestMultiRoot:
                 signing_key=SAMPLE_CATALOG_KEY,
             )
         assert "hmac" in exc.value.reason.lower() or "signature" in exc.value.reason.lower()
+
+    def test_builtin_baseline_loads_via_importlib_resources(self) -> None:
+        """Scenario: built-in baseline ships via package data.
+
+        Resolves ``importlib.resources.files("nora.data.oid_catalogs")``
+        and confirms the shipped ``cambium/pmp450i/15.2.1.json`` baseline
+        is present. Then walks the resolved container and verifies the
+        HMAC against :data:`nora.data.BUILTIN_BASELINE_SIGNING_KEY`.
+        """
+        from importlib.resources import files
+
+        from nora.data import BUILTIN_BASELINE_SIGNING_KEY
+
+        built_in_root = files("nora.data.oid-catalogs")
+        # `files(...)` may return a `Path` (dev/source) or `MultiplexedPath`
+        # (wheel); the registry accepts either. The walk must surface the
+        # shipped triple.
+        catalog_path = built_in_root.joinpath("cambium/pmp450i/15.2.1.json")
+        assert catalog_path.is_file() or catalog_path.exists(), (
+            f"shipped baseline not found at {catalog_path}"
+        )
+
+        registry = OidCatalogRegistry.verify(
+            built_in_root=built_in_root,
+            operator_root=Path("/tmp/empty-operator-root-for-builtin-test"),
+            signing_key=BUILTIN_BASELINE_SIGNING_KEY,
+        )
+        assert ("cambium", "pmp450i", "15.2.1") in {tuple(ref) for ref in registry.loaded_refs}
+        catalog = registry.resolve(("cambium", "pmp450i", "15.2.1"))
+        assert catalog.oids["ssr"] == "1.3.6.1.4.1.161.19.3.1.1.5.0"
 
 
 # ---------------------------------------------------------------------------
