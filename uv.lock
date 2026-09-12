@@ -1267,6 +1267,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "fastmcp" },
+    { name = "packaging" },
     { name = "puresnmp" },
     { name = "puresnmp-crypto" },
     { name = "pydantic-settings" },
@@ -1287,6 +1288,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "fastmcp", specifier = ">=3.2,<4" },
+    { name = "packaging", specifier = ">=24.0" },
     { name = "puresnmp", specifier = "==2.0.1" },
     { name = "puresnmp-crypto", specifier = ">=1.0" },
     { name = "pydantic-settings", specifier = ">=2" },

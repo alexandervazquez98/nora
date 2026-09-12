@@ -26,6 +26,7 @@ dependencies = [
     "pydantic-settings>=2",
     "puresnmp==2.0.1",
     "puresnmp-crypto>=1.0",
+    "packaging>=24.0",
 ]
 
 [project.scripts]
