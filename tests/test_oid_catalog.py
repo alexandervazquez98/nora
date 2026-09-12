@@ -769,6 +769,54 @@ class TestSemverResolution:
             f"Exception message must name the registered major 15; got: {message!r}"
         )
 
+    def test_minor_mismatch_returns_closest_lower_minor_with_literal_warning(
+        self,
+        tmp_catalogs_dir: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Scenario: minor mismatch returns closest lower minor with literal warning.
+
+        Registry holds ``(cambium, pmp450i, 15.2.1)`` AND
+        ``(cambium, pmp450i, 15.3.0)``. Resolving ``15.3.1`` returns the
+        catalog at ``15.3.0`` (the highest strictly-less-than) and emits
+        the LITERAL telemetry string
+        ``"OID catalog fallback: requested 15.3.1, using 15.3.0 (minor mismatch)"``.
+        ADR #17 P2 acceptance: the literal is locked by the spec scenario
+        and must match byte-for-byte.
+        """
+        _write_signed_catalog(
+            tmp_catalogs_dir,
+            vendor="cambium",
+            model="pmp450i",
+            firmware="15.2.1",
+            oids=dict(_SAMPLE_BUILTIN_OIDS),
+            key=SAMPLE_CATALOG_KEY,
+        )
+        _write_signed_catalog(
+            tmp_catalogs_dir,
+            vendor="cambium",
+            model="pmp450i",
+            firmware="15.3.0",
+            oids=dict(_SAMPLE_BUILTIN_OIDS),
+            key=SAMPLE_CATALOG_KEY,
+        )
+        registry = OidCatalogRegistry.verify(
+            built_in_root=None,
+            operator_root=tmp_catalogs_dir,
+            signing_key=SAMPLE_CATALOG_KEY,
+        )
+
+        with caplog.at_level(logging.WARNING, logger="nora.drivers.oid_catalog"):
+            catalog = registry.resolve(("cambium", "pmp450i", "15.3.1"))
+
+        assert catalog.firmware == "15.3.0"
+        assert len(caplog.records) >= 1, (
+            f"Expected at least one log record; got: {[r.getMessage() for r in caplog.records]!r}"
+        )
+        assert caplog.records[0].message == (
+            "OID catalog fallback: requested 15.3.1, using 15.3.0 (minor mismatch)"
+        )
+
 
 # ---------------------------------------------------------------------------
 # helpers

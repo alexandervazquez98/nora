@@ -193,11 +193,38 @@ class OidCatalogRegistry:
             )
             raise exc
 
-        # Pass 4 — minor descending fallback. Full algorithm (highest
-        # registered version strictly less than the request + literal
-        # telemetry warning) ships in WU 2.3; for now we raise the
-        # same typed error so the strict-major scenario stays green.
-        raise CatalogNotFoundError(ref)
+        # Pass 4 — minor descending fallback. Pick the highest registered
+        # version strictly less than the request (deterministic, since
+        # the registry was built deterministically in `verify`) and emit
+        # the literal telemetry warning so an operator reading server
+        # stderr can see which minor line the fleet fell back to.
+        eligible = [
+            (fw_version, catalog)
+            for fw_version, catalog in same_major
+            if fw_version < req_version
+        ]
+        if not eligible:
+            # Same major, but no version is strictly less than the
+            # request — e.g. the registry has only `15.3.1` and the
+            # caller asked for `15.3.0`. Same miss surface as the
+            # major-mismatch branch: typed ``CatalogNotFoundError``
+            # whose message names the requested major.
+            exc = CatalogNotFoundError(ref)
+            exc.args = (
+                f"no catalog <= requested {firmware} in major {req_version.major} "
+                f"(ref={ref}); registered in major: "
+                f"{sorted(fw_version.release for fw_version, _ in same_major)}",
+            )
+            raise exc
+
+        eligible.sort(key=lambda pair: pair[0], reverse=True)
+        chosen_version, chosen_catalog = eligible[0]
+        logger.warning(
+            "OID catalog fallback: requested %s, using %s (minor mismatch)",
+            firmware,
+            chosen_catalog.firmware,
+        )
+        return chosen_catalog
 
     # ------------------------------------------------------------------
     # Boot-time construction
