@@ -365,3 +365,87 @@ def test_env_example_lists_session_journal_keys_with_synthetic_values() -> None:
         if re.search(r"(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}", v):
             offenders.append(f"{key}: MAC literal {v!r}")
     assert offenders == [], f".env.example has non-synthetic values for new keys: {offenders}"
+
+
+# --- Requirement: Intervention-memory MCP Settings fields (Phase 3) ---------
+#
+# Three new env-driven fields, defaults per spec R8:
+#   nora_interventions_dir                       = ./var/interventions/
+#   nora_interventions_keyword_search_max_records = 1000
+#   nora_interventions_correlate_scan_limit      = 50
+
+
+def test_intervention_memory_settings_have_safe_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    """All three intervention-memory Settings fields exist with the documented defaults."""
+    import os
+
+    from nora.config import Settings
+
+    # Hermetic env: strip every NORA_/LMSTUDIO_/GEMINI_ var so defaults apply.
+    for key in list(os.environ):
+        if key.startswith(("NORA_", "LMSTUDIO_", "GEMINI_")):
+            monkeypatch.delenv(key, raising=False)
+
+    settings = Settings(_env_file=None, _env_file_encoding=None)
+
+    assert settings.nora_interventions_dir == Path("./var/interventions/"), (
+        f"nora_interventions_dir default wrong: {settings.nora_interventions_dir!r}"
+    )
+    assert settings.nora_interventions_keyword_search_max_records == 1000, (
+        f"nora_interventions_keyword_search_max_records default wrong: {settings.nora_interventions_keyword_search_max_records!r}"
+    )
+    assert settings.nora_interventions_correlate_scan_limit == 50, (
+        f"nora_interventions_correlate_scan_limit default wrong: {settings.nora_interventions_correlate_scan_limit!r}"
+    )
+
+
+def test_intervention_memory_settings_override_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each intervention-memory Settings field is overridable via env."""
+    from nora.config import Settings
+
+    monkeypatch.setenv("NORA_INTERVENTIONS_DIR", "/tmp/custom-records/")
+    monkeypatch.setenv("NORA_INTERVENTIONS_KEYWORD_SEARCH_MAX_RECORDS", "500")
+    monkeypatch.setenv("NORA_INTERVENTIONS_CORRELATE_SCAN_LIMIT", "25")
+
+    settings = Settings(_env_file=None, _env_file_encoding=None)
+
+    assert settings.nora_interventions_dir == Path("/tmp/custom-records/")
+    assert settings.nora_interventions_keyword_search_max_records == 500
+    assert settings.nora_interventions_correlate_scan_limit == 25
+
+
+def test_env_example_documents_three_intervention_memory_keys() -> None:
+    """`.env.example` MUST list every intervention-memory key with a sanitized placeholder.
+
+    Per spec R8 — no real production paths. Defaults point at relative
+    `./var/interventions/`. The two cap keys are uncommented overrides.
+    """
+    env_text = ENV_EXAMPLE.read_text()
+    declared = set(re.findall(r"^([A-Z][A-Z0-9_]+)\s*=", env_text, re.MULTILINE))
+
+    expected_keys = {
+        "NORA_INTERVENTIONS_DIR",
+        "NORA_INTERVENTIONS_KEYWORD_SEARCH_MAX_RECORDS",
+        "NORA_INTERVENTIONS_CORRELATE_SCAN_LIMIT",
+    }
+    missing = expected_keys - declared
+    assert not missing, f".env.example missing intervention-memory keys: {sorted(missing)}"
+
+    # No real credentials, IPs, MACs, hostnames in the new section.
+    offenders: list[str] = []
+    for line in env_text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        if key.strip() not in expected_keys:
+            continue
+        v = value.strip().strip('"').strip("'")
+        if PRIVATE_IPV4.search(v):
+            offenders.append(f"{key}: private IPv4 literal {v!r}")
+        if re.search(r"(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}", v):
+            offenders.append(f"{key}: MAC literal {v!r}")
+        if re.search(r"\b[a-z0-9-]+\.[a-z0-9-]+\.[a-z]{2,}\b", v):
+            if not re.search(r"example\.com|change-?me|localhost|placeholder", v, re.I):
+                offenders.append(f"{key}: hostname literal {v!r}")
+    assert offenders == [], f".env.example has non-synthetic values: {offenders}"
