@@ -72,6 +72,29 @@ class Settings(BaseSettings):
     # most this many of the most-recent records (R6).
     nora_interventions_correlate_scan_limit: int = 50
 
+    # --- Slice 4 — spectrum sweep + HITL-gated migration (PR 4) ---------------
+    # Maintenance-window enforcement. ``nora_maintenance_window_minutes = 0``
+    # disables enforcement (the default; tests override to exercise the
+    # guard). When the value is positive the spectrum sweep tool
+    # (``snmp_run_spectrum_analysis``) refuses calls outside the
+    # configured window — the window starts ``nora_maintenance_window_start_minutes_ago``
+    # minutes before the current clock and lasts for
+    # ``nora_maintenance_window_minutes`` minutes. The two knobs let an
+    # operator anchor the window to a fixed clock offset so the test
+    # suite can pin "now" without sleeping.
+    nora_maintenance_window_minutes: int = 0
+    nora_maintenance_window_start_minutes_ago: int = 0
+    # HITL rollback watchdog (commit 3). Default 300s per
+    # `pmp450i-radio-tools/spec.md` sub-cluster 3 requirement "Rollback
+    # Watchdog With Timeout"; tests override to a fraction of a second
+    # for fast execution.
+    nora_hitl_rollback_timeout_seconds: int = 300
+    # HITL token TTL (commit 3). Default 900s (15 min); the operator
+    # kill-switch sets ``NORA_HITL_TOKEN_TTL_SECONDS=0`` (read via
+    # :func:`nora.config.hitl_kill_switch_active`) to disable HITL
+    # acceptance.
+    nora_hitl_token_ttl_seconds: int = 900
+
     loaded_from: LoadSource = "defaults"
 
     @model_validator(mode="before")
@@ -159,4 +182,32 @@ class Settings(BaseSettings):
         )
 
 
-__all__ = ["Settings", "LoadSource"]
+def hitl_kill_switch_active() -> bool:
+    """Return True when the operator has disabled HITL via the kill switch.
+
+    The HITL approval-token verifier at ``nora.hitl.tokens`` honours an
+    operational backout escape hatch: setting the
+    ``NORA_HITL_TOKEN_TTL_SECONDS`` environment variable to ``0``
+    disables HITL acceptance even for well-formed, unexpired tokens.
+
+    The kill switch lives here (and reads the process environment
+    directly) so the operator can rotate the gate without going
+    through :class:`Settings` — the design contract is that the kill
+    switch MUST work even when ``Settings`` is locked or the process
+    is reading from a pinned config. :mod:`nora.hitl.tokens` is
+    therefore exempt from the repo-wide ``no direct ``os.environ``
+    outside the allow-list`` rule (see
+    ``tests/test_config.py::test_no_os_environ_in_src_nora``); the
+    helper is co-located with the ``Settings`` boundary so the
+    audit trail remains in one module.
+    """
+    raw = os.environ.get("NORA_HITL_TOKEN_TTL_SECONDS")
+    if raw is None:
+        return False
+    try:
+        return int(raw.strip()) == 0
+    except (TypeError, ValueError):
+        return False
+
+
+__all__ = ["Settings", "LoadSource", "hitl_kill_switch_active"]

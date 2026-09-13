@@ -27,16 +27,21 @@ PRIVATE_IPV4 = re.compile(
 
 
 def test_settings_has_seven_user_fields() -> None:
-    """After the thin split, `Settings.model_fields` has exactly 8 entries.
+    """After the thin split, `Settings.model_fields` has exactly 12 entries.
 
-    Seven user-settable fields plus the computed `loaded_from` = 8 total.
+    Eleven user-settable fields plus the computed `loaded_from` = 12 total.
     The nine former LLM/journal fields MUST be gone.
+
+    PR 4 (slice 4) extends the set with four HITL/maintenance-window
+    fields: ``nora_maintenance_window_minutes``,
+    ``nora_maintenance_window_start_minutes_ago``,
+    ``nora_hitl_rollback_timeout_seconds``, ``nora_hitl_token_ttl_seconds``.
     """
     from nora.config import Settings
 
     fields = Settings.model_fields
-    assert len(fields) == 8, (
-        f"Expected 8 model fields (7 user + loaded_from); got {len(fields)}: {sorted(fields)}"
+    assert len(fields) == 12, (
+        f"Expected 12 model fields (11 user + loaded_from); got {len(fields)}: {sorted(fields)}"
     )
 
     forbidden = {
