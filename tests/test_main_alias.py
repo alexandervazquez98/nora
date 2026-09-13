@@ -6,7 +6,7 @@ stderr, and asserts:
 1. stderr contains `DeprecationWarning` mentioning "will be removed in
    the next minor release".
 2. The server still boots (the alias delegates to `nora.cli.main`).
-3. The four-tool surface is reachable via JSON-RPC `tools/list`.
+3. The five-tool surface is reachable via JSON-RPC `tools/list`.
 """
 
 from __future__ import annotations
@@ -194,7 +194,8 @@ def test_python_dash_m_nora_emits_deprecation_warning(tmp_path: Path) -> None:
         "search_intervention_history",
         "get_device_lifecycle_summary",
         "correlate_sector_interference",
+        "save_intervention_record",
     }
     assert tool_names == expected, (
-        f"`python -m nora` must expose the same 4 tools as nora-mcp; got {tool_names}"
+        f"`python -m nora` must expose the same 5 tools as nora-mcp; got {tool_names}"
     )

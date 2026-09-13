@@ -265,7 +265,7 @@ def test_shipped_orchestrator_prompt_loads_on_boot() -> None:
 
 
 def test_orchestrator_prompt_mentions_real_tools_and_no_banned_literals() -> None:
-    """`netops_orchestrator.md` references the four real `@mcp.tool` names
+    """`netops_orchestrator.md` references the five real `@mcp.tool` names
     (without `nora_` prefix) AND none of the banned literals appear.
 
     This includes the explicit Cambium-OUI guard added by this PR: the
@@ -274,12 +274,13 @@ def test_orchestrator_prompt_mentions_real_tools_and_no_banned_literals() -> Non
     package_dir = Path(__file__).resolve().parent.parent / "src" / "nora" / "prompts"
     text = (package_dir / "netops_orchestrator.md").read_text()
 
-    # The four real @mcp.tool names — no `nora_` prefix.
+    # The five real @mcp.tool names — no `nora_` prefix.
     expected_tool_names = (
         "snmp_get_pmp450i_radio_metrics",
         "search_intervention_history",
         "get_device_lifecycle_summary",
         "correlate_sector_interference",
+        "save_intervention_record",
     )
     for name in expected_tool_names:
         assert name in text, f"Orchestrator prompt must mention tool name {name!r}"

@@ -1,12 +1,13 @@
 """NORA FastMCP server — thin split.
 
 Boots a FastMCP instance named "nora" over stdio and exposes exactly
-four `@mcp.tool` registrations and two `@mcp.prompt` registrations:
+five `@mcp.tool` registrations and two `@mcp.prompt` registrations:
 
 * `snmp_get_pmp450i_radio_metrics`         — PMP 450i SNMP driver.
 * `search_intervention_history`           — read-only intervention memory.
 * `get_device_lifecycle_summary`          — read-only intervention memory.
 * `correlate_sector_interference`         — read-only intervention memory.
+* `save_intervention_record`              — writer (issue #12 / new sibling package).
 * `netops_orchestrator` (prompt)          — Lead NOC orchestrator system prompt.
 * `snmp_pmp450i` (prompt)                  — PMP 450i driver system prompt.
 
@@ -25,7 +26,7 @@ The boot sequence is `Settings() -> set_runtime_state(settings) ->
 set_prompt_registry(PromptRegistry.from_settings(settings)) ->
 OidCatalogRegistry.verify_all -> Inventory.from_yaml -> set_driver ->
 mcp.run()` and lives in `cli.py`; this module only owns the server,
-the logging config, the four tools, the two prompts, and a thin
+the logging config, the five tools, the two prompts, and a thin
 log-only middleware that emits one structured stderr line per tool
 call.
 """
@@ -43,6 +44,9 @@ from fastmcp.server.middleware import Middleware
 from nora.config import Settings
 from nora.drivers import get_driver
 from nora.intervention_memory import tools as intervention_tools
+from nora.intervention_writer.writer import (
+    save_intervention_record as _writer_save_intervention_record,
+)
 from nora.prompts.registry import PromptRegistry
 from nora.sanitizer import Sanitizer
 
@@ -56,8 +60,11 @@ _SERVER_INSTRUCTIONS = (
     "NORA provides read-only RF telemetry and persistent intervention memory for "
     "Cambium PMP 450i networks. Always query device lifecycle history and "
     "pre-existing subscriber states before evaluating RF changes or diagnosing "
-    "outages. Adhere strictly to Zero-Leakage: never echo raw credentials, "
-    "private IPs, or MAC addresses."
+    "outages. The `save_intervention_record` tool writes one record under the "
+    "configured interventions directory (atomic `tmp + fsync + os.replace`; "
+    "sanitised on disk; no HITL gate — record-keeping blast-radius is recoverable "
+    "by deleting the file). Adhere strictly to Zero-Leakage: never echo raw "
+    "credentials, private IPs, or MAC addresses."
 )
 
 mcp = FastMCP("nora", instructions=_SERVER_INSTRUCTIONS)
@@ -254,6 +261,35 @@ def correlate_sector_interference(
 
 
 # ---------------------------------------------------------------------------
+# Intervention memory MCP tool — atomic write (issue #12 / writer sibling).
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool
+def save_intervention_record(payload: dict[str, Any]) -> dict[str, Any]:
+    """Atomically write one intervention record under the configured dir.
+
+    Thin delegate to `nora.intervention_writer.writer.save_intervention_record`.
+    The library function is the canonical body — keeps the MCP surface
+    in lock-step with library code that #15 may call from non-MCP paths
+    (`snmp_get_ap_summary` auto-save after a successful diagnostic).
+
+    The wrapper does NOT re-sanitise: W4 masks the on-disk file at write
+    time, and a second sanitisation would drift aliases. The wrapper does
+    NOT require an HITL approval token — record-keeping blast-radius is
+    recoverable by deleting the file; HITL scope is reserved for #15's
+    destructive RF migration.
+
+    Returns a dict. On success: `{"status": "OK", "intervention_id": <stem>}`.
+    On failure: a dict with `"status"` set to one of `INVALID_INPUT` /
+    `INVALID_PAYLOAD` / `PATH_TRAVERSAL_DETECTED` / `DUPLICATE_INTERVENTION_ID`
+    / `WRITE_ERROR`. Never raises.
+    """
+    settings = get_runtime_state()
+    return _writer_save_intervention_record(settings, payload)
+
+
+# ---------------------------------------------------------------------------
 # Prompt registrations — `@mcp.prompt` thin wrappers over `PromptRegistry`.
 # ---------------------------------------------------------------------------
 
@@ -331,6 +367,7 @@ __all__ = [
     "search_intervention_history",
     "get_device_lifecycle_summary",
     "correlate_sector_interference",
+    "save_intervention_record",
     "netops_orchestrator",
     "snmp_pmp450i",
     "register_tool_log_middleware",

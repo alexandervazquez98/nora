@@ -302,6 +302,31 @@ def test_production_modules_do_not_import_nora_server_or_drivers() -> None:
     assert offenders == [], f"Production code imports from nora.server or nora.drivers: {offenders}"
 
 
+def test_reader_does_not_import_from_writer_sibling() -> None:
+    """R2 addendum — no production module under `intervention_memory/` may
+    import from `nora.intervention_writer`, `nora.server`, or
+    `nora.intervention_memory.shim_webui`. The reader stays read-only
+    and one-way dep stays `writer → reader`, never the reverse.
+
+    Mirrors the writer-side AST guard in
+    `tests/intervention_writer/test_banned_imports.py`.
+    """
+    offenders: list[tuple[str, int, str, str]] = []
+    for py in _iter_python_files():
+        if py.name == "__init__.py":
+            # `__init__.py` carries only the R2 docstring addendum; skip
+            # the re-export scan that mirrors the writer's `__init__`.
+            continue
+        for lineno, kind, module in _find_banned_imports_in_file(py):
+            if module == "nora.intervention_writer" or module.startswith(
+                "nora.intervention_writer."
+            ):
+                offenders.append((str(py.relative_to(py.parents[2])), lineno, kind, module))
+    assert offenders == [], (
+        f"Reader imports from writer sibling (one-way dep violated): {offenders}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Self-test poison — Task 6.4 / R2-S2 / R-NEW-3-S1
 # ---------------------------------------------------------------------------

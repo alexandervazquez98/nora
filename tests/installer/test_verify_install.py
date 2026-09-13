@@ -154,7 +154,7 @@ def verify_script_source(verify_script: Path) -> str:
 def test_verify_checks_known_tool_names_and_prompt_names(
     verify_script_source: str,
 ) -> None:
-    """The 4 tool names + 2 prompt names MUST be embedded in the verifier.
+    """The 5 tool names + 2 prompt names MUST be embedded in the verifier.
 
     If a tool is renamed in the codebase without updating the verifier,
     the functional probe will FAIL on every install — that's the alarm
@@ -165,6 +165,7 @@ def test_verify_checks_known_tool_names_and_prompt_names(
         "search_intervention_history",
         "get_device_lifecycle_summary",
         "correlate_sector_interference",
+        "save_intervention_record",
     )
     prompts = ("netops_orchestrator", "snmp_pmp450i")
     for name in (*tools, *prompts):

@@ -23,12 +23,13 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SRC_DIR = PROJECT_ROOT / "src" / "nora"
 
 
-def test_server_exposes_exactly_four_tools() -> None:
-    """After the thin split, the FastMCP instance exposes exactly 4 tools.
+def test_server_exposes_exactly_five_tools() -> None:
+    """After adding the writer, the FastMCP instance exposes exactly 5 tools.
 
-    The four surviving tools are: 1 driver (`snmp_get_pmp450i_radio_metrics`)
-    + 3 intervention (`search_intervention_history`,
-    `get_device_lifecycle_summary`, `correlate_sector_interference`).
+    The five tools are: 1 driver (`snmp_get_pmp450i_radio_metrics`)
+    + 3 intervention read (`search_intervention_history`,
+    `get_device_lifecycle_summary`, `correlate_sector_interference`)
+    + 1 writer (`save_intervention_record`).
     """
     import asyncio
 
@@ -44,9 +45,10 @@ def test_server_exposes_exactly_four_tools() -> None:
         "search_intervention_history",
         "get_device_lifecycle_summary",
         "correlate_sector_interference",
+        "save_intervention_record",
     }
     assert names == expected, (
-        f"Expected exactly 4 tools; got {sorted(names)} "
+        f"Expected exactly 5 tools; got {sorted(names)} "
         f"(missing: {sorted(expected - names)}, extra: {sorted(names - expected)})"
     )
 
@@ -358,7 +360,7 @@ def test_mcp_tool_wrapper_delegates_to_pure_library_function(tmp_path: Path) -> 
 
 
 def test_mcp_instance_exposes_all_nine_tools() -> None:  # noqa: F811 — alias kept for history
-    """Deprecated: use `test_server_exposes_exactly_four_tools` instead."""
+    """Deprecated: use `test_server_exposes_exactly_five_tools` instead."""
     import asyncio
 
     from nora import server as server_mod
@@ -368,15 +370,16 @@ def test_mcp_instance_exposes_all_nine_tools() -> None:  # noqa: F811 — alias 
         return {t.name for t in tools}
 
     names = asyncio.run(_names())
-    # Post-thin-split: exactly 4 tools. This alias test exists so any
+    # Post-thin-split + writer: exactly 5 tools. This alias test exists so any
     # accidentally re-added legacy tool fails the test loudly.
     expected = {
         "snmp_get_pmp450i_radio_metrics",
         "search_intervention_history",
         "get_device_lifecycle_summary",
         "correlate_sector_interference",
+        "save_intervention_record",
     }
-    assert names == expected, f"Expected exactly 4 tools after the thin split; got: {sorted(names)}"
+    assert names == expected, f"Expected exactly 5 tools after writer added; got: {sorted(names)}"
 
 
 def test_free_text_fields_in_search_output_sanitized_via_mcp_wrapper(tmp_path: Path) -> None:
