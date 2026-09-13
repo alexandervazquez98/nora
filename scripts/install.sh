@@ -76,6 +76,7 @@ SKIP_SIGNING_KEY=0
 SKIP_SYSTEMD=0
 SKIP_CATALOG=0
 FORCE_ENV_FILE=0
+FORCE_TRANSPORT_ENV=0
 # NO_COLOR is honored as a courtesy: future color output (e.g., a colored
 # phase banner) would gate on `[ "${NO_COLOR}" = "0" ] && [ -t 1 ]`. The
 # current implementation is colorless, so the variable is parsed but not
@@ -159,6 +160,7 @@ Options:
   --skip-systemd          Don't install / enable the systemd unit.
   --skip-catalog          Don't re-sign the OID catalogs.
   --force-env-file        Overwrite /etc/nora/nora.env from .env.example.
+  --force-transport-env   Overwrite /etc/nora/nora-mcp.env from .env.mcp.example.
   --no-color              Reserved for future ANSI color output.
   --help                  Show this help and exit 0.
 
@@ -198,6 +200,7 @@ parse_args() {
             --skip-systemd) SKIP_SYSTEMD=1 ;;
             --skip-catalog) SKIP_CATALOG=1 ;;
             --force-env-file) FORCE_ENV_FILE=1 ;;
+            --force-transport-env) FORCE_TRANSPORT_ENV=1 ;;
             --no-color) NO_COLOR=1 ;;
             --help|-h) usage; exit 0 ;;
             --) shift; break ;;
@@ -366,6 +369,35 @@ phase_env_file() {
     fi
 }
 
+phase_env_file_mcp() {
+    # Materialize /etc/nora/nora-mcp.env from .env.mcp.example. This file
+    # holds transport config (NORA_MCP_TRANSPORT / _HOST / _PORT / _PATH /
+    # _STATELESS_HTTP) — NEVER the signing key, which is owned by the
+    # existing `phase_env_file()` above. systemd reads this on every
+    # restart, so no `daemon-reload` is needed for env-only changes
+    # (operators edit the file then `systemctl restart nora-mcp`).
+    #
+    # Separate function (not an extension of `phase_env_file()`) so the
+    # signing-key injection path stays centralized for `nora.env` and
+    # cannot leak into `nora-mcp.env`.
+    local env_file="${CONFIG_DIR}/nora-mcp.env"
+    local example="${PREFIX}/.env.mcp.example"
+
+    local should_copy=0
+    if [ ! -f "${env_file}" ]; then
+        should_copy=1
+    elif [ "${FORCE_TRANSPORT_ENV}" = "1" ]; then
+        should_copy=1
+    fi
+
+    if [ "${should_copy}" = "1" ]; then
+        run "materialize ${env_file} from .env.mcp.example" \
+            "install -m 0640 -o '${USER_NAME}' -g '${USER_NAME}' '${example}' '${env_file}'"
+    else
+        printf '[SKIP] %s already exists (use --force-transport-env to overwrite)\n' "${env_file}" >&2
+    fi
+}
+
 phase_catalog() {
     # Re-sign every catalog under ${PREFIX}/data/oid-catalogs/.
     # sign_catalog.py reads NORA_OID_CATALOG_SIGNING_KEY from the env file;
@@ -464,6 +496,7 @@ main() {
     fi
 
     phase_env_file    || { fail "phase_env_file failed"; exit 1; }
+    phase_env_file_mcp || { fail "phase_env_file_mcp failed"; exit 1; }
 
     if [ "${SKIP_CATALOG}" = "1" ]; then
         printf '[SKIP] --skip-catalog: phase_catalog bypassed\n' >&2
