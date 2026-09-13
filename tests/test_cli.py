@@ -44,17 +44,347 @@ def test_cli_main_has_correct_boot_sequence() -> None:
         )
 
 
-def test_cli_main_invokes_mcp_run_without_transport_arg() -> None:
-    """`mcp.run(show_banner=False)` MUST default to stdio (no transport arg)."""
+def _install_mcp_run_stub(cli, calls: list[dict]) -> None:
+    """Replace `cli.mcp.run` with a recording stub.
+
+    Keeps the test in-process (no subprocess boot). The stub records every
+    kwarg call so assertions can pin the resolved `TransportConfig`.
+    """
+    stub = lambda *args, **kwargs: calls.append(kwargs)  # noqa: E731
+    import pytest
+
+    pytest.MonkeyPatch().setattr(cli.mcp, "run", stub)
+
+
+def test_default_stdio_invokes_mcp_run_with_transport_stdio(
+    monkeypatch: object,
+) -> None:
+    """No env vars + no CLI flags → transport is stdio."""
+    import pytest
+
     from nora import cli
 
-    src = inspect.getsource(cli.main)
-    # The exact call must be `mcp.run(show_banner=False)` — no `transport=` kwarg.
-    assert "mcp.run(show_banner=False)" in src, (
-        f"cli.main must call mcp.run(show_banner=False); got: {src!r}"
+    mp = pytest.MonkeyPatch()
+    try:
+        # Wipe every NORA_MCP_* env var so the default is exercised.
+        for var in (
+            "NORA_MCP_TRANSPORT",
+            "NORA_MCP_HOST",
+            "NORA_MCP_PORT",
+            "NORA_MCP_PATH",
+            "NORA_MCP_STATELESS_HTTP",
+        ):
+            mp.delenv(var, raising=False)
+        calls: list[dict] = []
+        mp.setattr(cli.mcp, "run", lambda *a, **kw: calls.append(kw))
+        # Patch out everything before `mcp.run()` so we hit the boot path
+        # without spinning the full server / catalogs. The guard we care
+        # about is that `mcp.run` is invoked with `transport="stdio"`.
+        mp.setattr(cli, "configure_logging", lambda: None)
+        mp.setattr(cli, "set_runtime_state", lambda s: None)
+        mp.setattr(cli, "set_prompt_registry", lambda r: None)
+        mp.setattr(
+            cli,
+            "PromptRegistry",
+            type("PR", (), {"from_settings": classmethod(lambda cls, s: object())}),
+        )
+        mp.setattr(
+            cli.OidCatalogRegistry,
+            "verify_all",
+            classmethod(lambda cls, s: object()),
+        )
+        mp.setattr(
+            cli.Inventory,
+            "from_yaml",
+            classmethod(lambda cls, p: type("I", (), {"device_ids": []})()),
+        )
+        mp.setattr(cli, "set_driver", lambda d: None)
+        mp.setattr(cli, "register_tool_log_middleware", lambda: None)
+        mp.setattr(
+            cli,
+            "verify_tools_are_catalogued",
+            lambda registry: None,
+        )
+        # `Settings()` is constructed inside `cli.main` — return a sentinel
+        # with the two attributes cli.main reads.
+        sentinel = type("S", (), {"nora_oid_catalogs_path": "", "nora_devices_inventory_path": ""})()
+        mp.setattr(cli, "Settings", lambda: sentinel)
+
+        with pytest.raises(SystemExit) as ei:
+            cli.main(argv=["nora-mcp"])
+    finally:
+        mp.undo()
+
+    assert ei.value.code == 0, (
+        f"default stdio boot must exit 0; got code={ei.value.code!r}"
     )
-    assert "transport=" not in src, (
-        f"cli.main must NOT pass transport= (defaults to stdio); got: {src!r}"
+    assert calls, "cli.main must invoke mcp.run exactly once"
+    assert calls[0].get("transport") == "stdio", (
+        f"default transport must be stdio; got call kwargs={calls[0]!r}"
+    )
+    assert calls[0].get("show_banner") is False
+
+
+def test_env_vars_select_transport_when_no_cli_flag(
+    monkeypatch: object,
+) -> None:
+    """`NORA_MCP_TRANSPORT=http` + no CLI flags → transport is http."""
+    import pytest
+
+    from nora import cli
+
+    mp = pytest.MonkeyPatch()
+    try:
+        mp.setenv("NORA_MCP_TRANSPORT", "http")
+        mp.setenv("NORA_MCP_PORT", "8765")
+        for var in ("NORA_MCP_HOST", "NORA_MCP_PATH", "NORA_MCP_STATELESS_HTTP"):
+            mp.delenv(var, raising=False)
+        calls: list[dict] = []
+        mp.setattr(cli.mcp, "run", lambda *a, **kw: calls.append(kw))
+        mp.setattr(cli, "configure_logging", lambda: None)
+        mp.setattr(cli, "set_runtime_state", lambda s: None)
+        mp.setattr(cli, "set_prompt_registry", lambda r: None)
+        mp.setattr(
+            cli,
+            "PromptRegistry",
+            type("PR", (), {"from_settings": classmethod(lambda cls, s: object())}),
+        )
+        mp.setattr(
+            cli.OidCatalogRegistry,
+            "verify_all",
+            classmethod(lambda cls, s: object()),
+        )
+        mp.setattr(
+            cli.Inventory,
+            "from_yaml",
+            classmethod(lambda cls, p: type("I", (), {"device_ids": []})()),
+        )
+        mp.setattr(cli, "set_driver", lambda d: None)
+        mp.setattr(cli, "register_tool_log_middleware", lambda: None)
+        mp.setattr(cli, "verify_tools_are_catalogued", lambda registry: None)
+        sentinel = type("S", (), {"nora_oid_catalogs_path": "", "nora_devices_inventory_path": ""})()
+        mp.setattr(cli, "Settings", lambda: sentinel)
+
+        with pytest.raises(SystemExit) as ei:
+            cli.main(argv=["nora-mcp"])
+    finally:
+        mp.undo()
+
+    assert ei.value.code == 0
+    assert calls, "cli.main must invoke mcp.run exactly once"
+    assert calls[0].get("transport") == "http", (
+        f"NORA_MCP_TRANSPORT=http must select http; got {calls[0]!r}"
+    )
+    assert calls[0].get("port") == 8765
+
+
+def test_cli_flags_override_env_vars(monkeypatch: object) -> None:
+    """CLI flags beat env vars (precedence CLI > env > default)."""
+    import pytest
+
+    from nora import cli
+
+    mp = pytest.MonkeyPatch()
+    try:
+        mp.setenv("NORA_MCP_TRANSPORT", "stdio")
+        mp.setenv("NORA_MCP_PORT", "8000")
+        calls: list[dict] = []
+        mp.setattr(cli.mcp, "run", lambda *a, **kw: calls.append(kw))
+        mp.setattr(cli, "configure_logging", lambda: None)
+        mp.setattr(cli, "set_runtime_state", lambda s: None)
+        mp.setattr(cli, "set_prompt_registry", lambda r: None)
+        mp.setattr(
+            cli,
+            "PromptRegistry",
+            type("PR", (), {"from_settings": classmethod(lambda cls, s: object())}),
+        )
+        mp.setattr(
+            cli.OidCatalogRegistry,
+            "verify_all",
+            classmethod(lambda cls, s: object()),
+        )
+        mp.setattr(
+            cli.Inventory,
+            "from_yaml",
+            classmethod(lambda cls, p: type("I", (), {"device_ids": []})()),
+        )
+        mp.setattr(cli, "set_driver", lambda d: None)
+        mp.setattr(cli, "register_tool_log_middleware", lambda: None)
+        mp.setattr(cli, "verify_tools_are_catalogued", lambda registry: None)
+        sentinel = type("S", (), {"nora_oid_catalogs_path": "", "nora_devices_inventory_path": ""})()
+        mp.setattr(cli, "Settings", lambda: sentinel)
+
+        with pytest.raises(SystemExit) as ei:
+            cli.main(argv=["nora-mcp", "--transport=http", "--port=9000"])
+    finally:
+        mp.undo()
+
+    assert ei.value.code == 0
+    assert calls, "cli.main must invoke mcp.run exactly once"
+    assert calls[0].get("transport") == "http"
+    assert calls[0].get("port") == 9000, (
+        f"--port=9000 must beat env var 8000; got {calls[0]!r}"
+    )
+
+
+def test_invalid_transport_exits_2_with_stderr_naming_options(
+    monkeypatch: object,
+    capsys: object,
+) -> None:
+    """`NORA_MCP_TRANSPORT=garbage` → exit 2 + stderr names bad value + 4 options."""
+    import pytest
+
+    from nora import cli
+
+    mp = pytest.MonkeyPatch()
+    try:
+        mp.setenv("NORA_MCP_TRANSPORT", "garbage")
+        calls: list[dict] = []
+        mp.setattr(cli.mcp, "run", lambda *a, **kw: calls.append(kw))
+        mp.setattr(cli, "configure_logging", lambda: None)
+        mp.setattr(cli, "set_runtime_state", lambda s: None)
+        mp.setattr(cli, "set_prompt_registry", lambda r: None)
+        mp.setattr(
+            cli,
+            "PromptRegistry",
+            type("PR", (), {"from_settings": classmethod(lambda cls, s: object())}),
+        )
+        mp.setattr(
+            cli.OidCatalogRegistry,
+            "verify_all",
+            classmethod(lambda cls, s: object()),
+        )
+        mp.setattr(
+            cli.Inventory,
+            "from_yaml",
+            classmethod(lambda cls, p: type("I", (), {"device_ids": []})()),
+        )
+        mp.setattr(cli, "set_driver", lambda d: None)
+        mp.setattr(cli, "register_tool_log_middleware", lambda: None)
+        mp.setattr(cli, "verify_tools_are_catalogued", lambda registry: None)
+        sentinel = type("S", (), {"nora_oid_catalogs_path": "", "nora_devices_inventory_path": ""})()
+        mp.setattr(cli, "Settings", lambda: sentinel)
+
+        with pytest.raises(SystemExit) as ei:
+            cli.main(argv=["nora-mcp"])
+    finally:
+        mp.undo()
+
+    assert ei.value.code == 2, (
+        f"invalid transport must exit 2; got code={ei.value.code!r}"
+    )
+    assert calls == [], (
+        f"mcp.run MUST NOT be invoked on invalid transport; got calls={calls!r}"
+    )
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    stderr = captured.err
+    assert "garbage" in stderr, (
+        f"stderr must name the bad value `garbage`; got: {stderr!r}"
+    )
+    for option in ("stdio", "http", "streamable-http", "sse"):
+        assert option in stderr, (
+            f"stderr must list valid option {option!r}; got: {stderr!r}"
+        )
+
+
+def test_stateless_http_with_sse_rejected(
+    monkeypatch: object,
+    capsys: object,
+) -> None:
+    """`--transport=sse --stateless-http` is incompatible (FastMCP rule)."""
+    import pytest
+
+    from nora import cli
+
+    mp = pytest.MonkeyPatch()
+    try:
+        for var in (
+            "NORA_MCP_TRANSPORT",
+            "NORA_MCP_HOST",
+            "NORA_MCP_PORT",
+            "NORA_MCP_PATH",
+            "NORA_MCP_STATELESS_HTTP",
+        ):
+            mp.delenv(var, raising=False)
+        calls: list[dict] = []
+        mp.setattr(cli.mcp, "run", lambda *a, **kw: calls.append(kw))
+        mp.setattr(cli, "configure_logging", lambda: None)
+        mp.setattr(cli, "set_runtime_state", lambda s: None)
+        mp.setattr(cli, "set_prompt_registry", lambda r: None)
+        mp.setattr(
+            cli,
+            "PromptRegistry",
+            type("PR", (), {"from_settings": classmethod(lambda cls, s: object())}),
+        )
+        mp.setattr(
+            cli.OidCatalogRegistry,
+            "verify_all",
+            classmethod(lambda cls, s: object()),
+        )
+        mp.setattr(
+            cli.Inventory,
+            "from_yaml",
+            classmethod(lambda cls, p: type("I", (), {"device_ids": []})()),
+        )
+        mp.setattr(cli, "set_driver", lambda d: None)
+        mp.setattr(cli, "register_tool_log_middleware", lambda: None)
+        mp.setattr(cli, "verify_tools_are_catalogued", lambda registry: None)
+        sentinel = type("S", (), {"nora_oid_catalogs_path": "", "nora_devices_inventory_path": ""})()
+        mp.setattr(cli, "Settings", lambda: sentinel)
+
+        with pytest.raises(SystemExit) as ei:
+            cli.main(argv=["nora-mcp", "--transport=sse", "--stateless-http"])
+    finally:
+        mp.undo()
+
+    assert ei.value.code == 2, (
+        f"sse+stateless_http must exit 2; got code={ei.value.code!r}"
+    )
+    assert calls == [], (
+        f"mcp.run MUST NOT be invoked when sse+stateless_http is rejected; got {calls!r}"
+    )
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert "sse" in captured.err.lower(), (
+        f"stderr must mention sse; got: {captured.err!r}"
+    )
+    assert "stateless" in captured.err.lower(), (
+        f"stderr must mention stateless; got: {captured.err!r}"
+    )
+
+
+def test_help_exits_zero_lists_transport_flag(
+    monkeypatch: object,
+    capsys: object,
+) -> None:
+    """`nora-mcp --help` exits 0 and lists `--transport`."""
+    import pytest
+
+    from nora import cli
+
+    mp = pytest.MonkeyPatch()
+    try:
+        for var in (
+            "NORA_MCP_TRANSPORT",
+            "NORA_MCP_HOST",
+            "NORA_MCP_PORT",
+            "NORA_MCP_PATH",
+            "NORA_MCP_STATELESS_HTTP",
+        ):
+            mp.delenv(var, raising=False)
+        calls: list[dict] = []
+        mp.setattr(cli.mcp, "run", lambda *a, **kw: calls.append(kw))
+
+        with pytest.raises(SystemExit) as ei:
+            cli.main(argv=["nora-mcp", "--help"])
+    finally:
+        mp.undo()
+
+    assert ei.value.code == 0, (
+        f"--help must exit 0; got code={ei.value.code!r}"
+    )
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert "--transport" in captured.out, (
+        f"--help output must list --transport flag; got: {captured.out!r}"
     )
 
 
