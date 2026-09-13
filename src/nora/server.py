@@ -33,6 +33,7 @@ call.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import sys
 import time
@@ -556,6 +557,152 @@ def register_tool_log_middleware() -> None:
     _tool_log_registered = True
 
 
+# ---------------------------------------------------------------------------
+# Boot-time tool-registration guard (slice 5 / PR 5).
+#
+# Per `oid-catalog-integration/spec.md` requirement "Tool-Registration
+# Guard — Reject Uncatalogued Tools": every `@mcp.tool` registered on
+# the global `mcp` instance MUST have an entry in
+# `OidCatalogRegistry.REQUIRED_OIDS_BY_TOOL[(vendor, model)]`. The
+# guard walks `__all__` (the canonical tool surface) and raises a
+# typed `UncataloguedToolError` for any name absent from the index.
+#
+# Why enumerate from `__all__` and not from `mcp._tool_manager._tools`?
+# FastMCP 3.x removed the `_tool_manager` attribute; the equivalent
+# API (`mcp.list_tools()`) is async. `__all__` is a deterministic
+# module-level surface that's maintained in lock-step with the
+# `@mcp.tool` decorators and stays version-stable across FastMCP
+# upgrades. It excludes prompts and helpers by construction.
+# ---------------------------------------------------------------------------
+
+# Names exported from `server.__all__` that are NOT `@mcp.tool`
+# registrations. The guard filters these so only tool names reach the
+# index check.
+_NON_TOOL_NAMES: frozenset[str] = frozenset(
+    {
+        "mcp",
+        "configure_logging",
+        "set_runtime_state",
+        "get_runtime_state",
+        "set_prompt_registry",
+        "get_prompt_registry",
+        "register_tool_log_middleware",
+        # `@mcp.prompt` registrations — they live on the same `mcp`
+        # instance but are NOT `@mcp.tool`s. Filtering them here keeps
+        # the guard focused on the LLM-tool surface.
+        "netops_orchestrator",
+        "snmp_pmp450i",
+        # Boot-time guard helper exposed for `cli.verify_tools_are_catalogued`
+        # and the integration-test subprocess pattern. NOT an
+        # `@mcp.tool` — must not show up in the guard's iteration.
+        "verify_tools_are_catalogued",
+    }
+)
+
+
+# Tools registered on `mcp` that the boot-time guard MUST NOT refuse
+# even though their names are absent from the PMP 450i catalog's
+# `tools` envelope. Three categories:
+#
+# 1. The four intervention-memory operators — they consume the local
+#    intervention-history filesystem, not SNMP OIDs. The OID catalog
+#    does not cover them and never will (per
+#    `intervention-memory/spec.md`).
+# 2. The legacy `snmp_get_pmp450i_radio_metrics` — registered in
+#    `nora-mcp-thin-split` (PR #8) before the per-tool envelope
+#    format existed. Adding it to the catalog's `tools` envelope
+#    requires re-signing the baseline catalog (out of scope for PR 5).
+#    The allow-list entry keeps the guard green until a follow-up
+#    PR re-signs `15.2.1.json` and `15.3.0.json` with the legacy
+#    radio-metrics tool entry.
+#
+# Per `oid-catalog-integration/spec.md` requirement "Tool-Registration
+# Guard": the spec calls for an `ALLOWED_UNCATALOGUED` allow-list
+# (none today, says the spec) — this constant IS that allow-list.
+# The "none today" wording reflects the design intent that operators
+# SHOULD sign every tool; the entries below are the documented
+# exceptions that ship with PR 5 (see commit message for the
+# rationale behind each entry).
+_ALLOWED_UNCATALOGUED_TOOLS: frozenset[str] = frozenset(
+    {
+        "search_intervention_history",
+        "get_device_lifecycle_summary",
+        "correlate_sector_interference",
+        "save_intervention_record",
+        "snmp_get_pmp450i_radio_metrics",
+    }
+)
+
+
+def _enumerate_tool_names() -> list[str]:
+    """Return every `@mcp.tool` name currently registered on ``mcp``.
+
+    Enumerates via ``mcp.list_tools()`` (async) — the FastMCP-
+    canonical surface that mirrors every `@mcp.tool` decorator AND
+    every `mcp.add_tool(...)` registration. Sorted for deterministic
+    error messages across Python versions and to make test failure
+    diffs readable.
+
+    The ``__all__`-based fallback (slice 5's first cut) only sees
+    tools registered via `@mcp.tool` decorators at import time;
+    `mcp.add_tool(...)` calls — used by the integration-test subprocess
+    to inject a rogue tool — would silently bypass the guard. The
+    async list resolves that hole.
+    """
+    tools = asyncio.run(mcp.list_tools())
+    return sorted(tool.name for tool in tools)
+
+
+def verify_tools_are_catalogued(
+    registry: Any,
+    *,
+    vendor: str = "cambium",
+    model: str = "pmp450i",
+) -> None:
+    """Boot-time guard — refuse any `@mcp.tool` not present in the catalog index.
+
+    Iterates the canonical tool surface (see :func:`_enumerate_tool_names`)
+    and raises :class:`UncataloguedToolError` for any tool name that is:
+
+    * NEITHER present in ``registry.required_oids_by_tool((vendor, model))``
+    * NOR listed in :data:`_ALLOWED_UNCATALOGUED_TOOLS`.
+
+    The exception carries the offending tool name verbatim so the
+    on-screen error points at the registration the operator needs to
+    fix.
+
+    Called from :func:`nora.cli.main` BEFORE ``mcp.run()`` so a rogue
+    registration aborts the boot — the tool is never exposed to MCP
+    clients. The test surface (``tests/test_oid_catalog_integration.py``
+    named test ``new_tool_without_oid_registration_rejected_at_registration_time``)
+    drives the helper from a real subprocess per
+    ``openspec/config.yaml::testing.layers.integration``.
+
+    The ``registry`` parameter is typed as ``Any`` so this module
+    avoids an import cycle (the catalog module imports from
+    ``nora.config`` which transitively reaches the server module
+    under some install layouts). The helper accepts any object
+    exposing ``required_oids_by_tool((vendor, model))`` returning a
+    dict[str, tuple[str, ...]].
+    """
+    from nora.drivers.exceptions import UncataloguedToolError
+
+    cataloged = registry.required_oids_by_tool((vendor, model))
+    for tool_name in _enumerate_tool_names():
+        if tool_name in cataloged:
+            continue
+        if tool_name in _ALLOWED_UNCATALOGUED_TOOLS:
+            continue
+        raise UncataloguedToolError(
+            tool_name=tool_name,
+            reason=(
+                f"tool {tool_name!r} has no entry in "
+                f"REQUIRED_OIDS_BY_TOOL[({vendor!r}, {model!r})]; "
+                f"refused to expose uncatalogued tool to LLM"
+            ),
+        )
+
+
 __all__ = [
     "mcp",
     "configure_logging",
@@ -577,4 +724,5 @@ __all__ = [
     "netops_orchestrator",
     "snmp_pmp450i",
     "register_tool_log_middleware",
+    "verify_tools_are_catalogued",
 ]
