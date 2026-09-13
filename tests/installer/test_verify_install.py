@@ -154,18 +154,32 @@ def verify_script_source(verify_script: Path) -> str:
 def test_verify_checks_known_tool_names_and_prompt_names(
     verify_script_source: str,
 ) -> None:
-    """The 5 tool names + 2 prompt names MUST be embedded in the verifier.
+    """The 11 tool names + 2 prompt names MUST be embedded in the verifier.
 
     If a tool is renamed in the codebase without updating the verifier,
     the functional probe will FAIL on every install — that's the alarm
-    bell this test installs.
+    bell this test installs. The 11 tools reflect the unified NetOps
+    radio surface shipped via PRs #27-#29 of the
+    ``2026-09-13-pmp450i-production-surface`` cluster plus the original
+    5 (3 lifecycle/intervention + 2 radio metrics) and the 5th writer
+    tool ``save_intervention_record`` shipped via PR #25.
     """
     tools = (
+        # Original 5 (PRs #26 + #25): radio metrics + intervention lifecycle + writer.
         "snmp_get_pmp450i_radio_metrics",
         "search_intervention_history",
         "get_device_lifecycle_summary",
         "correlate_sector_interference",
         "save_intervention_record",
+        # Slice 2 (PR #27): read-summary helpers.
+        "snmp_get_ap_summary",
+        "snmp_get_frame_utilization",
+        # Slice 3 (PR #28): SM-table + SM diagnostics.
+        "snmp_get_sm_table",
+        "snmp_get_sm_detailed_diagnostics",
+        # Slice 4 (PR #29): spectrum sweep + RF migration.
+        "snmp_run_spectrum_analysis",
+        "snmp_migrate_radio_frequency",
     )
     prompts = ("netops_orchestrator", "snmp_pmp450i")
     for name in (*tools, *prompts):
