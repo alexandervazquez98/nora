@@ -37,6 +37,7 @@ from nora.server import (  # noqa: E402
     configure_logging,
     mcp,
     register_tool_log_middleware,
+    set_prompt_registry,
     set_runtime_state,
 )
 
@@ -50,7 +51,8 @@ def main() -> None:
     # Boot the runtime state BEFORE the driver layer so the intervention
     # tools can read settings on their first invocation.
     set_runtime_state(settings)
-    PromptRegistry.from_settings(settings)
+    prompt_registry = PromptRegistry.from_settings(settings)
+    set_prompt_registry(prompt_registry)
     catalog_registry = OidCatalogRegistry.verify_all(settings)
     inventory = Inventory.from_yaml(settings.nora_devices_inventory_path)
     set_driver(Pmp450iDriver(inventory=inventory, catalog_registry=catalog_registry))
