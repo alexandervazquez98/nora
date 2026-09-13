@@ -3,14 +3,19 @@
 This subpackage owns the per-vendor driver boundary. Phase 3 will add
 sibling subpackages for PTP 450/650, PMP switches, etc. The current
 module re-exports the typed exception hierarchy, the public models,
-and the `Pmp450iDriver` facade so callers can write::
+and the `Pmp450iDriver` / `Pmp450iSnmpDriver` facades so callers can
+write::
 
     from nora.drivers.snmp_pmp450i import (
-        Pmp450iDriver, RadioMetricsReport, Device, Inventory,
+        Pmp450iDriver, Pmp450iSnmpDriver, RadioMetricsReport,
+        Device, Inventory,
         DriverError, RefusesWriteError, DeviceNotFoundError,
         NetworkUnreachableError, SnmpTimeoutError,
         CatalogNotFoundError, CatalogVerificationError,
         PromptNotFoundError,
+        AutonomousMutationRejected,
+        MaintenanceWindowViolation,
+        UncataloguedToolError,
     )
 """
 

@@ -9,6 +9,8 @@ into a deep submodule. The implementation lives in:
     ``nora/drivers/inventory.py``   — `Device` + `Inventory`.
     ``nora/drivers/oid_catalog.py`` — `OidCatalog` + HMAC verify.
     ``nora/drivers/registry.py``    — module-level driver singleton.
+    ``nora/drivers/resolver.py``    — `DeviceResolver` (IP-direct, PR 1).
+    ``nora/drivers/interface.py``   — `DeviceDriverInterface` Protocol.
     ``nora/drivers/snmp_pmp450i/``  — per-vendor SNMP driver.
 """
 
@@ -27,7 +29,9 @@ from nora.drivers.exceptions import (
     SnmpTimeoutError,
     UncataloguedToolError,
 )
+from nora.drivers.interface import DeviceDriverInterface
 from nora.drivers.registry import get_driver, set_driver
+from nora.drivers.resolver import DeviceResolver, SnmpCredentials
 
 __all__ = [
     "DriverError",
@@ -42,6 +46,10 @@ __all__ = [
     "AutonomousMutationRejected",
     "MaintenanceWindowViolation",
     "UncataloguedToolError",
+    # Slice-1 seam — re-exported at the top level.
+    "DeviceDriverInterface",
+    "DeviceResolver",
+    "SnmpCredentials",
     "get_driver",
     "set_driver",
 ]
