@@ -62,6 +62,9 @@ _SAMPLE_CATALOG_PAYLOAD: dict[str, str] = {
     "spectrumNoiseFloorC": "1.3.6.1.4.1.161.19.3.1.1.92.0",
     "spectrumChannelRank": "1.3.6.1.4.1.161.19.3.1.1.93.0",
     "spectrumScanStatus": "1.3.6.1.4.1.161.19.3.1.1.94.0",
+    # PR 4 — slice 4 RF-migration additions.
+    "migrateCarrierFrequency": "1.3.6.1.4.1.161.19.3.1.1.95.0",
+    "migratePriorCarrierFrequency": "1.3.6.1.4.1.161.19.3.1.1.96.0",
 }
 
 # Deterministic key for HMAC verification in tests. NOT for production.

@@ -34,8 +34,9 @@ def test_server_exposes_exactly_nine_tools() -> None:
     `get_device_lifecycle_summary`, `correlate_sector_interference`)
     + 1 writer (`save_intervention_record`).
 
-    PR 4 (slice 4 commit 2) added ``snmp_run_spectrum_analysis`` — the
-    expected set is therefore 10 tools post-merge.
+    PR 4 (slice 4 commit 2) added ``snmp_run_spectrum_analysis`` AND
+    commit 3 added ``snmp_migrate_radio_frequency`` — the expected
+    set is therefore 11 tools post-merge.
     """
     import asyncio
 
@@ -53,13 +54,14 @@ def test_server_exposes_exactly_nine_tools() -> None:
         "snmp_get_sm_table",
         "snmp_get_sm_detailed_diagnostics",
         "snmp_run_spectrum_analysis",
+        "snmp_migrate_radio_frequency",
         "search_intervention_history",
         "get_device_lifecycle_summary",
         "correlate_sector_interference",
         "save_intervention_record",
     }
     assert names == expected, (
-        f"Expected exactly 10 tools; got {sorted(names)} "
+        f"Expected exactly 11 tools; got {sorted(names)} "
         f"(missing: {sorted(expected - names)}, extra: {sorted(names - expected)})"
     )
 
@@ -373,9 +375,10 @@ def test_mcp_tool_wrapper_delegates_to_pure_library_function(tmp_path: Path) -> 
 def test_mcp_instance_exposes_all_nine_tools() -> None:  # noqa: F811 — alias kept for history
     """Deprecated: use `test_server_exposes_exactly_nine_tools` instead.
 
-    Post-thin-split + writer + slice 2 + slice 3 + slice 4 commit 2
-    (spectrum): exactly 10 tools. This alias test exists so any
-    accidentally re-added legacy tool fails the test loudly.
+    Post-thin-split + writer + slice 2 + slice 3 + slice 4 (spectrum
+    + HITL-gated migration): exactly 11 tools. This alias test
+    exists so any accidentally re-added legacy tool fails the test
+    loudly.
     """
     import asyncio
 
@@ -393,12 +396,13 @@ def test_mcp_instance_exposes_all_nine_tools() -> None:  # noqa: F811 — alias 
         "snmp_get_sm_table",
         "snmp_get_sm_detailed_diagnostics",
         "snmp_run_spectrum_analysis",
+        "snmp_migrate_radio_frequency",
         "search_intervention_history",
         "get_device_lifecycle_summary",
         "correlate_sector_interference",
         "save_intervention_record",
     }
-    assert names == expected, f"Expected exactly 10 tools after slice 4; got: {sorted(names)}"
+    assert names == expected, f"Expected exactly 11 tools after slice 4; got: {sorted(names)}"
 
 
 def test_free_text_fields_in_search_output_sanitized_via_mcp_wrapper(tmp_path: Path) -> None:

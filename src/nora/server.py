@@ -53,9 +53,10 @@ from nora.sanitizer import Sanitizer
 logger = logging.getLogger("nora.server")
 
 # Server-level `instructions` advertised to MCP clients on connect.
-# Reinforces the Zero-Leakage contract and the "always check
-# intervention memory first" workflow without leaking any private
-# infra detail into the wire.
+# Reinforces the Zero-Leakage contract, the "always check
+# intervention memory first" workflow, AND the HITL gate on
+# `snmp_migrate_radio_frequency` (slice 4) without leaking any
+# private infra detail into the wire.
 _SERVER_INSTRUCTIONS = (
     "NORA provides read-only RF telemetry and persistent intervention memory for "
     "Cambium PMP 450i networks. Always query device lifecycle history and "
@@ -63,8 +64,11 @@ _SERVER_INSTRUCTIONS = (
     "outages. The `save_intervention_record` tool writes one record under the "
     "configured interventions directory (atomic `tmp + fsync + os.replace`; "
     "sanitised on disk; no HITL gate — record-keeping blast-radius is recoverable "
-    "by deleting the file). Adhere strictly to Zero-Leakage: never echo raw "
-    "credentials, private IPs, or MAC addresses."
+    "by deleting the file). The `snmp_migrate_radio_frequency` tool mutates "
+    "device state and requires an HITL approval token; missing or invalid tokens "
+    "raise `AutonomousMutationRejected` (autonomous device mutation rejected: "
+    "HITL approval token required). Adhere strictly to Zero-Leakage: never echo "
+    "raw credentials, private IPs, or MAC addresses."
 )
 
 mcp = FastMCP("nora", instructions=_SERVER_INSTRUCTIONS)
@@ -309,6 +313,56 @@ def snmp_run_spectrum_analysis(device_id: str) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# PMP 450i HITL-gated RF migration tool — slice 4 (PR 4 of
+# `2026-09-13-pmp450i-production-surface`).
+#
+# Delegates to ``nora.drivers.snmp_pmp450i.migrate.fetch_migrate``
+# which calls ``nora.hitl.tokens.verify_approval_token`` BEFORE any
+# SNMP SET frame is emitted. Missing or invalid tokens raise
+# :class:`AutonomousMutationRejected` with the literal
+# "autonomous device mutation rejected: HITL approval token
+# required" message (the contract seam pinned by
+# ``tests/test_hitl_tokens.py``).
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool
+def snmp_migrate_radio_frequency(
+    device_id: str,
+    approval_token: str,
+    target_frequency_mhz: float,
+) -> dict[str, Any]:
+    """Migrate a PMP 450i AP to ``target_frequency_mhz`` (HITL-gated).
+
+    Returns a :class:`MigrationResult` carrying ``rolled_back``,
+    ``reason``, ``pre_existing_offline_excluded``,
+    ``online_active_migrated``, ``active_degraded_migrated``,
+    ``target_frequency_mhz``, and ``device_id``.
+
+    Per `pmp450i-radio-tools/spec.md` sub-cluster 3 requirements
+    "Approval Token Contract", "Rollback Watchdog With Timeout",
+    "Make-Before-Break Order + PRE_EXISTING_OFFLINE Exclusion", and
+    "Intervention Record Emission On Migration Completion": the
+    tool requires an HITL approval token, follows make-before-break
+    (ONLINE_ACTIVE → ACTIVE_DEGRADED → AP carrier), and emits one
+    ``POST_MIGRATION`` intervention record per completion (success
+    or rollback).
+    """
+    from nora.drivers.snmp_pmp450i.migrate import fetch_migrate
+
+    driver = get_driver()
+    settings = get_runtime_state()
+    result = fetch_migrate(
+        driver=driver,
+        device_id=device_id,
+        approval_token=approval_token,
+        target_frequency_mhz=target_frequency_mhz,
+        settings=settings,
+    )
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Intervention memory MCP tools (read-only).
 # ---------------------------------------------------------------------------
 
@@ -515,6 +569,7 @@ __all__ = [
     "snmp_get_sm_table",
     "snmp_get_sm_detailed_diagnostics",
     "snmp_run_spectrum_analysis",
+    "snmp_migrate_radio_frequency",
     "search_intervention_history",
     "get_device_lifecycle_summary",
     "correlate_sector_interference",

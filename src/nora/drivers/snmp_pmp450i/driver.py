@@ -331,3 +331,35 @@ class Pmp450iSnmpDriver(Pmp450iDriver):
         from nora.drivers.snmp_pmp450i.spectrum import fetch_spectrum
 
         return fetch_spectrum(driver=self, device_id=device_id, settings=settings)
+
+    def fetch_migrate(
+        self,
+        device_id: str,
+        *,
+        approval_token: str | None,
+        target_frequency_mhz: float,
+        settings: Any = None,
+    ) -> Any:
+        """Run the HITL-gated RF migration for ``device_id``.
+
+        Slice 4 implementation: delegates to ``migrate.fetch_migrate``
+        which calls :func:`nora.hitl.tokens.verify_approval_token`
+        BEFORE any wire frame, follows the make-before-break order
+        (ONLINE_ACTIVE → ACTIVE_DEGRADED → AP carrier), and arms a
+        ``threading.Timer`` watchdog that reverts the SET frame on
+        loss-of-management.
+
+        Per `pmp450i-radio-tools/spec.md` sub-cluster 3 requirements
+        "Approval Token Contract", "Rollback Watchdog With Timeout",
+        "Make-Before-Break Order + PRE_EXISTING_OFFLINE Exclusion",
+        and "Intervention Record Emission On Migration Completion".
+        """
+        from nora.drivers.snmp_pmp450i.migrate import fetch_migrate
+
+        return fetch_migrate(
+            driver=self,
+            device_id=device_id,
+            approval_token=approval_token,
+            target_frequency_mhz=target_frequency_mhz,
+            settings=settings,
+        )

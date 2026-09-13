@@ -92,6 +92,9 @@ _REQUIRED_OIDS_BY_VENDOR_MODEL: Final[dict[tuple[str, str], frozenset[str]]] = {
             "spectrumNoiseFloorC",
             "spectrumChannelRank",
             "spectrumScanStatus",
+            # PR 4 — slice 4 RF-migration additions.
+            "migrateCarrierFrequency",
+            "migratePriorCarrierFrequency",
         }
     ),
 }
