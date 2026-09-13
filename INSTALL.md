@@ -205,6 +205,64 @@ The manual steps above remain valid for operators who need to debug a
 specific phase; the script is a thin wrapper over the same procedure and
 not a separate code path.
 
+### One-line bootstrap (advanced / IaC only)
+
+> **For advanced operators and IaC pipelines only.** The recommended
+> install flow remains the manual `git clone` + `cd` + `sudo scripts/install.sh`
+> shown above. The bootstrap script is a wrapper that automates the
+> `clone + cd + install` sequence for cases where piping from `curl`
+> saves real work (cloud-init `runcmd`, Ansible `command=`, Terraform
+> `local-exec`). Operators who can run three commands do not need this.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/alexandervazquez98/nora/main/scripts/bootstrap.sh | sudo bash -s --
+```
+
+Pin a ref:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/alexandervazquez98/nora/main/scripts/bootstrap.sh | \
+    sudo bash -s -- --ref v0.2.0
+```
+
+Point at an internal mirror (air-gapped):
+
+```bash
+curl -fsSL https://internal-mirror.example.com/nora/scripts/bootstrap.sh | \
+    sudo bash -s -- --repo https://internal-mirror.example.com/nora.git
+```
+
+Download only — clone for audit without installing:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/alexandervazquez98/nora/main/scripts/bootstrap.sh | \
+    sudo bash -s -- --download-only --dest /tmp/nora-review
+```
+
+What `bootstrap.sh` does:
+
+1. Validates that `--repo` is HTTPS (refuses `git://`, `http://`, etc.).
+2. Validates that `--ref` contains no shell-injection vectors
+   (`--upload-pack=`, `ext::`, `;`, `|`, `$`, backtick, backslash,
+   whitespace, or leading `-`).
+3. Refuses to run as direct root (empty `SUDO_USER`); require
+   `sudo bash -s -- ...` instead.
+4. Clones the repo to a deterministic `/tmp/nora-bootstrap-<timestamp>`,
+   or to `<dest>/nora` for `--download-only`.
+5. If the destination already contains a `.git`, runs `git pull --ff-only`
+   instead of cloning (idempotent).
+6. Captures the cloned commit SHA, then invokes `scripts/install.sh`
+   with `--prefix` and `--config-dir` forwarded.
+7. After install, verifies the installed tree's HEAD matches the cloned
+   SHA when `/opt/nora/.git` exists.
+8. Cleans up `/tmp/nora-bootstrap-*` on install success unless
+   `--keep-clone` was passed. On install failure, the clone is
+   preserved and the failure message names the path.
+
+Available flags: `--ref`, `--repo`, `--prefix`, `--config-dir`,
+`--download-only`, `--dest`, `--keep-clone`, `--yes`, `--help`.
+Run `bash scripts/bootstrap.sh --help` for the full reference.
+
 ## What is NOT covered here
 
 - **OpenChat integration**: NORA and OpenChat share
