@@ -232,3 +232,157 @@ def test_registry_does_not_call_os_environ_inline() -> None:
                     "registry.py must not access os.environ directly; "
                     "Settings.prompts_dir is the configured override surface"
                 )
+
+
+# ---------------------------------------------------------------------------
+# R8 — Shipped orchestrator prompt loads on boot
+# ---------------------------------------------------------------------------
+
+
+def test_shipped_orchestrator_prompt_loads_on_boot() -> None:
+    """`src/nora/prompts/netops_orchestrator.md` loads on the same packaged path as R2.
+
+    Body starts with `# Lead NetOps Orchestrator` (a single leading newline
+    from front-matter stripping is conventional and ignored).
+    """
+    package_dir = Path(__file__).resolve().parent.parent / "src" / "nora" / "prompts"
+    shipped = package_dir / "netops_orchestrator.md"
+    assert shipped.is_file(), f"Expected shipped prompt at {shipped}"
+
+    registry = PromptRegistry.scan(package_dir)
+    prompt = registry.get("netops_orchestrator")
+    assert isinstance(prompt, Prompt)
+    assert prompt.name == "netops_orchestrator"
+    assert prompt.description  # non-empty
+    assert prompt.body.lstrip().startswith("# Lead NetOps Orchestrator"), (
+        f"Orchestrator body should start with the heading; got: {prompt.body[:80]!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# R9 — Orchestrator prompt content scan (Zero-Leakage + tool names)
+# ---------------------------------------------------------------------------
+
+
+def test_orchestrator_prompt_mentions_real_tools_and_no_banned_literals() -> None:
+    """`netops_orchestrator.md` references the four real `@mcp.tool` names
+    (without `nora_` prefix) AND none of the banned literals appear.
+
+    This includes the explicit Cambium-OUI guard added by this PR: the
+    literal `00:04:56` MUST NOT appear in the body.
+    """
+    package_dir = Path(__file__).resolve().parent.parent / "src" / "nora" / "prompts"
+    text = (package_dir / "netops_orchestrator.md").read_text()
+
+    # The four real @mcp.tool names — no `nora_` prefix.
+    expected_tool_names = (
+        "snmp_get_pmp450i_radio_metrics",
+        "search_intervention_history",
+        "get_device_lifecycle_summary",
+        "correlate_sector_interference",
+    )
+    for name in expected_tool_names:
+        assert name in text, f"Orchestrator prompt must mention tool name {name!r}"
+
+    # Banned identifiers — anything in this list MUST NOT appear.
+    banned_literals = (
+        "10.0.0.",  # private IPv4 prefix
+        "192.168.",
+        "172.16.",
+        "bb:cc:dd:ee:ff",  # private MAC literal
+        "router-core-01.example.com",
+        "ABC123XYZ-PROD-001",  # private serial literal
+        "00:04:56",  # Cambium OUI prefix — banned even when genericised
+    )
+    for literal in banned_literals:
+        assert literal not in text, f"Orchestrator prompt body contains banned literal {literal!r}"
+
+
+# ---------------------------------------------------------------------------
+# R10 — Server exposes prompts via `@mcp.prompt`
+# ---------------------------------------------------------------------------
+
+
+def test_server_exposes_orchestrator_and_driver_prompts() -> None:
+    """`mcp.list_prompts()` advertises both `netops_orchestrator` and `snmp_pmp450i`.
+
+    FastMCP exposes `list_prompts` as an async coroutine; we drive it
+    through `asyncio.run` so the test stays synchronous and matches the
+    style of every other test in this file.
+    """
+    import asyncio
+
+    from nora import server as server_mod
+
+    async def _names() -> set[str]:
+        prompts = await server_mod.mcp.list_prompts()
+        return {p.name for p in prompts}
+
+    names = asyncio.run(_names())
+    expected = {"netops_orchestrator", "snmp_pmp450i"}
+    assert expected.issubset(names), (
+        f"Expected at least {sorted(expected)} prompts registered on `mcp`; got: {sorted(names)}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# R11 — Server `instructions` set
+# ---------------------------------------------------------------------------
+
+
+def test_server_instructions_are_set_with_required_substrings() -> None:
+    """`mcp.instructions` is non-empty and mentions Zero-Leakage + intervention memory."""
+    from nora import server as server_mod
+
+    instructions = server_mod.mcp.instructions
+    assert isinstance(instructions, str)
+    assert instructions, "mcp.instructions must be a non-empty string"
+    assert "Zero-Leakage" in instructions, (
+        f"mcp.instructions must include the Zero-Leakage contract; got: {instructions!r}"
+    )
+    assert "intervention memory" in instructions, (
+        f"mcp.instructions must mention intervention memory; got: {instructions!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# R12 — `set_prompt_registry` / `get_prompt_registry` lifecycle
+# ---------------------------------------------------------------------------
+
+
+def test_set_prompt_registry_round_trip() -> None:
+    """Injecting a freshly-scanned registry is visible through `get_prompt_registry`.
+
+    Uses the packaged prompts dir so it matches the production boot path.
+    """
+    import nora.server as server_mod
+
+    package_dir = Path(__file__).resolve().parent.parent / "src" / "nora" / "prompts"
+    fresh = PromptRegistry.scan(package_dir)
+
+    previous = server_mod._current_prompt_registry  # type: ignore[attr-defined]
+    try:
+        server_mod.set_prompt_registry(fresh)
+        assert server_mod.get_prompt_registry() is fresh
+        # And the registry can actually serve both prompt names end-to-end.
+        assert server_mod.get_prompt_registry().get("netops_orchestrator").name == (
+            "netops_orchestrator"
+        )
+        assert server_mod.get_prompt_registry().get("snmp_pmp450i").name == "snmp_pmp450i"
+    finally:
+        # Reset module-level state so other tests do not see our injected one.
+        server_mod._current_prompt_registry = previous  # type: ignore[attr-defined]
+
+
+def test_get_prompt_registry_raises_when_not_initialised() -> None:
+    """`get_prompt_registry` raises `RuntimeError` when the registry was not set."""
+    import nora.server as server_mod
+
+    previous = server_mod._current_prompt_registry  # type: ignore[attr-defined]
+    try:
+        server_mod._current_prompt_registry = None  # type: ignore[attr-defined]
+        with pytest.raises(RuntimeError) as exc:
+            server_mod.get_prompt_registry()
+        assert "set_prompt_registry" in str(exc.value)
+    finally:
+        server_mod._current_prompt_registry = previous  # type: ignore[attr-defined]

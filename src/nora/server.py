@@ -1,24 +1,33 @@
 """NORA FastMCP server — thin split.
 
 Boots a FastMCP instance named "nora" over stdio and exposes exactly
-four `@mcp.tool` registrations:
+four `@mcp.tool` registrations and two `@mcp.prompt` registrations:
 
 * `snmp_get_pmp450i_radio_metrics`         — PMP 450i SNMP driver.
 * `search_intervention_history`           — read-only intervention memory.
 * `get_device_lifecycle_summary`          — read-only intervention memory.
 * `correlate_sector_interference`         — read-only intervention memory.
+* `netops_orchestrator` (prompt)          — Lead NOC orchestrator system prompt.
+* `snmp_pmp450i` (prompt)                  — PMP 450i driver system prompt.
+
+The server also sets a server-level `instructions` string so MCP clients
+surface the Zero-Leakage + intervention-memory contract on connect.
 
 The thin server contract demands that:
 
 - All logging goes to stderr (stdout is reserved for JSON-RPC frames).
 - The tool response never echoes any secret read from `Settings`.
 - Free-text error messages are sanitized before they appear in tool output.
+- Prompt bodies never include raw credentials, private IPs, MAC
+  addresses, vendor OUI prefixes, or real hostnames.
 
 The boot sequence is `Settings() -> set_runtime_state(settings) ->
+set_prompt_registry(PromptRegistry.from_settings(settings)) ->
 OidCatalogRegistry.verify_all -> Inventory.from_yaml -> set_driver ->
 mcp.run()` and lives in `cli.py`; this module only owns the server,
-the logging config, the four tools, and a thin log-only middleware that
-emits one structured stderr line per tool call.
+the logging config, the four tools, the two prompts, and a thin
+log-only middleware that emits one structured stderr line per tool
+call.
 """
 
 from __future__ import annotations
@@ -34,14 +43,28 @@ from fastmcp.server.middleware import Middleware
 from nora.config import Settings
 from nora.drivers import get_driver
 from nora.intervention_memory import tools as intervention_tools
+from nora.prompts.registry import PromptRegistry
 from nora.sanitizer import Sanitizer
 
 logger = logging.getLogger("nora.server")
 
-mcp = FastMCP("nora")
+# Server-level `instructions` advertised to MCP clients on connect.
+# Reinforces the Zero-Leakage contract and the "always check
+# intervention memory first" workflow without leaking any private
+# infra detail into the wire.
+_SERVER_INSTRUCTIONS = (
+    "NORA provides read-only RF telemetry and persistent intervention memory for "
+    "Cambium PMP 450i networks. Always query device lifecycle history and "
+    "pre-existing subscriber states before evaluating RF changes or diagnosing "
+    "outages. Adhere strictly to Zero-Leakage: never echo raw credentials, "
+    "private IPs, or MAC addresses."
+)
+
+mcp = FastMCP("nora", instructions=_SERVER_INSTRUCTIONS)
 
 # Module-level state set during boot (`cli.py`) or by tests.
 _current_settings: Settings | None = None
+_current_prompt_registry: PromptRegistry | None = None
 _sanitizer = Sanitizer()
 
 
@@ -83,6 +106,32 @@ def get_runtime_state() -> Settings:
             "NORA server state is not initialised; call nora.server.set_runtime_state() in main()"
         )
     return _current_settings
+
+
+def set_prompt_registry(registry: PromptRegistry) -> None:
+    """Inject the boot-time `PromptRegistry` (used by `cli` and by tests).
+
+    The registry is the single resolver for `@mcp.prompt` lookups; this
+    helper mirrors the `set_runtime_state` pattern so callers wire the
+    registry through the boot sequence rather than the env surface.
+    """
+    global _current_prompt_registry
+    _current_prompt_registry = registry
+
+
+def get_prompt_registry() -> PromptRegistry:
+    """Return the boot-time `PromptRegistry` instance.
+
+    Raises if the registry has not been injected — this is the
+    production safety net against a prompt being requested before
+    `cli.main()` ran.
+    """
+    if _current_prompt_registry is None:
+        raise RuntimeError(
+            "NORA prompt registry is not initialised; "
+            "call nora.server.set_prompt_registry() in main()"
+        )
+    return _current_prompt_registry
 
 
 # ---------------------------------------------------------------------------
@@ -205,6 +254,30 @@ def correlate_sector_interference(
 
 
 # ---------------------------------------------------------------------------
+# Prompt registrations — `@mcp.prompt` thin wrappers over `PromptRegistry`.
+# ---------------------------------------------------------------------------
+
+
+# Module-level, explicit allow-list of prompts exposed over MCP. MUST stay
+# in sync with the `@mcp.prompt` registrations below; the constant exists so
+# readers can audit "what is published to MCP clients" without grepping
+# decorators.
+_EXPOSED_PROMPTS: tuple[str, ...] = ("netops_orchestrator", "snmp_pmp450i")
+
+
+@mcp.prompt
+def netops_orchestrator() -> str:
+    """Lead NOC Wireless Infrastructure Orchestrator system prompt."""
+    return get_prompt_registry().get("netops_orchestrator").body
+
+
+@mcp.prompt
+def snmp_pmp450i() -> str:
+    """PMP 450i SNMP driver operator-facing system prompt."""
+    return get_prompt_registry().get("snmp_pmp450i").body
+
+
+# ---------------------------------------------------------------------------
 # Thin log-only middleware.
 # ---------------------------------------------------------------------------
 
@@ -252,9 +325,13 @@ __all__ = [
     "configure_logging",
     "set_runtime_state",
     "get_runtime_state",
+    "set_prompt_registry",
+    "get_prompt_registry",
     "snmp_get_pmp450i_radio_metrics",
     "search_intervention_history",
     "get_device_lifecycle_summary",
     "correlate_sector_interference",
+    "netops_orchestrator",
+    "snmp_pmp450i",
     "register_tool_log_middleware",
 ]
