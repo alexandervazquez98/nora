@@ -25,6 +25,13 @@ RestartSec=5
 # unit definition.
 EnvironmentFile=/etc/nora/nora.env
 
+# Transport-only config (NORA_MCP_TRANSPORT / _HOST / _PORT / _PATH /
+# _STATELESS_HTTP). Materialized by `scripts/install.sh` from the
+# `.env.mcp.example` template at mode 0640 owned by `nora:nora`. Env-only
+# edits here take effect on the next `systemctl restart nora-mcp` —
+# `daemon-reload` is NOT needed for env-file changes.
+EnvironmentFile=/etc/nora/nora-mcp.env
+
 # ----- Hardening (defense in depth — NORA is a sensitive tool) -----------
 NoNewPrivileges=true
 ProtectSystem=strict
