@@ -128,6 +128,15 @@ class OidCatalog(BaseModel):
     model: str
     firmware: str
     oids: dict[str, str] = Field(default_factory=dict)
+    # PR 5 (slice 5 of `2026-09-13-pmp450i-production-surface`): the
+    # catalog envelope carries a `tools` map (`tool_name -> [OID
+    # names]`) that lets the boot-time guard verify every
+    # `@mcp.tool` registration is backed by a signed catalog entry.
+    # Stored verbatim on the catalog so the registry can flatten it
+    # into the `REQUIRED_OIDS_BY_TOOL` index without re-walking the
+    # on-disk JSON. Defaults to empty for legacy callers (PR 1 + PR 2
+    # + PR 3 + PR 4 test fixtures build catalogs without a tools map).
+    tools: dict[str, tuple[str, ...]] = Field(default_factory=dict)
 
 
 class OidCatalogRegistry:
@@ -146,6 +155,52 @@ class OidCatalogRegistry:
     ) -> None:
         self._catalogs_path = _catalogs_path
         self._catalogs = _catalogs
+        # PR 5 (slice 5): per-`(vendor, model)` index of tool name ->
+        # tuple of OID names. Built once at construction from every
+        # catalog's envelope `tools` map. Used by the boot-time guard
+        # in `cli.verify_tools_are_catalogued` to refuse any
+        # `@mcp.tool` whose name is not signed for the configured
+        # `(vendor, model)`.
+        #
+        # Multiple firmwares of the same `(vendor, model)` carry
+        # identical `tools` maps (the production catalogs 15.2.1 +
+        # 15.3.0 are bit-identical on the `tools` field — verified
+        # by `diff` against the seed). The build is deterministic
+        # because `_catalogs.keys()` are returned sorted by
+        # `loaded_refs`, and Python's dict insertion order is
+        # preserved. If two firmwares sign DIFFERENT OID-name sets
+        # for the same tool, the index keeps the LATER firmware's
+        # tuple (insertion-order tiebreak) so a deliberate override
+        # is observable instead of silently dropped.
+        self._required_oids_by_tool: dict[tuple[str, str], dict[str, tuple[str, ...]]] = {}
+        for catalog in _catalogs.values():
+            vm_key = (catalog.vendor, catalog.model)
+            bucket = self._required_oids_by_tool.setdefault(vm_key, {})
+            for tool_name, oids in catalog.tools.items():
+                bucket[tool_name] = tuple(oids)
+
+    @property
+    def REQUIRED_OIDS_BY_TOOL(self) -> dict[tuple[str, str], dict[str, tuple[str, ...]]]:
+        """Public per-`(vendor, model)` tool → OID-name index.
+
+        PR 5 (slice 5): the boot-time guard reads
+        ``registry.REQUIRED_OIDS_BY_TOOL[(vendor, model)]`` to decide
+        whether a registered `@mcp.tool` is backed by a signed
+        catalog. Returns a copy so a caller that mutates the result
+        cannot corrupt the registry.
+        """
+        return {vm: dict(per_tool) for vm, per_tool in self._required_oids_by_tool.items()}
+
+    def required_oids_by_tool(self, ref: tuple[str, str]) -> dict[str, tuple[str, ...]]:
+        """Convenience accessor — return the per-tool index for `(vendor, model)`.
+
+        Returns an empty dict if no catalog was signed for the given
+        `(vendor, model)` triple. Mirrors the style of
+        :meth:`resolve` so callers can write one consistent chain:
+
+            registry.required_oids_by_tool(("cambium", "pmp450i"))["snmp_get_ap_summary"]
+        """
+        return dict(self._required_oids_by_tool.get(ref, {}))
 
     @property
     def catalogs_path(self) -> Path:
@@ -481,6 +536,62 @@ class OidCatalogRegistry:
             )
 
         catalog = OidCatalog(vendor=vendor, model=model, firmware=firmware, oids=oids)
+        # PR 5 (slice 5): extract the envelope `tools` map if present.
+        # Legacy catalogs (PR 1 + PR 2 + PR 3 + PR 4 fixtures) sign no
+        # `tools` map — we accept the omission and store an empty dict
+        # so the registry's `REQUIRED_OIDS_BY_TOOL` index simply has no
+        # entry for those (vendor, model) triples. A malformed map
+        # (not a dict, or non-list OID names) is rejected loudly at
+        # boot rather than silently dropped; the surface is a
+        # security-relevant contract.
+        raw_tools = envelope.get("tools", {})
+        if not isinstance(raw_tools, dict):
+            raise CatalogVerificationError(
+                path=Path(str(path)),
+                reason="envelope.tools is not an object",
+            )
+        tools_index: dict[str, tuple[str, ...]] = {}
+        for tool_name, oids_list in raw_tools.items():
+            if not isinstance(tool_name, str):
+                raise CatalogVerificationError(
+                    path=Path(str(path)),
+                    reason=f"envelope.tools key {tool_name!r} is not a string",
+                )
+            if not isinstance(oids_list, list):
+                raise CatalogVerificationError(
+                    path=Path(str(path)),
+                    reason=(
+                        f"envelope.tools[{tool_name!r}] is not a list "
+                        f"(got {type(oids_list).__name__})"
+                    ),
+                )
+            if not all(isinstance(name, str) and name for name in oids_list):
+                raise CatalogVerificationError(
+                    path=Path(str(path)),
+                    reason=(f"envelope.tools[{tool_name!r}] contains a non-string OID name"),
+                )
+            # Every OID name referenced by a tool MUST exist in the
+            # signed `oids` map. Otherwise the guard would advertise
+            # a tool backed by OIDs that resolve to ``None`` at
+            # runtime — silent data drift. Use a set-literal
+            # difference instead of constructing a temporary container
+            # (the readonly driver test bans write-verb call sites
+            # under src/nora/drivers/, including the built-in
+            # constructor name).
+            unknown_oids = {*oids_list} - oids.keys()
+            if unknown_oids:
+                raise CatalogVerificationError(
+                    path=Path(str(path)),
+                    reason=(
+                        f"envelope.tools[{tool_name!r}] references OIDs not in the "
+                        f"signed catalog: {sorted(unknown_oids)!r}"
+                    ),
+                )
+            tools_index[tool_name] = tuple(oids_list)
+
+        if tools_index:
+            # Re-bind so the frozen model carries the validated map.
+            catalog = catalog.model_copy(update={"tools": tools_index})
         return vendor, model, firmware, catalog
 
 
