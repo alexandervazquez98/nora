@@ -270,9 +270,12 @@ Run `bash scripts/bootstrap.sh --help` for the full reference.
   writes JSON, NORA reads JSON. See OPERATIONS.md for the read/write
   contract and `tests/intervention_memory/test_openchat_writer_contract.py`
   for the pinned regression.
-- **TLS / network exposure**: NORA is stdio-only. If your MCP client is
-  remote, tunnel stdio over SSH or use a streamable-HTTP proxy that you
-  secure yourself.
+- **TLS / network exposure**: NORA defaults to stdio. To enable
+  HTTP/SSE: edit `/etc/nora/nora-mcp.env` (`NORA_MCP_TRANSPORT=http`,
+  `_HOST=127.0.0.1`, `_PORT=8005`), then `sudo systemctl restart
+  nora-mcp` (no `daemon-reload` needed for env-only changes). If your
+  MCP client is remote, terminate TLS at a reverse proxy in front of
+  the localhost bind — never expose NORA directly.
 - **HA / multi-replica**: NORA has no internal coordination state. You can
   run multiple replicas reading the same `NORA_INTERVENTIONS_DIR` (the
   read path is stateless and the boot guard rejects tampered catalogs

@@ -140,6 +140,24 @@ What to look for:
 | `CatalogVerificationError`                      | HMAC mismatch. STOP — do not bypass. See Troubleshooting.        |
 | Traceback ending in `OidCatalogRegistry.verify_all` | Boot aborted because of catalog verification failure.           |
 
+### Transport modes
+
+The boot log line tells you which transport the daemon bound. Look for
+the `Starting MCP server 'nora' with transport '...'` line emitted by
+FastMCP right after the NORA `nora-mcp boot complete:` line.
+
+| Mode            | Boot log line                                                                       | How to enable                                                    |
+|-----------------|-------------------------------------------------------------------------------------|------------------------------------------------------------------|
+| `stdio` (default) | `Starting MCP server 'nora' with transport 'stdio'`                              | No config. The systemd `ExecStart=/opt/nora/.venv/bin/nora-mcp` runs stdio. |
+| `http`          | `Starting MCP server 'nora' with transport 'http' on http://127.0.0.1:8005/mcp`     | Set `NORA_MCP_TRANSPORT=http` (and optionally `_HOST`, `_PORT`, `_PATH`) in `/etc/nora/nora-mcp.env`; `sudo systemctl restart nora-mcp`. |
+| `streamable-http` | `Starting MCP server 'nora' with transport 'streamable-http' on ...`             | Set `NORA_MCP_TRANSPORT=streamable-http` in `/etc/nora/nora-mcp.env`. Modern MCP alias for `http`. |
+| `sse` (legacy)  | `Starting MCP server 'nora' with transport 'sse' on http://127.0.0.1:8005/sse`     | Set `NORA_MCP_TRANSPORT=sse` in `/etc/nora/nora-mcp.env`. Incompatible with `NORA_MCP_STATELESS_HTTP=true`. |
+
+`scripts/verify-install.sh --check-http` adds an opt-in HTTP probe for
+non-stdio installs: it TCP-probes `127.0.0.1:$NORA_MCP_PORT` and
+(optionally, when `curl` is on PATH) GETs `$NORA_MCP_PATH`. Default
+mode is unchanged for stdio operators — no regression.
+
 ## Integration contract: NORA ↔ OpenChat
 
 NORA and OpenChat share one directory. The contract is one-way data flow:
