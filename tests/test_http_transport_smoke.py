@@ -18,11 +18,8 @@ from __future__ import annotations
 
 import json
 import os
-import queue
 import socket
 import subprocess
-import sys
-import threading
 import time
 from pathlib import Path
 
@@ -77,8 +74,15 @@ def http_proc(tmp_path_factory: pytest.TempPathFactory) -> "subprocess.Popen[byt
     }
 
     proc = subprocess.Popen(
-        [py, "-m", "nora.cli", "--transport=http", f"--host={BIND_HOST}",
-         f"--port={BIND_PORT}", f"--path={BIND_PATH}"],
+        [
+            py,
+            "-m",
+            "nora.cli",
+            "--transport=http",
+            f"--host={BIND_HOST}",
+            f"--port={BIND_PORT}",
+            f"--path={BIND_PATH}",
+        ],
         cwd=str(PROJECT_ROOT),
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
@@ -110,9 +114,7 @@ def http_proc(tmp_path_factory: pytest.TempPathFactory) -> "subprocess.Popen[byt
     else:
         proc.kill()
         proc.wait()
-        pytest.fail(
-            f"nora-mcp never bound {BIND_HOST}:{BIND_PORT} within 15s"
-        )
+        pytest.fail(f"nora-mcp never bound {BIND_HOST}:{BIND_PORT} within 15s")
 
     try:
         yield proc
@@ -194,8 +196,7 @@ def test_http_smoke_initialize_round_trip(http_proc: "subprocess.Popen[bytes]") 
     # reply, OR 202 (Streamable-HTTP may ack via SSE — but a single
     # initialize on its own is enough to land here, no SSE upgrade).
     assert response.status_code in (200, 202), (
-        f"initialize POST must return 200/202; got {response.status_code}; "
-        f"body={response.text!r}"
+        f"initialize POST must return 200/202; got {response.status_code}; body={response.text!r}"
     )
     # Streamable-HTTP may return text/event-stream; handle both shapes.
     if response.headers.get("content-type", "").startswith("application/json"):
@@ -211,9 +212,7 @@ def test_http_smoke_initialize_round_trip(http_proc: "subprocess.Popen[bytes]") 
         )
         body = json.loads(data_line.split(":", 1)[1].strip())
 
-    assert body.get("id") == 1, (
-        f"initialize reply must echo id=1; got: {body!r}"
-    )
+    assert body.get("id") == 1, f"initialize reply must echo id=1; got: {body!r}"
     assert "result" in body or "error" in body, (
         f"initialize reply must carry a result or error; got: {body!r}"
     )

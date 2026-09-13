@@ -56,6 +56,53 @@ def _install_mcp_run_stub(cli, calls: list[dict]) -> None:
     pytest.MonkeyPatch().setattr(cli.mcp, "run", stub)
 
 
+# Sentinel `Settings` returned by `_install_cli_stubs` below — carries
+# only the two attributes `cli.main` reads, so the assertion can run
+# without instantiating the full `Settings` Pydantic model.
+_FAKE_SETTINGS = type(
+    "S",
+    (),
+    {"nora_oid_catalogs_path": "", "nora_devices_inventory_path": ""},
+)()
+
+
+def _install_cli_stubs(mp: object) -> list[dict]:
+    """Patch every boot collaborator on the `cli` module with a no-op stub.
+
+    Returns the `calls` list passed to the `mcp.run` stub so the test
+    body can assert on the resolved transport kwargs. The stub layers
+    are intentionally minimal: the goal is to exercise the
+    resolve/validate/mcp.run dispatch path, not the boot sequence.
+    """
+    from nora import cli
+
+    calls: list[dict] = []
+    mp.setattr(cli.mcp, "run", lambda *a, **kw: calls.append(kw))
+    mp.setattr(cli, "configure_logging", lambda: None)
+    mp.setattr(cli, "set_runtime_state", lambda s: None)
+    mp.setattr(cli, "set_prompt_registry", lambda r: None)
+    mp.setattr(
+        cli,
+        "PromptRegistry",
+        type("PR", (), {"from_settings": classmethod(lambda cls, s: object())}),
+    )
+    mp.setattr(
+        cli.OidCatalogRegistry,
+        "verify_all",
+        classmethod(lambda cls, s: object()),
+    )
+    mp.setattr(
+        cli.Inventory,
+        "from_yaml",
+        classmethod(lambda cls, p: type("I", (), {"device_ids": []})()),
+    )
+    mp.setattr(cli, "set_driver", lambda d: None)
+    mp.setattr(cli, "register_tool_log_middleware", lambda: None)
+    mp.setattr(cli, "verify_tools_are_catalogued", lambda registry: None)
+    mp.setattr(cli, "Settings", lambda: _FAKE_SETTINGS)
+    return calls
+
+
 def test_default_stdio_invokes_mcp_run_with_transport_stdio(
     monkeypatch: object,
 ) -> None:
@@ -75,40 +122,7 @@ def test_default_stdio_invokes_mcp_run_with_transport_stdio(
             "NORA_MCP_STATELESS_HTTP",
         ):
             mp.delenv(var, raising=False)
-        calls: list[dict] = []
-        mp.setattr(cli.mcp, "run", lambda *a, **kw: calls.append(kw))
-        # Patch out everything before `mcp.run()` so we hit the boot path
-        # without spinning the full server / catalogs. The guard we care
-        # about is that `mcp.run` is invoked with `transport="stdio"`.
-        mp.setattr(cli, "configure_logging", lambda: None)
-        mp.setattr(cli, "set_runtime_state", lambda s: None)
-        mp.setattr(cli, "set_prompt_registry", lambda r: None)
-        mp.setattr(
-            cli,
-            "PromptRegistry",
-            type("PR", (), {"from_settings": classmethod(lambda cls, s: object())}),
-        )
-        mp.setattr(
-            cli.OidCatalogRegistry,
-            "verify_all",
-            classmethod(lambda cls, s: object()),
-        )
-        mp.setattr(
-            cli.Inventory,
-            "from_yaml",
-            classmethod(lambda cls, p: type("I", (), {"device_ids": []})()),
-        )
-        mp.setattr(cli, "set_driver", lambda d: None)
-        mp.setattr(cli, "register_tool_log_middleware", lambda: None)
-        mp.setattr(
-            cli,
-            "verify_tools_are_catalogued",
-            lambda registry: None,
-        )
-        # `Settings()` is constructed inside `cli.main` — return a sentinel
-        # with the two attributes cli.main reads.
-        sentinel = type("S", (), {"nora_oid_catalogs_path": "", "nora_devices_inventory_path": ""})()
-        mp.setattr(cli, "Settings", lambda: sentinel)
+        calls = _install_cli_stubs(mp)
 
         cli.main(argv=[])
     finally:
@@ -135,31 +149,7 @@ def test_env_vars_select_transport_when_no_cli_flag(
         mp.setenv("NORA_MCP_PORT", "8765")
         for var in ("NORA_MCP_HOST", "NORA_MCP_PATH", "NORA_MCP_STATELESS_HTTP"):
             mp.delenv(var, raising=False)
-        calls: list[dict] = []
-        mp.setattr(cli.mcp, "run", lambda *a, **kw: calls.append(kw))
-        mp.setattr(cli, "configure_logging", lambda: None)
-        mp.setattr(cli, "set_runtime_state", lambda s: None)
-        mp.setattr(cli, "set_prompt_registry", lambda r: None)
-        mp.setattr(
-            cli,
-            "PromptRegistry",
-            type("PR", (), {"from_settings": classmethod(lambda cls, s: object())}),
-        )
-        mp.setattr(
-            cli.OidCatalogRegistry,
-            "verify_all",
-            classmethod(lambda cls, s: object()),
-        )
-        mp.setattr(
-            cli.Inventory,
-            "from_yaml",
-            classmethod(lambda cls, p: type("I", (), {"device_ids": []})()),
-        )
-        mp.setattr(cli, "set_driver", lambda d: None)
-        mp.setattr(cli, "register_tool_log_middleware", lambda: None)
-        mp.setattr(cli, "verify_tools_are_catalogued", lambda registry: None)
-        sentinel = type("S", (), {"nora_oid_catalogs_path": "", "nora_devices_inventory_path": ""})()
-        mp.setattr(cli, "Settings", lambda: sentinel)
+        calls = _install_cli_stubs(mp)
 
         cli.main(argv=[])
     finally:
@@ -182,31 +172,7 @@ def test_cli_flags_override_env_vars(monkeypatch: object) -> None:
     try:
         mp.setenv("NORA_MCP_TRANSPORT", "stdio")
         mp.setenv("NORA_MCP_PORT", "8000")
-        calls: list[dict] = []
-        mp.setattr(cli.mcp, "run", lambda *a, **kw: calls.append(kw))
-        mp.setattr(cli, "configure_logging", lambda: None)
-        mp.setattr(cli, "set_runtime_state", lambda s: None)
-        mp.setattr(cli, "set_prompt_registry", lambda r: None)
-        mp.setattr(
-            cli,
-            "PromptRegistry",
-            type("PR", (), {"from_settings": classmethod(lambda cls, s: object())}),
-        )
-        mp.setattr(
-            cli.OidCatalogRegistry,
-            "verify_all",
-            classmethod(lambda cls, s: object()),
-        )
-        mp.setattr(
-            cli.Inventory,
-            "from_yaml",
-            classmethod(lambda cls, p: type("I", (), {"device_ids": []})()),
-        )
-        mp.setattr(cli, "set_driver", lambda d: None)
-        mp.setattr(cli, "register_tool_log_middleware", lambda: None)
-        mp.setattr(cli, "verify_tools_are_catalogued", lambda registry: None)
-        sentinel = type("S", (), {"nora_oid_catalogs_path": "", "nora_devices_inventory_path": ""})()
-        mp.setattr(cli, "Settings", lambda: sentinel)
+        calls = _install_cli_stubs(mp)
 
         cli.main(argv=["--transport=http", "--port=9000"])
     finally:
@@ -214,9 +180,7 @@ def test_cli_flags_override_env_vars(monkeypatch: object) -> None:
 
     assert calls, "cli.main must invoke mcp.run exactly once"
     assert calls[0].get("transport") == "http"
-    assert calls[0].get("port") == 9000, (
-        f"--port=9000 must beat env var 8000; got {calls[0]!r}"
-    )
+    assert calls[0].get("port") == 9000, f"--port=9000 must beat env var 8000; got {calls[0]!r}"
 
 
 def test_invalid_transport_exits_2_with_stderr_naming_options(
@@ -231,52 +195,20 @@ def test_invalid_transport_exits_2_with_stderr_naming_options(
     mp = pytest.MonkeyPatch()
     try:
         mp.setenv("NORA_MCP_TRANSPORT", "garbage")
-        calls: list[dict] = []
-        mp.setattr(cli.mcp, "run", lambda *a, **kw: calls.append(kw))
-        mp.setattr(cli, "configure_logging", lambda: None)
-        mp.setattr(cli, "set_runtime_state", lambda s: None)
-        mp.setattr(cli, "set_prompt_registry", lambda r: None)
-        mp.setattr(
-            cli,
-            "PromptRegistry",
-            type("PR", (), {"from_settings": classmethod(lambda cls, s: object())}),
-        )
-        mp.setattr(
-            cli.OidCatalogRegistry,
-            "verify_all",
-            classmethod(lambda cls, s: object()),
-        )
-        mp.setattr(
-            cli.Inventory,
-            "from_yaml",
-            classmethod(lambda cls, p: type("I", (), {"device_ids": []})()),
-        )
-        mp.setattr(cli, "set_driver", lambda d: None)
-        mp.setattr(cli, "register_tool_log_middleware", lambda: None)
-        mp.setattr(cli, "verify_tools_are_catalogued", lambda registry: None)
-        sentinel = type("S", (), {"nora_oid_catalogs_path": "", "nora_devices_inventory_path": ""})()
-        mp.setattr(cli, "Settings", lambda: sentinel)
+        calls = _install_cli_stubs(mp)
 
         with pytest.raises(SystemExit) as ei:
             cli.main(argv=[])
     finally:
         mp.undo()
 
-    assert ei.value.code == 2, (
-        f"invalid transport must exit 2; got code={ei.value.code!r}"
-    )
-    assert calls == [], (
-        f"mcp.run MUST NOT be invoked on invalid transport; got calls={calls!r}"
-    )
+    assert ei.value.code == 2, f"invalid transport must exit 2; got code={ei.value.code!r}"
+    assert calls == [], f"mcp.run MUST NOT be invoked on invalid transport; got calls={calls!r}"
     captured = capsys.readouterr()  # type: ignore[attr-defined]
     stderr = captured.err
-    assert "garbage" in stderr, (
-        f"stderr must name the bad value `garbage`; got: {stderr!r}"
-    )
+    assert "garbage" in stderr, f"stderr must name the bad value `garbage`; got: {stderr!r}"
     for option in ("stdio", "http", "streamable-http", "sse"):
-        assert option in stderr, (
-            f"stderr must list valid option {option!r}; got: {stderr!r}"
-        )
+        assert option in stderr, f"stderr must list valid option {option!r}; got: {stderr!r}"
 
 
 def test_stateless_http_with_sse_rejected(
@@ -298,47 +230,19 @@ def test_stateless_http_with_sse_rejected(
             "NORA_MCP_STATELESS_HTTP",
         ):
             mp.delenv(var, raising=False)
-        calls: list[dict] = []
-        mp.setattr(cli.mcp, "run", lambda *a, **kw: calls.append(kw))
-        mp.setattr(cli, "configure_logging", lambda: None)
-        mp.setattr(cli, "set_runtime_state", lambda s: None)
-        mp.setattr(cli, "set_prompt_registry", lambda r: None)
-        mp.setattr(
-            cli,
-            "PromptRegistry",
-            type("PR", (), {"from_settings": classmethod(lambda cls, s: object())}),
-        )
-        mp.setattr(
-            cli.OidCatalogRegistry,
-            "verify_all",
-            classmethod(lambda cls, s: object()),
-        )
-        mp.setattr(
-            cli.Inventory,
-            "from_yaml",
-            classmethod(lambda cls, p: type("I", (), {"device_ids": []})()),
-        )
-        mp.setattr(cli, "set_driver", lambda d: None)
-        mp.setattr(cli, "register_tool_log_middleware", lambda: None)
-        mp.setattr(cli, "verify_tools_are_catalogued", lambda registry: None)
-        sentinel = type("S", (), {"nora_oid_catalogs_path": "", "nora_devices_inventory_path": ""})()
-        mp.setattr(cli, "Settings", lambda: sentinel)
+        calls = _install_cli_stubs(mp)
 
         with pytest.raises(SystemExit) as ei:
             cli.main(argv=["--transport=sse", "--stateless-http"])
     finally:
         mp.undo()
 
-    assert ei.value.code == 2, (
-        f"sse+stateless_http must exit 2; got code={ei.value.code!r}"
-    )
+    assert ei.value.code == 2, f"sse+stateless_http must exit 2; got code={ei.value.code!r}"
     assert calls == [], (
         f"mcp.run MUST NOT be invoked when sse+stateless_http is rejected; got {calls!r}"
     )
     captured = capsys.readouterr()  # type: ignore[attr-defined]
-    assert "sse" in captured.err.lower(), (
-        f"stderr must mention sse; got: {captured.err!r}"
-    )
+    assert "sse" in captured.err.lower(), f"stderr must mention sse; got: {captured.err!r}"
     assert "stateless" in captured.err.lower(), (
         f"stderr must mention stateless; got: {captured.err!r}"
     )
@@ -371,9 +275,7 @@ def test_help_exits_zero_lists_transport_flag(
     finally:
         mp.undo()
 
-    assert ei.value.code == 0, (
-        f"--help must exit 0; got code={ei.value.code!r}"
-    )
+    assert ei.value.code == 0, f"--help must exit 0; got code={ei.value.code!r}"
     captured = capsys.readouterr()  # type: ignore[attr-defined]
     assert "--transport" in captured.out, (
         f"--help output must list --transport flag; got: {captured.out!r}"
