@@ -76,6 +76,16 @@ _REQUIRED_OIDS_BY_VENDOR_MODEL: Final[dict[tuple[str, str], frozenset[str]]] = {
             "subscribersCount",
             "frameUtilizationDlPct",
             "frameUtilizationUlPct",
+            # PR 3 — slice 3 SM-table additions (sub-cluster 2 — unbiased baseline).
+            "smSessionUptime",
+            "smCinr",
+            "smLinkStatus",
+            "smLuid",
+            # PR 3 — slice 3 SM diagnostics additions.
+            "smJitter",
+            "smRetransmits",
+            "smRxLevel",
+            "smTxLevel",
         }
     ),
 }

@@ -272,18 +272,37 @@ class Pmp450iSnmpDriver(Pmp450iDriver):
 
         return fetch_frame_utilization(driver=self, device_id=device_id)
 
-    # -- slice 3 (stubs) ---------------------------------------------------
+    # -- slice 3 ----------------------------------------------------------
 
     def fetch_sm_table(self, device_id: str) -> Any:
-        """Slice 3 method — lands in PR 3 (`snmp_get_sm_table`)."""
-        raise NotImplementedError(
-            "Pmp450iSnmpDriver.fetch_sm_table lands in PR 3 "
-            "(snmp_get_sm_table); see tasks.md phase 3.8"
+        """Return a typed ``SubscriberSummary`` for ``device_id``.
+
+        Slice 3 implementation: delegates to ``subscribers.fetch_sm_table``
+        which resolves the catalog, opens a client, walks the SM-table
+        subtree, cross-checks against the PRE_DIAGNOSTIC intervention
+        history, and folds the response into a typed Pydantic model.
+
+        Per `pmp450i-radio-tools/spec.md` sub-cluster 2 requirement
+        "ONE Source Of Truth": ``categorize_subscribers`` is the only
+        classification entry point — no inline classification in this
+        wrapper.
+        """
+        from nora.drivers.snmp_pmp450i.subscribers import fetch_sm_table
+
+        return fetch_sm_table(driver=self, device_id=device_id)
+
+    def fetch_sm_detailed_diagnostics(self, device_id: str, *, luid: str) -> Any:
+        """Return a typed ``SmDetailedDiagnostics`` for one LUID.
+
+        Slice 3 implementation: delegates to
+        ``subscribers.fetch_sm_detailed_diagnostics`` which resolves the
+        catalog, opens a client, fetches one ``get_oid`` per
+        SM-diagnostics OID name, and folds the values into a typed
+        Pydantic model. Missing fields become ``None`` (with a literal
+        ``"OID catalog fallback: ..."`` warning).
+        """
+        from nora.drivers.snmp_pmp450i.subscribers import (
+            fetch_sm_detailed_diagnostics,
         )
 
-    def fetch_sm_detailed_diagnostics(self, device_id: str) -> Any:
-        """Slice 3 method — lands in PR 3 (`snmp_get_sm_detailed_diagnostics`)."""
-        raise NotImplementedError(
-            "Pmp450iSnmpDriver.fetch_sm_detailed_diagnostics lands in PR 3 "
-            "(snmp_get_sm_detailed_diagnostics); see tasks.md phase 3.9"
-        )
+        return fetch_sm_detailed_diagnostics(driver=self, device_id=device_id, luid=luid)

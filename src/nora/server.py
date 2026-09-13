@@ -214,6 +214,66 @@ def snmp_get_frame_utilization(device_id: str) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# PMP 450i SM-table tools — slice 3 (PR 3 of
+# `2026-09-13-pmp450i-production-surface`).
+#
+# Both tools delegate to ``nora.drivers.snmp_pmp450i.subscribers``
+# which is the ONE source of truth for the
+# ``ONLINE_ACTIVE`` / ``ACTIVE_DEGRADED`` / ``PRE_EXISTING_OFFLINE``
+# categorisation. The cross-check ordering rule
+# (``search_intervention_history`` BEFORE ``categorize_subscribers``)
+# is enforced inside the helper — see
+# ``subscribers.fetch_sm_table``.
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool
+def snmp_get_sm_table(device_id: str) -> dict[str, Any]:
+    """Read the typed subscriber baseline for the named PMP 450i AP.
+
+    Returns a ``SubscriberSummary`` carrying three buckets
+    (``ONLINE_ACTIVE``, ``ACTIVE_DEGRADED``, ``PRE_EXISTING_OFFLINE``)
+    plus the ``baseline_size`` (ONLINE + DEGRADED; the pre-existing
+    bucket is the cross-checked exclusion). The helper applies the
+    PRE_DIAGNOSTIC cross-check via
+    ``search_intervention_history(stage="PRE_DIAGNOSTIC")`` BEFORE
+    ``categorize_subscribers(...)`` runs; reordering the calls breaks
+    the cross-check.
+
+    Per `pmp450i-radio-tools/spec.md` sub-cluster 2 requirement "ONE
+    Source Of Truth": ``categorize_subscribers`` is the only
+    classification entry point — no inline classification in this
+    wrapper.
+    """
+    from nora.drivers.snmp_pmp450i.subscribers import fetch_sm_table
+
+    driver = get_driver()
+    settings = get_runtime_state()
+    summary = fetch_sm_table(driver=driver, device_id=device_id, settings=settings)
+    return summary.model_dump(mode="json")
+
+
+@mcp.tool
+def snmp_get_sm_detailed_diagnostics(device_id: str, luid: str) -> dict[str, Any]:
+    """Read the typed per-LUID diagnostics for one SM under ``device_id``.
+
+    Returns an ``SmDetailedDiagnostics`` carrying jitter, CINR, Rx/Tx
+    levels, retransmits, and (reserved) interface error counters for
+    one SM. ``luid`` identifies the SM within the AP sector managed
+    by ``device_id``; the tool fetches one wire GET per diagnostics
+    OID name.
+
+    Per `pmp450i-radio-tools/spec.md` sub-cluster 2 scenario "typed
+    diagnostics for one LUID".
+    """
+    from nora.drivers.snmp_pmp450i.subscribers import fetch_sm_detailed_diagnostics
+
+    driver = get_driver()
+    diagnostics = fetch_sm_detailed_diagnostics(driver=driver, device_id=device_id, luid=luid)
+    return diagnostics.model_dump(mode="json")
+
+
+# ---------------------------------------------------------------------------
 # Intervention memory MCP tools (read-only).
 # ---------------------------------------------------------------------------
 
@@ -417,6 +477,8 @@ __all__ = [
     "snmp_get_pmp450i_radio_metrics",
     "snmp_get_ap_summary",
     "snmp_get_frame_utilization",
+    "snmp_get_sm_table",
+    "snmp_get_sm_detailed_diagnostics",
     "search_intervention_history",
     "get_device_lifecycle_summary",
     "correlate_sector_interference",

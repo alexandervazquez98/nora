@@ -6,7 +6,7 @@ stderr, and asserts:
 1. stderr contains `DeprecationWarning` mentioning "will be removed in
    the next minor release".
 2. The server still boots (the alias delegates to `nora.cli.main`).
-3. The five-tool surface is reachable via JSON-RPC `tools/list`.
+3. The nine-tool surface is reachable via JSON-RPC `tools/list`.
 """
 
 from __future__ import annotations
@@ -57,7 +57,7 @@ def test_python_dash_m_nora_emits_deprecation_warning(tmp_path: Path) -> None:
       * "will be removed in the next minor release"
 
     The test also confirms the server still boots successfully (the
-    alias body invokes `cli.main()` which boots the four-tool surface).
+    alias body invokes `cli.main()` which boots the nine-tool surface).
     """
     py = _venv_python()
 
@@ -174,7 +174,7 @@ def test_python_dash_m_nora_emits_deprecation_warning(tmp_path: Path) -> None:
         f"DeprecationWarning must mention the removal version; got: {stderr!r}"
     )
 
-    # Assertion 2: parse tools/list reply to confirm the four-tool surface.
+    # Assertion 2: parse tools/list reply to confirm the nine-tool surface.
     tools: list[dict] = []
     for line in stdout.splitlines():
         line = line.strip()
@@ -193,11 +193,13 @@ def test_python_dash_m_nora_emits_deprecation_warning(tmp_path: Path) -> None:
         "snmp_get_pmp450i_radio_metrics",
         "snmp_get_ap_summary",
         "snmp_get_frame_utilization",
+        "snmp_get_sm_table",
+        "snmp_get_sm_detailed_diagnostics",
         "search_intervention_history",
         "get_device_lifecycle_summary",
         "correlate_sector_interference",
         "save_intervention_record",
     }
     assert tool_names == expected, (
-        f"`python -m nora` must expose the same 7 tools as nora-mcp; got {tool_names}"
+        f"`python -m nora` must expose the same 9 tools as nora-mcp; got {tool_names}"
     )

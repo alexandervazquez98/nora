@@ -204,8 +204,8 @@ def _boot_server(
 # ---------------------------------------------------------------------------
 
 
-def test_subprocess_responds_to_tools_list_with_seven_tools(tmp_path: Path) -> None:
-    """A real `python -m nora` boot exposes the seven-tool surface in `tools/list`."""
+def test_subprocess_responds_to_tools_list_with_nine_tools(tmp_path: Path) -> None:
+    """A real `python -m nora` boot exposes the nine-tool surface in `tools/list`."""
     env_file = tmp_path / ".env"
     env_file.write_text("NORA_OID_CATALOG_SIGNING_KEY=change-me\n")
 
@@ -232,19 +232,21 @@ def test_subprocess_responds_to_tools_list_with_seven_tools(tmp_path: Path) -> N
 
     assert parsed_reply is not None, f"No `tools/list` reply found in stdout:\n{proc.stdout}"
 
-    # The reply's `result.tools` array MUST list exactly the seven thin tools.
+    # The reply's `result.tools` array MUST list exactly the nine thin tools.
     tools = parsed_reply["result"].get("tools", [])
     names = {t.get("name") for t in tools}
     expected = {
         "snmp_get_pmp450i_radio_metrics",
         "snmp_get_ap_summary",
         "snmp_get_frame_utilization",
+        "snmp_get_sm_table",
+        "snmp_get_sm_detailed_diagnostics",
         "search_intervention_history",
         "get_device_lifecycle_summary",
         "correlate_sector_interference",
         "save_intervention_record",
     }
-    assert names == expected, f"Expected exactly the 7 thin tools; got {names}"
+    assert names == expected, f"Expected exactly the 9 thin tools; got {names}"
 
 
 def test_subprocess_emits_structured_startup_log_on_stderr(tmp_path: Path) -> None:
