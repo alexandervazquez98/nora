@@ -88,41 +88,28 @@ Each tool invocation MUST emit one structured log line on stderr with tool name,
 
 ### Requirement: R-NEW-1 — Four `@mcp.tool` Registrations
 
-The server SHALL register exactly four `@mcp.tool`-decorated functions on the global `mcp = FastMCP("nora")` instance: one driver + three intervention memory. The driver tool SHALL NOT call `nora_session_set_focus`. The four names SHALL be re-exported in `__all__`. No `_AutoTraceMiddleware` is registered.
+The server SHALL register exactly eleven `@mcp.tool`-decorated functions on the global `mcp = FastMCP("nora")`: one driver + three intervention memory + `save_intervention_record` + six radio-link tools (`snmp_get_ap_summary`, `snmp_get_frame_utilization`, `snmp_get_sm_table`, `snmp_get_sm_detailed_diagnostics`, `snmp_run_spectrum_analysis`, `snmp_migrate_radio_frequency`). All eleven names SHALL be re-exported in `__all__`. (Previously: exactly five registrations.)
 
-#### ADDED Scenario: server module exports the four tool names
+#### Scenario: server module exports the eleven tool names
 
-- GIVEN `src/nora/server.py` imports the driver + three intervention callables
-- WHEN the four names are imported from `nora.server`
-- THEN the imports succeed AND all four names appear in `nora.server.__all__`
+- GIVEN `src/nora/server.py` imports the driver + three intervention callables + the writer + six radio-link callables
+- WHEN the eleven names are imported from `nora.server`
+- THEN the imports succeed AND all eleven names appear in `nora.server.__all__`
 
-#### ADDED Scenario: MCP wrappers delegate to library functions
+#### Scenario: `tools/list` over stdio returns eleven tools in the registered order
 
-- GIVEN `set_runtime_state(settings=fake_settings)` has been called
-- WHEN `search_intervention_history(target_ip="10.0.0.5")` MCP tool is invoked
-- THEN `nora.intervention_memory.tools.search_intervention_history` is called exactly once AND the wrapper returns the library result unchanged
-
-#### ADDED Scenario: driver tool no longer calls `nora_session_set_focus`
-
-- GIVEN the driver tool is invoked with `device_id="ap-7400-01"`
-- WHEN the call body executes
-- THEN no `nora_session_set_focus(...)` call is attempted AND no journal file is created as a side-effect
-
+- GIVEN the server booted via `mcp.run()` over stdio
+- WHEN a client calls `tools/list`
+- THEN the response contains the eleven tool names AND their `inputSchema` matches each registered signature
 ### Requirement: R-NEW-2 — Sanitizer Bound at Tool Boundary
 
-Every free-text field in the four surviving tools' output SHALL pass through `Sanitizer.sanitize(...)` before serialization. Structured top-level fields SHALL bypass.
+Every free-text field in the eleven tool responses SHALL pass through `Sanitizer.sanitize(...)` before serialisation. Structured top-level fields SHALL bypass. (Previously: four tools; now eleven.)
 
-#### ADDED Scenario: free-text fields in `search_intervention_history` are sanitized
+#### Scenario: free-text fields in the radio-link tools are sanitized
 
-- GIVEN a record whose `record_name` contains the literal `10.53.12.4`
-- WHEN `search_intervention_history(target_ip=...)` is invoked via the MCP tool
-- THEN the returned list contains a dict whose `record_name` does NOT include `10.53.12.4` AND includes a `RADIO_NODE_*` alias
-
-#### ADDED Scenario: structured top-level fields bypass the sanitizer
-
-- GIVEN a record whose `intervention_id == "INT-1-10.0.0.5-1234567-XYZ"`
-- WHEN `search_intervention_history(...)` returns the record via the MCP tool
-- THEN `record["intervention_id"]`, `record["timestamp_unix"]`, and `record["stage"]` are all byte-identical to the on-disk values
+- GIVEN a tool response whose free-text field contains the literal `192.0.2.10`
+- WHEN the response is serialised
+- THEN the literal is replaced by a synthetic alias AND typed scalars (`carrier_frequency_mhz`, `result["rolled_back"]`) are byte-identical
 
 ### Requirement: R-NEW-3 — Hard Read-Only Contract (AST Guard)
 
@@ -136,17 +123,11 @@ The three intervention tools SHALL NOT mutate any file. `tests/intervention_memo
 
 ### Requirement: R-NEW-4 — One-Way Cross-Capability Dependency Direction
 
-`src/nora/server.py` MAY import from `nora.intervention_memory.tools` and from `nora.drivers.snmp_pmp450i.driver`. No module under `src/nora/intervention_memory/` or `src/nora/drivers/` SHALL import from `nora.server`. `shim_webui.py` remains a one-way consumer external to NORA.
+`src/nora/server.py` MAY import from `nora.intervention_memory.tools`, `nora.intervention_writer.writer`, `nora.drivers.snmp_pmp450i.driver`, `nora.hitl.tokens`, `nora.drivers.interface`, `nora.drivers.resolver`. No module under those packages SHALL import from `nora.server`. (Previously: two consumer packages; now six.)
 
-#### ADDED Scenario: `nora-mcp-server` imports from both consumer packages
+#### Scenario: consumer packages do not import from `nora.server`
 
-- GIVEN `src/nora/server.py` adds the import block from `nora.intervention_memory.tools` and from `nora.drivers.snmp_pmp450i.driver`
-- WHEN the server module is imported
-- THEN no import error is raised AND the four `@mcp.tool` registrations bind to the imported callables
-
-#### ADDED Scenario: consumer packages do not import from `nora.server`
-
-- GIVEN every `.py` under `src/nora/intervention_memory/` and `src/nora/drivers/` except `shim_webui.py`
+- GIVEN every `.py` under `src/nora/intervention_memory/`, `src/nora/intervention_writer/`, and `src/nora/drivers/`
 - WHEN a static grep scans for `from nora.server` or `import nora.server`
 - THEN zero matches are found
 
@@ -221,6 +202,32 @@ schema, error codes, and security guarantees are defined by the
 - GIVEN an MCP client invokes `save_intervention_record` over stdio with no approval token
 - WHEN the wrapper executes
 - THEN no `HITL_REQUIRED` error is raised AND the record is written immediately
+### Requirement: Server-Level `instructions` (Updated) — HITL Advertised
+
+The `instructions` string SHALL advertise that `snmp_migrate_radio_frequency` requires an explicit HITL approval token and that autonomous device mutation is rejected without it. The Zero-Leakage + intervention-memory framing is preserved. (Previously: no destructive tool was exposed; HITL was unadvertised.)
+
+#### Scenario: instructions text names HITL on the migration tool
+
+- GIVEN `mcp = FastMCP("nora", instructions=_SERVER_INSTRUCTIONS)`
+- WHEN the instructions string is inspected
+- THEN it mentions `snmp_migrate_radio_frequency` AND names the `AutonomousMutationRejected` contract
+
+
+### Requirement: R-NEW-6 — Tool-Registration Guard (Uncatalogued Tools Rejected)
+
+`src/nora/cli.py` SHALL run a registration guard that walks every function registered against the global `mcp` instance. The guard MUST raise a typed `UncataloguedToolError` if the tool name is absent from `OidCatalogRegistry.REQUIRED_OIDS` for every catalogued `(vendor, model, firmware)` triple. The guard runs ONCE at boot; the rejection MUST abort before `mcp.run(show_banner=False)`. (Issue #24 — ADR #17 Test 10 hardening; the proposal deliberately hardens the original "no se ofrece al LLM" wording into fail-fast registration-time rejection.)
+
+#### Scenario: an uncatalogued `@mcp.tool` is rejected at boot
+
+- GIVEN a developer adds `@mcp.tool def snmp_get_rogue_metric(device_id: str): ...` with no catalog entry
+- WHEN `cli.main()` runs the registration guard
+- THEN `UncataloguedToolError` is raised naming `(tool_name, reason="no OID catalog entry")` AND `mcp.run()` is never invoked
+
+#### Scenario: every catalogued tool passes the guard
+
+- GIVEN the eleven tool names are all present in the catalog envelope's `"tools"` map
+- WHEN the registration guard runs
+- THEN it returns success AND `mcp.run(show_banner=False)` proceeds
 ## Cross-References
 
 Depends on `intervention-memory` capability (read-only consumer). The three new `@mcp.tool` registrations (`search_intervention_history`, `get_device_lifecycle_summary`, `correlate_sector_interference`) delegate to pure functions in `nora.intervention_memory.tools`; the dependency direction is one-way (`nora-mcp-server` → `intervention-memory`, never the reverse). Sanitizer contract inherited from `intervention-memory` R9 / `session-journal` R6. Auto-trace recording inherited from `session-journal` R2 — no middleware change was required for this delta.
