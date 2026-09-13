@@ -274,6 +274,41 @@ def snmp_get_sm_detailed_diagnostics(device_id: str, luid: str) -> dict[str, Any
 
 
 # ---------------------------------------------------------------------------
+# PMP 450i spectrum-sweep tool — slice 4 (PR 4 of
+# `2026-09-13-pmp450i-production-surface`).
+#
+# Delegates to ``nora.drivers.snmp_pmp450i.spectrum.fetch_spectrum``
+# which enforces ``Settings.nora_maintenance_window_*`` BEFORE
+# emitting any wire frame. Outside the configured window the helper
+# raises :class:`MaintenanceWindowViolation` — the tool surface
+# surfaces the typed exception to the MCP caller.
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool
+def snmp_run_spectrum_analysis(device_id: str) -> dict[str, Any]:
+    """Read a typed spectrum sweep for the named PMP 450i device.
+
+    Returns a :class:`SpectrumAnalysis` carrying
+    ``ranked_clean_frequencies`` (sorted by ascending noise floor),
+    ``noise_floor_dbm`` (frequency-kHz → noise-dBm map), and
+    ``scan_started_at``.
+
+    Per `pmp450i-radio-tools/spec.md` sub-cluster 3 requirement
+    "snmp_run_spectrum_analysis — Ranked Clean Frequencies +
+    Maintenance Window": calls outside the configured maintenance
+    window raise :class:`MaintenanceWindowViolation` and emit zero
+    wire frames.
+    """
+    from nora.drivers.snmp_pmp450i.spectrum import fetch_spectrum
+
+    driver = get_driver()
+    settings = get_runtime_state()
+    analysis = fetch_spectrum(driver=driver, device_id=device_id, settings=settings)
+    return analysis.model_dump(mode="json")
+
+
+# ---------------------------------------------------------------------------
 # Intervention memory MCP tools (read-only).
 # ---------------------------------------------------------------------------
 
@@ -479,6 +514,7 @@ __all__ = [
     "snmp_get_frame_utilization",
     "snmp_get_sm_table",
     "snmp_get_sm_detailed_diagnostics",
+    "snmp_run_spectrum_analysis",
     "search_intervention_history",
     "get_device_lifecycle_summary",
     "correlate_sector_interference",

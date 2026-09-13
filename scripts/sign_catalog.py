@@ -89,6 +89,12 @@ OID_CATALOG_V1: dict[str, str] = {
     "smRetransmits": "1.3.6.1.4.1.161.19.3.2.1.81.0",
     "smRxLevel": "1.3.6.1.4.1.161.19.3.2.1.82.0",
     "smTxLevel": "1.3.6.1.4.1.161.19.3.2.1.83.0",
+    # PR 4 — slice 4 spectrum-sweep additions.
+    "spectrumNoiseFloorA": "1.3.6.1.4.1.161.19.3.1.1.90.0",
+    "spectrumNoiseFloorB": "1.3.6.1.4.1.161.19.3.1.1.91.0",
+    "spectrumNoiseFloorC": "1.3.6.1.4.1.161.19.3.1.1.92.0",
+    "spectrumChannelRank": "1.3.6.1.4.1.161.19.3.1.1.93.0",
+    "spectrumScanStatus": "1.3.6.1.4.1.161.19.3.1.1.94.0",
 }
 
 
@@ -133,6 +139,13 @@ TOOLS_V1: dict[str, list[str]] = {
         "smRetransmits",
         "smRxLevel",
         "smTxLevel",
+    ],
+    "snmp_run_spectrum_analysis": [
+        "spectrumNoiseFloorA",
+        "spectrumNoiseFloorB",
+        "spectrumNoiseFloorC",
+        "spectrumChannelRank",
+        "spectrumScanStatus",
     ],
 }
 

@@ -306,3 +306,28 @@ class Pmp450iSnmpDriver(Pmp450iDriver):
         )
 
         return fetch_sm_detailed_diagnostics(driver=self, device_id=device_id, luid=luid)
+
+    # -- slice 4 ----------------------------------------------------------
+
+    def fetch_spectrum(
+        self,
+        device_id: str,
+        *,
+        settings: Any = None,
+    ) -> Any:
+        """Return a typed ``SpectrumAnalysis`` for ``device_id``.
+
+        Slice 4 implementation: delegates to ``spectrum.fetch_spectrum``
+        which checks ``Settings.nora_maintenance_window_*`` BEFORE
+        emitting any wire frame, resolves the catalog, opens a
+        client, walks the three noise-floor OIDs, and folds the
+        response into a typed Pydantic model. Calls outside the
+        configured window raise :class:`MaintenanceWindowViolation`.
+
+        Per `pmp450i-radio-tools/spec.md` sub-cluster 3 requirement
+        "snmp_run_spectrum_analysis — Ranked Clean Frequencies +
+        Maintenance Window".
+        """
+        from nora.drivers.snmp_pmp450i.spectrum import fetch_spectrum
+
+        return fetch_spectrum(driver=self, device_id=device_id, settings=settings)
