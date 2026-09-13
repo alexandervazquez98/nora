@@ -51,8 +51,13 @@ DEFAULT_OUTPUT_ROOT = REPO_ROOT / "data" / "oid-catalogs"
 
 # Public object names -> dotted OID. Each entry has a public reference in
 # Cambium's PMP 450i SNMP reference; none of this text is vendored from
-# the WHISP-SM-MIB. Use 15 OIDs as the v1 starter set (the spec required
+# the WHISP-SM-MIB. The v1 starter set is 15 OIDs (the spec required
 # 15-20 entries; this is the minimum that exercises every fold path).
+# PR 2 (slice 2 of `2026-09-13-pmp450i-production-surface`) extends the
+# set with four read-summary OIDs so the ``snmp_get_ap_summary`` and
+# ``snmp_get_frame_utilization`` tools can resolve their dotted OIDs
+# against the catalog. Per-tool OID membership is recorded in the
+# ``TOOLS_V1`` envelope map below; PR 5 indexes it at boot.
 OID_CATALOG_V1: dict[str, str] = {
     "radioDownlinkRate": "1.3.6.1.4.1.161.19.3.1.1.1.0",
     "radioUplinkRate": "1.3.6.1.4.1.161.19.3.1.1.2.0",
@@ -69,6 +74,39 @@ OID_CATALOG_V1: dict[str, str] = {
     "outOctets": "1.3.6.1.4.1.161.19.3.4.1.1.2.0",
     "linkStatus": "1.3.6.1.4.1.161.19.3.1.1.50.0",
     "upTime": "1.3.6.1.4.1.161.19.3.1.1.51.0",
+    # PR 2 — slice 2 read-summary additions.
+    "apFirmwareVersion": "1.3.6.1.4.1.161.19.3.1.1.52.0",
+    "subscribersCount": "1.3.6.1.4.1.161.19.3.1.1.60.0",
+    "frameUtilizationDlPct": "1.3.6.1.4.1.161.19.3.1.1.53.0",
+    "frameUtilizationUlPct": "1.3.6.1.4.1.161.19.3.1.1.54.0",
+}
+
+
+# Per-tool OID-name map — slice 2 surface (PR 2).
+#
+# The catalog envelope carries this map so PR 5 can build the
+# ``REQUIRED_OIDS_BY_TOOL`` index at boot. The keys are MCP tool
+# names registered on the global ``FastMCP("nora")`` instance; the
+# values are the OID names (drawn from ``OID_CATALOG_V1``) the tool
+# fetches per call. The slice 2 read-summary helpers in
+# ``nora.drivers.snmp_pmp450i.summaries`` reuse four legacy names
+# (``frequency``, ``channelBandwidth``, ``transmitPower``, ``upTime``)
+# from the v1 radio-metrics seed so the read tool has the full
+# carrier/channel/tx-power picture without forcing slice 2 to add
+# more dotted OIDs.
+TOOLS_V1: dict[str, list[str]] = {
+    "snmp_get_ap_summary": [
+        "apFirmwareVersion",
+        "frequency",
+        "channelBandwidth",
+        "transmitPower",
+        "subscribersCount",
+        "upTime",
+    ],
+    "snmp_get_frame_utilization": [
+        "frameUtilizationDlPct",
+        "frameUtilizationUlPct",
+    ],
 }
 
 
@@ -163,6 +201,13 @@ def main(argv: list[str] | None = None) -> int:
         "model": args.model,
         "firmware": args.firmware,
         "oids": OID_CATALOG_V1,
+        # PR 2 (slice 2 of `2026-09-13-pmp450i-production-surface`):
+        # the envelope carries a per-tool OID-name map so PR 5 can
+        # build ``REQUIRED_OIDS_BY_TOOL`` at boot. The HMAC is computed
+        # over the canonicalised ``oids`` map only — the tools map is
+        # informational and excluded from the signature to keep
+        # back-compat with the v1 verification path.
+        "tools": TOOLS_V1,
         "hmac_sha256": sig,
     }
     target.write_text(json.dumps(envelope, indent=2))

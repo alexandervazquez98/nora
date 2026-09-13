@@ -28,7 +28,11 @@ from nora.drivers.oid_catalog import (  # noqa: PLC0415
 
 # Local mirror of the conftest fixture payload + signing key. Tests use
 # the same payload as `sample_catalog` so HMACs stay bit-identical across
-# the single-root and multi-root cases.
+# the single-root and multi-root cases. PR 2 (slice 2 of
+# `2026-09-13-pmp450i-production-surface`) extends the fixture with the
+# four NEW summary OID names so the
+# ``_REQUIRED_OIDS_BY_VENDOR_MODEL[("cambium", "pmp450i")]`` check
+# accepts the sample.
 _SAMPLE_BUILTIN_OIDS: dict[str, str] = {
     "radioDownlinkRate": "1.3.6.1.4.1.161.19.3.1.1.1.0",
     "radioUplinkRate": "1.3.6.1.4.1.161.19.3.1.1.2.0",
@@ -36,6 +40,11 @@ _SAMPLE_BUILTIN_OIDS: dict[str, str] = {
     "signalStrengthTx": "1.3.6.1.4.1.161.19.3.1.1.4.0",
     "ssr": "1.3.6.1.4.1.161.19.3.1.1.5.0",
     "modulationMode": "1.3.6.1.4.1.161.19.3.1.1.6.0",
+    # PR 2 — slice 2 read-summary additions.
+    "apFirmwareVersion": "1.3.6.1.4.1.161.19.3.1.1.52.0",
+    "subscribersCount": "1.3.6.1.4.1.161.19.3.1.1.60.0",
+    "frameUtilizationDlPct": "1.3.6.1.4.1.161.19.3.1.1.53.0",
+    "frameUtilizationUlPct": "1.3.6.1.4.1.161.19.3.1.1.54.0",
 }
 SAMPLE_CATALOG_KEY: str = "test-catalog-signing-key-do-not-use-in-prod"
 
@@ -369,15 +378,30 @@ class TestMultiRoot:
         }
         assert expected.issubset(pmp450i_required)
 
-    def test_required_oids_alias_matches_pmp450i_table(self) -> None:
-        """`REQUIRED_OIDS` is the derived alias for the PMP 450i triple.
+    def test_required_oids_alias_is_radio_metrics_subset(self) -> None:
+        """`REQUIRED_OIDS` is the radio-metrics subset of the PMP 450i triple.
 
         Driver import (`from nora.drivers.oid_catalog import REQUIRED_OIDS`)
-        stays untouched; the alias is what the existing R5 test asserts
-        against. PR 1 swaps the source from a hand-written frozenset to
-        `_REQUIRED_OIDS_BY_VENDOR_MODEL[("cambium", "pmp450i")]`.
+        stays scoped to the radio-metrics OIDs that
+        ``Pmp450iDriver._fetch_all`` iterates. The full PMP 450i
+        required-OID set lives in
+        ``_REQUIRED_OIDS_BY_VENDOR_MODEL[("cambium", "pmp450i")]`` and
+        includes the four PR 2 summary OIDs as well; the driver
+        delegate paths in ``nora.drivers.snmp_pmp450i.summaries`` look
+        those up directly against the resolved catalog.
         """
-        assert REQUIRED_OIDS is _REQUIRED_OIDS_BY_VENDOR_MODEL[("cambium", "pmp450i")]
+        radio_metrics_oids = frozenset(
+            {
+                "radioDownlinkRate",
+                "radioUplinkRate",
+                "signalStrengthRx",
+                "signalStrengthTx",
+                "ssr",
+                "modulationMode",
+            }
+        )
+        assert REQUIRED_OIDS == radio_metrics_oids
+        assert REQUIRED_OIDS.issubset(_REQUIRED_OIDS_BY_VENDOR_MODEL[("cambium", "pmp450i")])
 
     def test_missing_oid_fails_per_triple(
         self, tmp_catalogs_dir: Path, sample_catalog: dict[str, Any]

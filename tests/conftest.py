@@ -23,6 +23,13 @@ import pytest
 # A small but realistic OID catalog keyed by stable public object names
 # (no MIB prose). Mirrors what `data/oid-catalogs/cambium/pmp450i/15.2.1.json`
 # will look like for the v1 fixture shipped with the change.
+# PR 2 (slice 2 of `2026-09-13-pmp450i-production-surface`) extends
+# the fixture with the four NEW summary OID names so the
+# ``_REQUIRED_OIDS_BY_VENDOR_MODEL[("cambium", "pmp450i")]`` check
+# accepts the sample. The test fixture is intentionally a STRICT
+# subset of the production catalog (radio-metrics seed + summary
+# additions + the legacy OIDs ``summaries.py`` reuses) so the
+# verification path is exercised end-to-end.
 _SAMPLE_CATALOG_PAYLOAD: dict[str, str] = {
     "radioDownlinkRate": "1.3.6.1.4.1.161.19.3.1.1.1.0",
     "radioUplinkRate": "1.3.6.1.4.1.161.19.3.1.1.2.0",
@@ -30,6 +37,11 @@ _SAMPLE_CATALOG_PAYLOAD: dict[str, str] = {
     "signalStrengthTx": "1.3.6.1.4.1.161.19.3.1.1.4.0",
     "ssr": "1.3.6.1.4.1.161.19.3.1.1.5.0",
     "modulationMode": "1.3.6.1.4.1.161.19.3.1.1.6.0",
+    # PR 2 — slice 2 read-summary additions.
+    "apFirmwareVersion": "1.3.6.1.4.1.161.19.3.1.1.52.0",
+    "subscribersCount": "1.3.6.1.4.1.161.19.3.1.1.60.0",
+    "frameUtilizationDlPct": "1.3.6.1.4.1.161.19.3.1.1.53.0",
+    "frameUtilizationUlPct": "1.3.6.1.4.1.161.19.3.1.1.54.0",
 }
 
 # Deterministic key for HMAC verification in tests. NOT for production.
