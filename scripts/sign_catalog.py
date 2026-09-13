@@ -1,31 +1,41 @@
-"""Generate an HMAC-signed OID catalog envelope for an arbitrary triple.
+"""Generate an HMAC-signed OID catalog envelope from a source JSON file.
 
-PR 1 (ADR #17): the registry now loads catalogs from two roots (built-in
-baseline + operator override). The default invocation still writes the
-shipped PMP 450i baseline into ``data/oid-catalogs/cambium/pmp450i/
-15.2.1.json`` so the boot path matches pre-PR1 behaviour; passing
-``--vendor`` / ``--model`` / ``--firmware`` switches the destination
-triple so an operator can re-sign any catalog without touching the
-script.
+PR 1 (ADR #17): the registry loads catalogs from two roots (built-in
+baseline + operator override). The default invocation reads
+``data/oid-catalogs/sources/cambium/pmp450i/15.2.1.source.json`` (the
+editable source-of-truth) and writes the signed envelope into
+``data/oid-catalogs/cambium/pmp450i/15.2.1.json`` so the boot path
+matches pre-refactor behaviour. ``--all`` signs every ``*.source.json``
+file under the source root in one pass — the recommended workflow for
+new firmware drops (no Python change required).
+
+PR 35: the source JSON separates *data* (verified canonical OID values)
+from *schema* (per-tool OID membership, the ``TOOLS_V1`` map below stays
+in code as a contract between the catalog and the @mcp.tool bodies).
+Adding a new firmware = drop a new ``<firmware>.source.json`` and run
+``sign_catalog.py --all``. No Python touched.
 
 The HMAC key in CI is injected via ``NORA_OID_CATALOG_SIGNING_KEY``;
 passing ``--key`` overrides the env var so a developer can sign a
 local fixture without exporting secrets.
 
-Public object names only — see ``OID_CATALOG_V1`` below. No MIB prose
-is embedded; OIDs are dotted strings sourced from Cambium public
-documentation and operator community forums (never from the WHISP-SM-MIB
-text, which is EULA-restricted).
+Public object names only — see the ``oids`` map in the source JSON. No
+MIB prose is embedded; OIDs are dotted strings sourced from live SNMP
+walks against Cambium PMP 450i hardware (issue #35).
 
 Examples:
 
-    # Default: write the shipped PMP 450i baseline into
-    # ``data/oid-catalogs/cambium/pmp450i/15.2.1.json``.
+    # Default: read sources/cambium/pmp450i/15.2.1.source.json and write
+    # the signed envelope into data/oid-catalogs/cambium/pmp450i/15.2.1.json.
     NORA_OID_CATALOG_SIGNING_KEY="change-me" python scripts/sign_catalog.py
 
-    # Sign a different triple into the same repo-root baseline dir.
+    # Sign every source file in the source root at once.
+    python scripts/sign_catalog.py --all
+
+    # Sign a single triple into a custom output root.
     NORA_OID_CATALOG_SIGNING_KEY="change-me" \\
-        python scripts/sign_catalog.py --vendor cambium --model pmp450i --firmware 15.3.0
+        python scripts/sign_catalog.py --vendor cambium --model pmp450i \\
+        --firmware 15.3.0 --output-root /tmp/catalogs
 
     # Sign with an inline key (useful in tests; do NOT do this in CI).
     python scripts/sign_catalog.py --key "local-dev-key"
@@ -42,81 +52,31 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-# Default destination: repo-root ``data/oid-catalogs/`` so the legacy
-# invocation stays bit-identical with pre-PR1 (PR 1's built-in baseline
-# ships from ``src/nora/data/oid-catalogs/`` and is signed at build time,
-# but the helper script keeps writing to the legacy path for operator
-# re-sign tooling).
+# Default source root: the editable ``*.source.json`` files live here.
+# Operators / contributors update these by adding new firmware drops or
+# fixing OIDs against real-radio SNMP walks.
+DEFAULT_SOURCE_ROOT = REPO_ROOT / "data" / "oid-catalogs" / "sources"
+# Default output root: signed envelopes (HMAC-verified at boot) live
+# here. PR 1's built-in baseline ships from
+# ``src/nora/data/oid-catalogs/`` (signed out-of-band with the baseline
+# key) and the runtime operator root defaults here for re-sign tooling.
 DEFAULT_OUTPUT_ROOT = REPO_ROOT / "data" / "oid-catalogs"
 
-# Public object names -> dotted OID. Each entry has a public reference in
-# Cambium's PMP 450i SNMP reference; none of this text is vendored from
-# the WHISP-SM-MIB. The v1 starter set is 15 OIDs (the spec required
-# 15-20 entries; this is the minimum that exercises every fold path).
-# PR 2 (slice 2 of `2026-09-13-pmp450i-production-surface`) extends the
-# set with four read-summary OIDs so the ``snmp_get_ap_summary`` and
-# ``snmp_get_frame_utilization`` tools can resolve their dotted OIDs
-# against the catalog. Per-tool OID membership is recorded in the
-# ``TOOLS_V1`` envelope map below; PR 5 indexes it at boot.
-OID_CATALOG_V1: dict[str, str] = {
-    "radioDownlinkRate": "1.3.6.1.4.1.161.19.3.1.1.1.0",
-    "radioUplinkRate": "1.3.6.1.4.1.161.19.3.1.1.2.0",
-    "signalStrengthRx": "1.3.6.1.4.1.161.19.3.1.1.3.0",
-    "signalStrengthTx": "1.3.6.1.4.1.161.19.3.1.1.4.0",
-    "ssr": "1.3.6.1.4.1.161.19.3.1.1.5.0",
-    "modulationMode": "1.3.6.1.4.1.161.19.3.1.1.6.0",
-    "channelBandwidth": "1.3.6.1.4.1.161.19.3.1.1.7.0",
-    "frequency": "1.3.6.1.4.1.161.19.3.1.1.8.0",
-    "transmitPower": "1.3.6.1.4.1.161.19.3.1.1.9.0",
-    "receivePower": "1.3.6.1.4.1.161.19.3.1.1.10.0",
-    "jitter": "1.3.6.1.4.1.161.19.3.1.1.11.0",
-    "inOctets": "1.3.6.1.4.1.161.19.3.4.1.1.1.0",
-    "outOctets": "1.3.6.1.4.1.161.19.3.4.1.1.2.0",
-    "linkStatus": "1.3.6.1.4.1.161.19.3.1.1.50.0",
-    "upTime": "1.3.6.1.4.1.161.19.3.1.1.51.0",
-    # PR 2 — slice 2 read-summary additions.
-    "apFirmwareVersion": "1.3.6.1.4.1.161.19.3.1.1.52.0",
-    "subscribersCount": "1.3.6.1.4.1.161.19.3.1.1.60.0",
-    "frameUtilizationDlPct": "1.3.6.1.4.1.161.19.3.1.1.53.0",
-    "frameUtilizationUlPct": "1.3.6.1.4.1.161.19.3.1.1.54.0",
-    # PR 3 — slice 3 SM-table additions (sub-cluster 2 — unbiased baseline).
-    "smSessionUptime": "1.3.6.1.4.1.161.19.3.2.1.70.0",
-    "smCinr": "1.3.6.1.4.1.161.19.3.2.1.71.0",
-    "smLinkStatus": "1.3.6.1.4.1.161.19.3.2.1.72.0",
-    "smLuid": "1.3.6.1.4.1.161.19.3.2.1.73.0",
-    # PR 3 — slice 3 SM diagnostics additions.
-    "smJitter": "1.3.6.1.4.1.161.19.3.2.1.80.0",
-    "smRetransmits": "1.3.6.1.4.1.161.19.3.2.1.81.0",
-    "smRxLevel": "1.3.6.1.4.1.161.19.3.2.1.82.0",
-    "smTxLevel": "1.3.6.1.4.1.161.19.3.2.1.83.0",
-    # PR 4 — slice 4 spectrum-sweep additions.
-    "spectrumNoiseFloorA": "1.3.6.1.4.1.161.19.3.1.1.90.0",
-    "spectrumNoiseFloorB": "1.3.6.1.4.1.161.19.3.1.1.91.0",
-    "spectrumNoiseFloorC": "1.3.6.1.4.1.161.19.3.1.1.92.0",
-    "spectrumChannelRank": "1.3.6.1.4.1.161.19.3.1.1.93.0",
-    "spectrumScanStatus": "1.3.6.1.4.1.161.19.3.1.1.94.0",
-    # PR 4 — slice 4 RF-migration additions.
-    "migrateCarrierFrequency": "1.3.6.1.4.1.161.19.3.1.1.95.0",
-    "migratePriorCarrierFrequency": "1.3.6.1.4.1.161.19.3.1.1.96.0",
-}
 
-
-# Per-tool OID-name map — slices 2 + 3 surface (PR 2 + PR 3).
+# Per-tool OID-name map (slices 2/3/4 of `2026-09-13-pmp450i-production-surface`).
 #
-# The catalog envelope carries this map so PR 5 can build the
-# ``REQUIRED_OIDS_BY_TOOL`` index at boot. The keys are MCP tool
-# names registered on the global ``FastMCP("nora")`` instance; the
-# values are the OID names (drawn from ``OID_CATALOG_V1``) the tool
-# fetches per call. The slice 2 read-summary helpers in
-# ``nora.drivers.snmp_pmp450i.summaries`` reuse four legacy names
-# (``frequency``, ``channelBandwidth``, ``transmitPower``, ``upTime``)
-# from the v1 radio-metrics seed so the read tool has the full
-# carrier/channel/tx-power picture without forcing slice 2 to add
-# more dotted OIDs. PR 3's ``snmp_get_sm_table`` reads the SM-table
-# subtree (one ``walk`` per OID-name base) and folds the response into
-# a typed ``SubscriberSummary``; ``snmp_get_sm_detailed_diagnostics``
-# reads the four per-SM diagnostics OIDs via individual ``get_oid``
-# calls.
+# The catalog envelope carries this map so the boot-time guard in
+# ``OidCatalogRegistry._enumerate_tool_names`` can build the
+# ``REQUIRED_OIDS_BY_TOOL`` index. The keys are MCP tool names
+# registered on the global ``FastMCP("nora")`` instance; the values
+# are OID names (drawn from the source JSON's ``oids`` map) the tool
+# fetches per call.
+#
+# This is *schema*, not *data* — it stays in code because every
+# addition here MUST land alongside the matching ``@mcp.tool`` body in
+# ``src/nora/server.py``. Adding a new firmware does NOT require
+# touching this map (the OID values are data; the tool → OID mapping
+# is structural).
 TOOLS_V1: dict[str, list[str]] = {
     "snmp_get_ap_summary": [
         "apFirmwareVersion",
@@ -157,29 +117,92 @@ TOOLS_V1: dict[str, list[str]] = {
 }
 
 
-def _resolve_target(
-    output_root: Path,
-    *,
-    vendor: str,
-    model: str,
-    firmware: str,
-) -> Path:
-    """Build the catalog path under ``<output_root>/<vendor>/<model>/<firmware>.json``.
+def _load_source(source_path: Path) -> dict[str, object]:
+    """Load and validate a source JSON file.
 
-    Mirrors the on-disk layout the runtime expects
-    (``<root>/<vendor>/<model>/<firmware>.json``); keeping the helper
-    path-builder in one place avoids drift when PR 1 introduces the
-    built-in baseline under ``src/nora/data/oid-catalogs/``.
+    The schema is minimal: a top-level object with ``vendor``, ``model``,
+    ``firmware`` (strings), and ``oids`` (object → dotted OID strings).
+    An optional ``_provenance`` block documents the verification source
+    for audit (it's preserved verbatim in the signed envelope as
+    informational metadata but excluded from the HMAC body).
     """
-    return output_root / vendor / model / f"{firmware}.json"
+    payload = json.loads(source_path.read_text())
+    if not isinstance(payload, dict):
+        raise ValueError(f"{source_path}: source must be a JSON object")
+    for key in ("vendor", "model", "firmware", "oids"):
+        if key not in payload:
+            raise ValueError(f"{source_path}: source missing required field {key!r}")
+    if not isinstance(payload["oids"], dict):
+        raise ValueError(f"{source_path}: source.oids must be a JSON object")
+    return payload
+
+
+def _sign_one(
+    *,
+    source_path: Path,
+    output_root: Path,
+    key: str,
+) -> Path:
+    """Sign one source JSON and write the envelope under ``output_root``.
+
+    Returns the path of the written envelope.
+    """
+    payload = _load_source(source_path)
+    vendor = str(payload["vendor"])
+    model = str(payload["model"])
+    firmware = str(payload["firmware"])
+    oids_raw = payload["oids"]
+    assert isinstance(oids_raw, dict)
+    oids: dict[str, str] = {str(k): str(v) for k, v in oids_raw.items()}
+
+    canonical_body = json.dumps(oids, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    sig = hmac.new(key.encode("utf-8"), canonical_body, hashlib.sha256).hexdigest()
+    envelope = {
+        "version": 1,
+        "vendor": vendor,
+        "model": model,
+        "firmware": firmware,
+        "oids": oids,
+        # The envelope carries a per-tool OID-name map so the boot-time
+        # guard can build ``REQUIRED_OIDS_BY_TOOL`` at boot. The HMAC
+        # is computed over the canonicalised ``oids`` map only — the
+        # tools map is informational and excluded from the signature
+        # to keep back-compat with the v1 verification path.
+        "tools": TOOLS_V1,
+        "hmac_sha256": sig,
+    }
+    # ``_provenance`` is preserved verbatim from the source JSON when
+    # present, so the audit trail (live walk date, MIB references, notes)
+    # ships with the signed envelope. Excluded from the HMAC body so
+    # the signature stays tooling-stable across provenance edits.
+    if "_provenance" in payload:
+        envelope["_provenance"] = payload["_provenance"]
+
+    target = output_root / vendor / model / f"{firmware}.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(envelope, indent=2))
+    print(f"wrote {target} ({len(oids)} OIDs)")
+    return target
+
+
+def _iter_source_files(source_root: Path) -> list[Path]:
+    """Yield every ``*.source.json`` under ``source_root``, sorted.
+
+    Iteration is deterministic (sorted at every level) so the
+    ``--all`` batch is reproducible across hosts.
+    """
+    if not source_root.is_dir():
+        return []
+    return sorted(source_root.rglob("*.source.json"))
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Sign an OID catalog envelope and write it to disk. Defaults "
-            "preserve pre-PR1 behaviour (writes the PMP 450i baseline "
-            "to repo-root data/oid-catalogs/)."
+            "Sign an OID catalog envelope from a source JSON file and "
+            "write it under --output-root. Defaults read "
+            "data/oid-catalogs/sources/cambium/pmp450i/15.2.1.source.json "
+            "and write data/oid-catalogs/cambium/pmp450i/15.2.1.json."
         ),
     )
     parser.add_argument(
@@ -198,14 +221,40 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="Catalog firmware string (default: 15.2.1).",
     )
     parser.add_argument(
+        "--source-root",
+        type=Path,
+        default=DEFAULT_SOURCE_ROOT,
+        help=(
+            "Root directory holding the editable ``*.source.json`` files. "
+            "Defaults to <repo>/data/oid-catalogs/sources/. "
+            "Used by --all to enumerate every source for batch signing."
+        ),
+    )
+    parser.add_argument(
+        "--source",
+        type=Path,
+        default=None,
+        help=(
+            "Path to a single source JSON file. Overrides "
+            "--vendor/--model/--firmware resolution when present."
+        ),
+    )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        dest="sign_all",
+        help=(
+            "Sign every ``*.source.json`` file under --source-root in one "
+            "pass. Recommended workflow when a new firmware drop lands."
+        ),
+    )
+    parser.add_argument(
         "--output-root",
         type=Path,
         default=DEFAULT_OUTPUT_ROOT,
         help=(
-            "Root directory the catalog is written under. Defaults to "
-            "<repo>/data/oid-catalogs/ so the legacy invocation stays "
-            "bit-identical. PR 1's built-in baseline lives at "
-            "<repo>/src/nora/data/oid-catalogs/ and is signed out-of-band."
+            "Root directory the signed envelopes are written under. "
+            "Defaults to <repo>/data/oid-catalogs/."
         ),
     )
     parser.add_argument(
@@ -230,35 +279,41 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
-    target = _resolve_target(
-        args.output_root,
-        vendor=args.vendor,
-        model=args.model,
-        firmware=args.firmware,
-    )
-    target.parent.mkdir(parents=True, exist_ok=True)
+    if args.source is not None:
+        if not args.source.is_file():
+            print(f"error: --source {args.source} does not exist", file=sys.stderr)
+            return 2
+        _sign_one(source_path=args.source, output_root=args.output_root, key=key)
+        return 0
 
-    canonical_body = json.dumps(
-        OID_CATALOG_V1, sort_keys=True, separators=(",", ":")
-    ).encode("utf-8")
-    sig = hmac.new(key.encode("utf-8"), canonical_body, hashlib.sha256).hexdigest()
-    envelope = {
-        "version": 1,
-        "vendor": args.vendor,
-        "model": args.model,
-        "firmware": args.firmware,
-        "oids": OID_CATALOG_V1,
-        # PR 2 (slice 2 of `2026-09-13-pmp450i-production-surface`):
-        # the envelope carries a per-tool OID-name map so PR 5 can
-        # build ``REQUIRED_OIDS_BY_TOOL`` at boot. The HMAC is computed
-        # over the canonicalised ``oids`` map only — the tools map is
-        # informational and excluded from the signature to keep
-        # back-compat with the v1 verification path.
-        "tools": TOOLS_V1,
-        "hmac_sha256": sig,
-    }
-    target.write_text(json.dumps(envelope, indent=2))
-    print(f"wrote {target} ({len(OID_CATALOG_V1)} OIDs)")
+    if args.sign_all:
+        sources = _iter_source_files(args.source_root)
+        if not sources:
+            print(
+                f"error: no *.source.json files found under {args.source_root}",
+                file=sys.stderr,
+            )
+            return 2
+        for source_path in sources:
+            _sign_one(source_path=source_path, output_root=args.output_root, key=key)
+        return 0
+
+    # Single-triple mode: resolve the source file under --source-root.
+    source_path = (
+        args.source_root
+        / args.vendor
+        / args.model
+        / f"{args.firmware}.source.json"
+    )
+    if not source_path.is_file():
+        print(
+            f"error: source file not found at {source_path}. "
+            f"Either drop the source JSON there, pass --source <path>, "
+            f"or run with --all to sign every source under --source-root.",
+            file=sys.stderr,
+        )
+        return 2
+    _sign_one(source_path=source_path, output_root=args.output_root, key=key)
     return 0
 
 

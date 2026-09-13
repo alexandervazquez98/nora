@@ -91,52 +91,79 @@ def _build_inventory(
 
 
 def _radio_seed_oids() -> dict[str, str]:
-    """The six radio-metrics REQUIRED_OIDs (mirror of driver module)."""
+    """The six radio-metrics REQUIRED_OIDs (mirror of driver module).
+
+    These come from the verified Cambium PMP 450i MIB positions (issue
+    #35) under the whispLinkTable (.3.1.4.1) and whispBox (.3.1.1)
+    subtrees — see ``data/oid-catalogs/sources/cambium/pmp450i/*.source.json``
+    for the full verified map.
+    """
     return {
-        "radioDownlinkRate": "1.3.6.1.4.1.161.19.3.1.1.1.0",
-        "radioUplinkRate": "1.3.6.1.4.1.161.19.3.1.1.2.0",
-        "signalStrengthRx": "1.3.6.1.4.1.161.19.3.1.1.3.0",
-        "signalStrengthTx": "1.3.6.1.4.1.161.19.3.1.1.4.0",
-        "ssr": "1.3.6.1.4.1.161.19.3.1.1.5.0",
-        "modulationMode": "1.3.6.1.4.1.161.19.3.1.1.6.0",
+        "radioDownlinkRate": "1.3.6.1.4.1.161.19.3.1.4.1.36.0",
+        "radioUplinkRate": "1.3.6.1.4.1.161.19.3.1.4.1.38.0",
+        "signalStrengthRx": "1.3.6.1.4.1.161.19.3.1.4.1.34.0",
+        "signalStrengthTx": "1.3.6.1.4.1.161.19.3.1.4.1.89.0",
+        "ssr": "1.3.6.1.4.1.161.19.3.1.4.1.86.0",
+        "modulationMode": "1.3.6.1.4.1.161.19.3.1.4.1.40.0",
     }
 
 
 def _legacy_oids() -> dict[str, str]:
-    """The v1 seed OIDs ``summaries.py`` reuses for the AP summary."""
+    """The v1 seed OIDs ``summaries.py`` reuses for the AP summary.
+
+    Verified MIB positions for issue #35 (see
+    ``data/oid-catalogs/sources/cambium/pmp450i/*.source.json``):
+    channelBandwidth is in whispApsConfig (.3.3.2.83),
+    frequency is in whispBoxStatus (.3.1.1.2),
+    transmitPower is the activeTxPowerStr leaf (.3.3.1.232),
+    apFirmwareVersion is whispBoxSwVersion (.3.3.1.1),
+    subscribersCount is in whispBox (.3.1.7.1),
+    frame utilization columns live in whispApsFrUtlStats (.3.1.12.1.x),
+    upTime is the standard RFC1213 sysUpTime (.2.1.1.3).
+    """
     return {
-        "channelBandwidth": "1.3.6.1.4.1.161.19.3.1.1.7.0",
-        "frequency": "1.3.6.1.4.1.161.19.3.1.1.8.0",
-        "transmitPower": "1.3.6.1.4.1.161.19.3.1.1.9.0",
-        "upTime": "1.3.6.1.4.1.161.19.3.1.1.51.0",
-        "apFirmwareVersion": "1.3.6.1.4.1.161.19.3.1.1.52.0",
-        "subscribersCount": "1.3.6.1.4.1.161.19.3.1.1.60.0",
-        "frameUtilizationDlPct": "1.3.6.1.4.1.161.19.3.1.1.53.0",
-        "frameUtilizationUlPct": "1.3.6.1.4.1.161.19.3.1.1.54.0",
+        "channelBandwidth": "1.3.6.1.4.1.161.19.3.3.2.83.0",
+        "frequency": "1.3.6.1.4.1.161.19.3.1.1.2.0",
+        "transmitPower": "1.3.6.1.4.1.161.19.3.3.1.232.0",
+        "upTime": "1.3.6.1.2.1.1.3.0",
+        "apFirmwareVersion": "1.3.6.1.4.1.161.19.3.3.1.1.0",
+        "subscribersCount": "1.3.6.1.4.1.161.19.3.1.7.1.0",
+        "frameUtilizationDlPct": "1.3.6.1.4.1.161.19.3.1.12.1.1.0",
+        "frameUtilizationUlPct": "1.3.6.1.4.1.161.19.3.1.12.1.2.0",
     }
 
 
 def _sm_table_oids() -> dict[str, str]:
     """SM table OID names + dotted OIDs (synthesised public refs).
 
-    Per Cambium private-enterprise branch ``1.3.6.1.4.1.161.19.3.x.x.0``;
-    indices 70-73 to avoid colliding with the existing seed (1-11, 50-54, 60).
+    Per Cambium WHISP-APS-MIB (verified issue #35): the SM table on an
+    AP lives in ``whispLinkTable`` rooted at ``1.3.6.1.4.1.161.19.3.1.4.1``.
+    The previous value ``1.3.6.1.4.1.161.19.3.2.1`` pointed at
+    ``whispSm`` (an individual subscriber module) which returns
+    ``noSuchName`` on an AP. Columns under whispLinkTable:
+    ``.46`` = smSessionUptime, ``.74`` = smCinr DL,
+    ``.19`` = linkSessState, ``.1`` = linkLuid.
     """
     return {
-        "smSessionUptime": "1.3.6.1.4.1.161.19.3.2.1.70.0",
-        "smCinr": "1.3.6.1.4.1.161.19.3.2.1.71.0",
-        "smLinkStatus": "1.3.6.1.4.1.161.19.3.2.1.72.0",
-        "smLuid": "1.3.6.1.4.1.161.19.3.2.1.73.0",
+        "smSessionUptime": "1.3.6.1.4.1.161.19.3.1.4.1.46.0",
+        "smCinr": "1.3.6.1.4.1.161.19.3.1.4.1.74.0",
+        "smLinkStatus": "1.3.6.1.4.1.161.19.3.1.4.1.19.0",
+        "smLuid": "1.3.6.1.4.1.161.19.3.1.4.1.1.0",
     }
 
 
 def _sm_diagnostics_oids() -> dict[str, str]:
-    """SM diagnostics OID names + dotted OIDs (synthesised public refs)."""
+    """SM diagnostics OID names + dotted OIDs (synthesised public refs).
+
+    Columns under whispLinkTable (.3.1.4.1): ``.22`` = linkAveJitter,
+    ``.150`` = retransmittedFragmentsCount, ``.34`` = avgPowerLevel
+    (per-SM Rx dBm), ``.89`` = maxSMTxPwr.
+    """
     return {
-        "smJitter": "1.3.6.1.4.1.161.19.3.2.1.80.0",
-        "smRetransmits": "1.3.6.1.4.1.161.19.3.2.1.81.0",
-        "smRxLevel": "1.3.6.1.4.1.161.19.3.2.1.82.0",
-        "smTxLevel": "1.3.6.1.4.1.161.19.3.2.1.83.0",
+        "smJitter": "1.3.6.1.4.1.161.19.3.1.4.1.22.0",
+        "smRetransmits": "1.3.6.1.4.1.161.19.3.1.4.1.150.0",
+        "smRxLevel": "1.3.6.1.4.1.161.19.3.1.4.1.34.0",
+        "smTxLevel": "1.3.6.1.4.1.161.19.3.1.4.1.89.0",
     }
 
 
@@ -229,30 +256,32 @@ def _build_driver(
 def _sm_session_table() -> list[tuple[str, str | int]]:
     """Synthetic PMP 450i SM table subtree response.
 
-    Each SM occupies four OID rows in the public Cambium branch
-    (smSessionUptime, smCinr, smLinkStatus, smLuid). Returns a flat
-    `(oid, value)` list — the helper walks the base OID and parses.
+    Each SM occupies four OID rows in the whispLinkTable (.3.1.4.1)
+    public Cambium branch — columns ``.46`` (smSessionUptime),
+    ``.74`` (smCinr), ``.19`` (smLinkStatus), ``.1`` (smLuid). Returns
+    a flat ``(oid, value)`` list — the helper walks the base OID and
+    parses.
     """
-    base = "1.3.6.1.4.1.161.19.3.2.1"
+    base = "1.3.6.1.4.1.161.19.3.1.4.1"
     rows = [
         # SM 1 — ONLINE_ACTIVE: uptime > 0, valid IP, mod 8X, link up.
         (
-            f"{base}.70.1",
+            f"{base}.46.1",
             86400,
         ),  # smSessionUptime
-        (f"{base}.71.1", 25),  # smCinr (dB)
-        (f"{base}.72.1", "LINKED"),  # smLinkStatus
-        (f"{base}.73.1", "001"),  # smLuid
+        (f"{base}.74.1", 25),  # smCinr (dB)
+        (f"{base}.19.1", "LINKED"),  # smLinkStatus
+        (f"{base}.1.1", "001"),  # smLuid
         # SM 2 — ACTIVE_DEGRADED: low CINR.
-        (f"{base}.70.2", 43200),
-        (f"{base}.71.2", 12),  # cinr < 18 → degraded
-        (f"{base}.72.2", "LINKED"),
-        (f"{base}.73.2", "002"),
+        (f"{base}.46.2", 43200),
+        (f"{base}.74.2", 12),  # cinr < 18 → degraded
+        (f"{base}.19.2", "LINKED"),
+        (f"{base}.1.2", "002"),
         # SM 3 — PRE_EXISTING_OFFLINE (uptime == 0).
-        (f"{base}.70.3", 0),
-        (f"{base}.71.3", 0),
-        (f"{base}.72.3", "DOWN"),
-        (f"{base}.73.3", "003"),
+        (f"{base}.46.3", 0),
+        (f"{base}.74.3", 0),
+        (f"{base}.19.3", "DOWN"),
+        (f"{base}.1.3", "003"),
     ]
     return rows
 
@@ -286,7 +315,7 @@ def test_sm_table_categorizes_online_active(
     canned = _FakeSnmpClient(
         values={},
         walk_results={
-            "1.3.6.1.4.1.161.19.3.2.1": _sm_session_table(),
+            "1.3.6.1.4.1.161.19.3.1.4.1": _sm_session_table(),
         },
     )
     driver = _build_driver(inventory=inv, registry=registry, canned=canned)
@@ -331,16 +360,16 @@ def test_sm_table_categorizes_active_degraded_low_cinr(
     )
 
     # Single-SM table — one active session, low CINR.
-    base = "1.3.6.1.4.1.161.19.3.2.1"
+    base = "1.3.6.1.4.1.161.19.3.1.4.1"
     rows = [
-        (f"{base}.70.1", 43200),  # uptime > 0
-        (f"{base}.71.1", 12),  # cinr 12 dB (< 18)
-        (f"{base}.72.1", "LINKED"),
-        (f"{base}.73.1", "002"),
+        (f"{base}.46.1", 43200),  # uptime > 0
+        (f"{base}.74.1", 12),  # cinr 12 dB (< 18)
+        (f"{base}.19.1", "LINKED"),
+        (f"{base}.1.1", "002"),
     ]
     canned = _FakeSnmpClient(
         values={},
-        walk_results={"1.3.6.1.4.1.161.19.3.2.1": rows},
+        walk_results={"1.3.6.1.4.1.161.19.3.1.4.1": rows},
     )
     driver = _build_driver(inventory=inv, registry=registry, canned=canned)
 
@@ -396,22 +425,22 @@ def test_sm_table_categorizes_pre_existing_offline(
         ],
     )
 
-    base = "1.3.6.1.4.1.161.19.3.2.1"
+    base = "1.3.6.1.4.1.161.19.3.1.4.1"
     rows = [
         # SM 1 — ONLINE_ACTIVE.
-        (f"{base}.70.1", 86400),
-        (f"{base}.71.1", 25),
-        (f"{base}.72.1", "LINKED"),
-        (f"{base}.73.1", "001"),
+        (f"{base}.46.1", 86400),
+        (f"{base}.74.1", 25),
+        (f"{base}.19.1", "LINKED"),
+        (f"{base}.1.1", "001"),
         # SM 3 — known pre-existing offline (history cross-check).
-        (f"{base}.70.3", 86400),  # uptime > 0
-        (f"{base}.71.3", 22),
-        (f"{base}.72.3", "LINKED"),
-        (f"{base}.73.3", "003"),
+        (f"{base}.46.3", 86400),  # uptime > 0
+        (f"{base}.74.3", 22),
+        (f"{base}.19.3", "LINKED"),
+        (f"{base}.1.3", "003"),
     ]
     canned = _FakeSnmpClient(
         values={},
-        walk_results={"1.3.6.1.4.1.161.19.3.2.1": rows},
+        walk_results={"1.3.6.1.4.1.161.19.3.1.4.1": rows},
     )
     driver = _build_driver(inventory=inv, registry=registry, canned=canned)
 
@@ -458,27 +487,27 @@ def test_sm_table_unbiased_baseline_excludes_pre_existing(
     # Build a 3-row table: one ONLINE_ACTIVE, one ACTIVE_DEGRADED, one
     # PRE_EXISTING_OFFLINE (uptime == 0). The aggregate baseline_size
     # MUST be 2 (online + degraded); pre-existing excluded.
-    base = "1.3.6.1.4.1.161.19.3.2.1"
+    base = "1.3.6.1.4.1.161.19.3.1.4.1"
     rows = [
         # SM 1 — ONLINE_ACTIVE.
-        (f"{base}.70.1", 86400),
-        (f"{base}.71.1", 25),
-        (f"{base}.72.1", "LINKED"),
-        (f"{base}.73.1", "001"),
+        (f"{base}.46.1", 86400),
+        (f"{base}.74.1", 25),
+        (f"{base}.19.1", "LINKED"),
+        (f"{base}.1.1", "001"),
         # SM 2 — ACTIVE_DEGRADED.
-        (f"{base}.70.2", 43200),
-        (f"{base}.71.2", 12),
-        (f"{base}.72.2", "LINKED"),
-        (f"{base}.73.2", "002"),
+        (f"{base}.46.2", 43200),
+        (f"{base}.74.2", 12),
+        (f"{base}.19.2", "LINKED"),
+        (f"{base}.1.2", "002"),
         # SM 3 — PRE_EXISTING_OFFLINE.
-        (f"{base}.70.3", 0),
-        (f"{base}.71.3", 0),
-        (f"{base}.72.3", "DOWN"),
-        (f"{base}.73.3", "003"),
+        (f"{base}.46.3", 0),
+        (f"{base}.74.3", 0),
+        (f"{base}.19.3", "DOWN"),
+        (f"{base}.1.3", "003"),
     ]
     canned = _FakeSnmpClient(
         values={},
-        walk_results={"1.3.6.1.4.1.161.19.3.2.1": rows},
+        walk_results={"1.3.6.1.4.1.161.19.3.1.4.1": rows},
     )
     driver = _build_driver(inventory=inv, registry=registry, canned=canned)
 
@@ -601,7 +630,7 @@ def test_get_intervention_history_called_before_categorize(
 
     canned = _FakeSnmpClient(
         values={},
-        walk_results={"1.3.6.1.4.1.161.19.3.2.1": _sm_session_table()},
+        walk_results={"1.3.6.1.4.1.161.19.3.1.4.1": _sm_session_table()},
     )
     driver = _build_driver(inventory=inv, registry=registry, canned=canned)
 

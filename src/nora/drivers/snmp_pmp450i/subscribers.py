@@ -39,7 +39,7 @@ where the existing ``Sanitizer`` applies.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, Literal, get_args
+from typing import TYPE_CHECKING, Any, Final, Literal, get_args
 
 if TYPE_CHECKING:
     from nora.config import Settings
@@ -154,10 +154,36 @@ SM_DIAGNOSTICS_OID_NAMES: tuple[str, ...] = (
 )
 
 # Subtree base — the SM-table subtree starts at this dotted OID.
-# Each SM row occupies four OID leaves (one per SM_TABLE_OID_NAMES)
-# at successive index slots; the helper walks the base and folds the
+# Each SM row occupies N OID leaves (one per SM_TABLE_OID_NAMES) at
+# successive index slots; the helper walks the base and folds the
 # leaves into a list of `SubscriberRecord` rows.
-SM_TABLE_BASE_OID: str = "1.3.6.1.4.1.161.19.3.2.1"
+#
+# Issue #35 (verification against a real Cambium PMP 450i AP): the
+# original value ``1.3.6.1.4.1.161.19.3.2.1`` points at the
+# ``whispSm`` subtree (an individual subscriber module) — querying
+# that root against an Access Point returns ``noSuchName
+# (status-code: 2)`` because the SM table on an AP lives in
+# ``whispLinkTable`` (the per-link, per-LUID column table). The
+# correct subtree is ``whispApsLinkTable`` rooted at
+# ``1.3.6.1.4.1.161.19.3.1.4.1``, the same root the WHISP-APS-MIB
+# uses for ``whispLinkEntry``. The per-SM diagnostic columns
+# (``smLuid``, ``smCinr``, ``smJitter``, ``smRxLevel``, ``smTxLevel``,
+# ``smSessionUptime``, ``smLinkStatus``, ``smRetransmits``) all live
+# under this subtree with a ``.<LUID>`` instance appended.
+SM_TABLE_BASE_OID: str = "1.3.6.1.4.1.161.19.3.1.4.1"
+
+# Map each SM-table OID name to the slot it fills in the per-SM
+# record. The fold helper uses the *column index* (the third-to-last
+# component of the catalog OID, e.g. ``46`` for
+# ``1.3.6.1.4.1.161.19.3.1.4.1.46.0``) to dispatch each walked OID
+# into the right slot, so the table-driven version never hardcodes
+# column numbers — the catalog OIDs ARE the column map.
+SM_TABLE_SLOT_BY_NAME: Final[dict[str, str]] = {
+    "smSessionUptime": "uptime",
+    "smCinr": "cinr",
+    "smLinkStatus": "link",
+    "smLuid": "luid",
+}
 
 # CINR threshold (dB) below which an active SM is considered degraded.
 # Per `pmp450i-radio-tools/spec.md` sub-cluster 2 scenario "ACTIVE_DEGRADED"
@@ -319,41 +345,49 @@ def _coerce_optional_int(value: str | int | None) -> int | None:
         return None
 
 
-def _fold_sm_table(rows: list[tuple[str, str | int]]) -> list[SubscriberRecord]:
+def _fold_sm_table(
+    rows: list[tuple[str, str | int]],
+    *,
+    column_to_slot: dict[int, str],
+) -> list[SubscriberRecord]:
     """Fold the raw ``(oid, value)`` walk response into typed rows.
 
     The walk returns rows whose OIDs share a common base plus an
-    ``.<oid_name_index>.<sm_index>`` suffix. The OID-name index is
-    fixed (``70``=uptime, ``71``=cinr, ``72``=link_status, ``73``=luid),
-    so the fold groups by ``sm_index`` and reads the four leaf
-    values per group.
+    ``.<column_index>.<sm_index>`` suffix. The fold uses the catalog-
+    derived ``column_to_slot`` map (built by the caller from the
+    verified catalog OIDs) to dispatch each walked OID into the right
+    per-SM record slot. Issue #35: this used to hardcode the column
+    indices (``70``=uptime, ``71``=cinr, ``72``=link_status, ``73``=
+    luid) which broke the moment the catalog OIDs moved to the real
+    WHISP-APS-MIB positions. Deriving the column map from the catalog
+    means a firmware catalog drop with new columns is a code change
+    only at the schema level (``SM_TABLE_OID_NAMES`` + ``SM_TABLE_SLOT_BY_NAME``),
+    not at every fold call site.
     """
     # Map `sm_index` -> {"uptime": int, "cinr": int, "link": str, "luid": str}
     grouped: dict[str, dict[str, str | int]] = {}
+    prefix = f"{SM_TABLE_BASE_OID}."
     for oid, value in rows:
-        # Strip the subtree base + last `.0` (no-instance suffix on SM OIDs).
-        prefix = f"{SM_TABLE_BASE_OID}."
+        # Strip the subtree base; what remains is ``<column>.<sm_index>``.
         if not oid.startswith(prefix):
             continue
         tail = oid[len(prefix) :]
-        # Split into ``oid_name_index.sm_index`` (e.g. ``70.1``).
         parts = tail.split(".")
         if len(parts) < 2:
             continue
         try:
-            oid_index = int(parts[0])
+            column_index = int(parts[0])
             sm_index = parts[1]
         except ValueError:
             continue
+        slot_key = column_to_slot.get(column_index)
+        if slot_key is None:
+            continue
         slot = grouped.setdefault(sm_index, {})
-        if oid_index == 70:
-            slot["uptime"] = _coerce_int(value)
-        elif oid_index == 71:
-            slot["cinr"] = _coerce_int(value)
-        elif oid_index == 72:
-            slot["link"] = str(value)
-        elif oid_index == 73:
-            slot["luid"] = str(value)
+        if slot_key in ("uptime", "cinr"):
+            slot[slot_key] = _coerce_int(value)
+        else:  # link, luid — string leaves
+            slot[slot_key] = str(value)
 
     records: list[SubscriberRecord] = []
     for sm_index in sorted(grouped.keys(), key=lambda k: int(k) if k.isdigit() else k):
@@ -369,6 +403,41 @@ def _fold_sm_table(rows: list[tuple[str, str | int]]) -> list[SubscriberRecord]:
             )
         )
     return records
+
+
+def _build_sm_table_column_map(catalog: "OidCatalog") -> dict[int, str]:
+    """Derive ``{column_index: slot_key}`` from the catalog OIDs.
+
+    Each catalog OID ends with ``.<column>.<instance>`` (e.g.
+    ``smSessionUptime: 1.3.6.1.4.1.161.19.3.1.4.1.46.0`` → column
+    ``46``). The fold helper uses this map to dispatch walked leaves
+    into the right slot without hardcoding column numbers.
+    """
+    column_to_slot: dict[int, str] = {}
+    for oid_name, slot_key in SM_TABLE_SLOT_BY_NAME.items():
+        dotted = catalog.oids.get(oid_name)
+        if dotted is None:
+            raise LookupError(
+                f"SM-table OID {oid_name!r} missing from catalog "
+                f"(vendor={catalog.vendor}, model={catalog.model}, "
+                f"firmware={catalog.firmware})"
+            )
+        # Catalog OIDs end with ``.<column>.0``; the column is the
+        # third-to-last dotted component.
+        parts = dotted.rsplit(".", 2)
+        if len(parts) != 3:
+            raise ValueError(
+                f"SM-table OID {oid_name!r} ({dotted}) does not match "
+                f"the expected ``<base>.<column>.0`` shape"
+            )
+        try:
+            column_index = int(parts[1])
+        except ValueError as exc:
+            raise ValueError(
+                f"SM-table OID {oid_name!r} ({dotted}) has non-integer column index {parts[1]!r}"
+            ) from exc
+        column_to_slot[column_index] = slot_key
+    return column_to_slot
 
 
 def _resolve_sm_diagnostics_oids(catalog: "OidCatalog") -> dict[str, str]:
@@ -469,7 +538,16 @@ def fetch_sm_table(
         except Exception:  # pragma: no cover - close is best-effort
             pass
 
-    sm_rows = _fold_sm_table(rows)
+    # Derive the column → slot dispatch from the catalog OIDs so a
+    # firmware drop with new column positions is a schema change
+    # (``SM_TABLE_OID_NAMES`` + ``SM_TABLE_SLOT_BY_NAME``), not a
+    # code change at every fold call site.
+    catalog = driver._catalog_registry.resolve(  # noqa: SLF001 — internal API
+        (device.vendor, device.model, device.firmware)
+    )
+    column_to_slot = _build_sm_table_column_map(catalog)
+
+    sm_rows = _fold_sm_table(rows, column_to_slot=column_to_slot)
     buckets = categorize_subscribers(sm_rows, known_pre_existing)
 
     online_active = buckets["ONLINE_ACTIVE"]
@@ -545,6 +623,7 @@ __all__ = [
     "fetch_sm_table",
     "fetch_sm_detailed_diagnostics",
     "SM_TABLE_OID_NAMES",
+    "SM_TABLE_SLOT_BY_NAME",
     "SM_DIAGNOSTICS_OID_NAMES",
     "SM_TABLE_BASE_OID",
 ]

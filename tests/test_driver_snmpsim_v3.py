@@ -64,15 +64,20 @@ def snmpsim_v3(tmp_path: Path) -> dict[str, Any]:
     data_dir = tmp_path / "snmpsim-data-v3"
     data_dir.mkdir()
     user_data = data_dir / "nora.snmprec"
+    # snmprec rows match the verified WHISP-APS-MIB positions in
+    # ``data/oid-catalogs/sources/cambium/pmp450i/15.2.1.source.json``
+    # (issue #35): radio metrics live in whispLinkTable (.3.1.4.1),
+    # not in the placeholder sequential positions (.3.1.1.X) the
+    # original v1 seed used.
     user_data.write_text(
         "\n".join(
             [
-                "1.3.6.1.4.1.161.19.3.1.1.1.0|INTEGER|87000000",
-                "1.3.6.1.4.1.161.19.3.1.1.2.0|INTEGER|31000000",
-                "1.3.6.1.4.1.161.19.3.1.1.3.0|INTEGER|-62",
-                "1.3.6.1.4.1.161.19.3.1.1.4.0|INTEGER|19",
-                "1.3.6.1.4.1.161.19.3.1.1.5.0|INTEGER|73",
-                "1.3.6.1.4.1.161.19.3.1.1.6.0|STRING|64QAM",
+                "1.3.6.1.4.1.161.19.3.1.4.1.36.0|INTEGER|87000000",  # radioDownlinkRate
+                "1.3.6.1.4.1.161.19.3.1.4.1.38.0|INTEGER|31000000",  # radioUplinkRate
+                "1.3.6.1.4.1.161.19.3.1.4.1.34.0|INTEGER|-62",  # signalStrengthRx
+                "1.3.6.1.4.1.161.19.3.1.4.1.89.0|INTEGER|19",  # signalStrengthTx
+                "1.3.6.1.4.1.161.19.3.1.4.1.86.0|INTEGER|73",  # ssr
+                "1.3.6.1.4.1.161.19.3.1.4.1.40.0|STRING|64QAM",  # modulationMode
                 "",
             ]
         )
@@ -147,13 +152,15 @@ def _build_v3_driver(
         vendor="cambium",
         model="pmp450i",
         firmware="15.2.1",
+        # Issue #35 — verified WHISP-APS-MIB positions:
+        # see ``data/oid-catalogs/sources/cambium/pmp450i/15.2.1.source.json``.
         oids={
-            "radioDownlinkRate": "1.3.6.1.4.1.161.19.3.1.1.1.0",
-            "radioUplinkRate": "1.3.6.1.4.1.161.19.3.1.1.2.0",
-            "signalStrengthRx": "1.3.6.1.4.1.161.19.3.1.1.3.0",
-            "signalStrengthTx": "1.3.6.1.4.1.161.19.3.1.1.4.0",
-            "ssr": "1.3.6.1.4.1.161.19.3.1.1.5.0",
-            "modulationMode": "1.3.6.1.4.1.161.19.3.1.1.6.0",
+            "radioDownlinkRate": "1.3.6.1.4.1.161.19.3.1.4.1.36.0",
+            "radioUplinkRate": "1.3.6.1.4.1.161.19.3.1.4.1.38.0",
+            "signalStrengthRx": "1.3.6.1.4.1.161.19.3.1.4.1.34.0",
+            "signalStrengthTx": "1.3.6.1.4.1.161.19.3.1.4.1.89.0",
+            "ssr": "1.3.6.1.4.1.161.19.3.1.4.1.86.0",
+            "modulationMode": "1.3.6.1.4.1.161.19.3.1.4.1.40.0",
         },
     )
     registry = OidCatalogRegistry(
