@@ -39,6 +39,7 @@ from nora.server import (  # noqa: E402
     register_tool_log_middleware,
     set_prompt_registry,
     set_runtime_state,
+    verify_tools_are_catalogued,
 )
 
 logger = logging.getLogger("nora.cli")
@@ -56,6 +57,13 @@ def main() -> None:
     catalog_registry = OidCatalogRegistry.verify_all(settings)
     inventory = Inventory.from_yaml(settings.nora_devices_inventory_path)
     set_driver(Pmp450iDriver(inventory=inventory, catalog_registry=catalog_registry))
+    # PR 5 (slice 5): refuse any `@mcp.tool` whose name is not in
+    # `OidCatalogRegistry.REQUIRED_OIDS_BY_TOOL[(vendor, model)]`. The
+    # guard runs BEFORE `mcp.run()` so a rogue registration aborts the
+    # boot — the tool is never exposed to MCP clients. The typed
+    # `UncataloguedToolError` carries the offending tool name so the
+    # operator can see which registration needs to be signed.
+    verify_tools_are_catalogued(catalog_registry)
     register_tool_log_middleware()
     logger.info(
         "nora-mcp boot complete: catalogs=%s devices=%s",
