@@ -15,14 +15,17 @@ into a deep submodule. The implementation lives in:
 from __future__ import annotations
 
 from nora.drivers.exceptions import (
+    AutonomousMutationRejected,
     CatalogNotFoundError,
     CatalogVerificationError,
     DeviceNotFoundError,
     DriverError,
+    MaintenanceWindowViolation,
     NetworkUnreachableError,
     PromptNotFoundError,
     RefusesWriteError,
     SnmpTimeoutError,
+    UncataloguedToolError,
 )
 from nora.drivers.registry import get_driver, set_driver
 
@@ -35,6 +38,10 @@ __all__ = [
     "CatalogNotFoundError",
     "CatalogVerificationError",
     "PromptNotFoundError",
+    # Slice-1 stubs (raise sites in PR 4 + PR 5).
+    "AutonomousMutationRejected",
+    "MaintenanceWindowViolation",
+    "UncataloguedToolError",
     "get_driver",
     "set_driver",
 ]

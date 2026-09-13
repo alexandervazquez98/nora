@@ -17,14 +17,17 @@ and the `Pmp450iDriver` facade so callers can write::
 from __future__ import annotations
 
 from nora.drivers.exceptions import (
+    AutonomousMutationRejected,
     CatalogNotFoundError,
     CatalogVerificationError,
     DeviceNotFoundError,
     DriverError,
+    MaintenanceWindowViolation,
     NetworkUnreachableError,
     PromptNotFoundError,
     RefusesWriteError,
     SnmpTimeoutError,
+    UncataloguedToolError,
 )
 from nora.drivers.inventory import Device, Inventory
 from nora.drivers.snmp_pmp450i.client import SnmpClient
@@ -46,6 +49,10 @@ __all__ = [
     "CatalogNotFoundError",
     "CatalogVerificationError",
     "PromptNotFoundError",
+    # Slice-1 stubs (raise sites in PR 4 + PR 5).
+    "AutonomousMutationRejected",
+    "MaintenanceWindowViolation",
+    "UncataloguedToolError",
     "Device",
     "Inventory",
     "SnmpClient",

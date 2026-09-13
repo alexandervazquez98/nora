@@ -9,6 +9,13 @@ Each spec scenario maps to a test that verifies a specific contract from
 * OidCatalog-R2-S1 — unknown firmware pin raises `CatalogNotFoundError`.
 * OidCatalog-R3-S2 — tampered catalog raises `CatalogVerificationError`.
 
+Slice 1 adds three typed exceptions reserved for slices 4 + 5:
+`AutonomousMutationRejected`, `MaintenanceWindowViolation`,
+`UncataloguedToolError`. The classes themselves are stub-only — the
+concrete raise sites land in their respective slices — but their
+inheritance + constructor contract must be pinned here so PR 1 ends
+with a wired seam.
+
 The test file is RED until `src/nora/drivers/exceptions.py` exists with
 the documented hierarchy.
 """
@@ -18,14 +25,17 @@ from __future__ import annotations
 import pytest
 
 from nora.drivers.exceptions import (
+    AutonomousMutationRejected,
     CatalogNotFoundError,
     CatalogVerificationError,
     DeviceNotFoundError,
     DriverError,
+    MaintenanceWindowViolation,
     NetworkUnreachableError,
     PromptNotFoundError,
     RefusesWriteError,
     SnmpTimeoutError,
+    UncataloguedToolError,
 )
 
 # ---------------------------------------------------------------------------
@@ -49,6 +59,11 @@ def test_driver_error_is_exception_base_class() -> None:
         CatalogNotFoundError,
         CatalogVerificationError,
         PromptNotFoundError,
+        # Slice-1 stubs that land in slices 4/5. The classes themselves
+        # ship here; their raise sites land later.
+        AutonomousMutationRejected,
+        MaintenanceWindowViolation,
+        UncataloguedToolError,
     ],
 )
 def test_every_driver_exception_inherits_from_driver_error(exc_cls: type[Exception]) -> None:
@@ -134,9 +149,48 @@ def test_catalog_verification_error_carries_path() -> None:
 
 
 def test_prompt_not_found_error_carries_name() -> None:
-    """PromptNotFoundError exposes the missing prompt name."""
+    """`PromptNotFoundError` exposes the missing prompt name."""
     exc = PromptNotFoundError("snmp_pmp450i")
     assert "snmp_pmp450i" in str(exc)
+
+
+# ---------------------------------------------------------------------------
+# Slice-1 stubs — AutonomousMutationRejected / MaintenanceWindowViolation /
+# UncataloguedToolError. Concrete raise sites land in slices 4 + 5.
+# ---------------------------------------------------------------------------
+
+
+def test_autonomous_mutation_rejected_carries_hitl_token_message() -> None:
+    """`AutonomousMutationRejected` carries the HITL-token-required message.
+
+    The literal message is asserted in the slice-4 test
+    `migrate_autonomous_call_raises_autonomous_mutation_rejected`; this
+    constructor test pins the wording so the seam stays auditable
+    before slice 4 wires its raise site.
+    """
+    exc = AutonomousMutationRejected(
+        "autonomous device mutation rejected: HITL approval token required"
+    )
+    assert "HITL approval token required" in str(exc)
+    assert isinstance(exc, DriverError)
+
+
+def test_maintenance_window_violation_carries_window_state() -> None:
+    """`MaintenanceWindowViolation` carries the violation context."""
+    exc = MaintenanceWindowViolation("outside maintenance window (02:00-04:00 UTC)")
+    assert "maintenance window" in str(exc)
+    assert isinstance(exc, DriverError)
+
+
+def test_uncatalogued_tool_error_carries_tool_name_and_reason() -> None:
+    """`UncataloguedToolError` carries the tool name + reason string."""
+    exc = UncataloguedToolError(
+        tool_name="snmp_get_rogue_metric",
+        reason="no OID catalog entry",
+    )
+    assert "snmp_get_rogue_metric" in str(exc)
+    assert "no OID catalog entry" in str(exc)
+    assert isinstance(exc, DriverError)
 
 
 # ---------------------------------------------------------------------------
@@ -166,6 +220,8 @@ def test_callers_can_catch_whole_hierarchy_with_driver_error() -> None:
         SnmpTimeoutError,
         CatalogNotFoundError,
         PromptNotFoundError,
+        AutonomousMutationRejected,
+        MaintenanceWindowViolation,
     ):
         try:
             raise exc_cls("probe")
@@ -173,3 +229,13 @@ def test_callers_can_catch_whole_hierarchy_with_driver_error() -> None:
             pass  # expected
         else:  # pragma: no cover - safety net
             pytest.fail(f"{exc_cls.__name__} was not caught by `except DriverError`")
+
+    # `UncataloguedToolError` takes keyword-only args (tool_name + reason)
+    # because the slice-5 boot guard needs the offending tool name in the
+    # exception payload. Catch it with the dedicated kwargs instead.
+    try:
+        raise UncataloguedToolError(tool_name="probe", reason="probe")
+    except DriverError:
+        pass  # expected
+    else:  # pragma: no cover - safety net
+        pytest.fail("UncataloguedToolError was not caught by `except DriverError`")
