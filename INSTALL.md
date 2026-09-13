@@ -153,6 +153,58 @@ get_device_lifecycle_summary
 correlate_sector_interference
 ```
 
+## Automated install
+
+Steps 1–5 above are reproducible from a single shell script:
+
+```bash
+sudo scripts/install.sh
+```
+
+The script is idempotent — re-running it on an already-installed host is a
+no-op with `[SKIP]` lines for each completed phase. Override the defaults
+when needed:
+
+```bash
+sudo scripts/install.sh \
+    --prefix /opt/nora \
+    --config-dir /etc/nora \
+    --state-dir /var/lib/nora \
+    --log-dir /var/log/nora \
+    --user nora
+```
+
+Useful flags:
+
+| Flag | Effect |
+|---|---|
+| `--dry-run` | Print every step without changing the filesystem. |
+| `--skip-signing-key` | Don't generate / overwrite `/etc/nora/signing_key`. |
+| `--skip-systemd` | Don't install / enable the systemd unit. |
+| `--skip-catalog` | Don't re-sign the OID catalogs. |
+| `--force-env-file` | Overwrite `/etc/nora/nora.env` from `.env.example`. |
+| `--user NAME` | Service-account username (default `nora`). |
+
+Always run `verify-install.sh` afterwards:
+
+```bash
+sudo scripts/verify-install.sh
+# or, machine-readable for CI:
+sudo scripts/verify-install.sh --json --strict
+```
+
+`verify-install.sh` checks binary versions, paths, file modes (signing_key
+must be `0600`, `nora.env` must be `0640` or `0600`), the systemd unit
+state, and — most importantly — spawns `nora-mcp` over stdio and validates
+the JSON-RPC handshake plus `tools/list` (4 expected tools) and
+`prompts/list` (2 expected prompts after the prompts subsystem landed).
+Exit codes: `0` = OK, `1` = at least one FAIL, `2` = `--strict` and any
+WARN.
+
+The manual steps above remain valid for operators who need to debug a
+specific phase; the script is a thin wrapper over the same procedure and
+not a separate code path.
+
 ## What is NOT covered here
 
 - **OpenChat integration**: NORA and OpenChat share
