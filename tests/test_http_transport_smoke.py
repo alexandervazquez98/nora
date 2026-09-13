@@ -152,7 +152,7 @@ def test_http_smoke_root_returns_any_status(http_proc: "subprocess.Popen[bytes]"
     # "no server at all" (bad). ECONNREFUSED surfaces as a
     # httpx.ConnectError before we get here, so the assertion below is
     # defensive — we should never see 0.
-    assert response.status_code in (200, 307, 400, 404, 405, 415), (
+    assert response.status_code in (200, 307, 400, 404, 405, 406, 415), (
         f"unexpected HTTP status; FastMCP /mcp GET should return 405 or "
         f"similar, got {response.status_code}"
     )

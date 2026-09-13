@@ -110,14 +110,10 @@ def test_default_stdio_invokes_mcp_run_with_transport_stdio(
         sentinel = type("S", (), {"nora_oid_catalogs_path": "", "nora_devices_inventory_path": ""})()
         mp.setattr(cli, "Settings", lambda: sentinel)
 
-        with pytest.raises(SystemExit) as ei:
-            cli.main(argv=["nora-mcp"])
+        cli.main(argv=[])
     finally:
         mp.undo()
 
-    assert ei.value.code == 0, (
-        f"default stdio boot must exit 0; got code={ei.value.code!r}"
-    )
     assert calls, "cli.main must invoke mcp.run exactly once"
     assert calls[0].get("transport") == "stdio", (
         f"default transport must be stdio; got call kwargs={calls[0]!r}"
@@ -165,12 +161,10 @@ def test_env_vars_select_transport_when_no_cli_flag(
         sentinel = type("S", (), {"nora_oid_catalogs_path": "", "nora_devices_inventory_path": ""})()
         mp.setattr(cli, "Settings", lambda: sentinel)
 
-        with pytest.raises(SystemExit) as ei:
-            cli.main(argv=["nora-mcp"])
+        cli.main(argv=[])
     finally:
         mp.undo()
 
-    assert ei.value.code == 0
     assert calls, "cli.main must invoke mcp.run exactly once"
     assert calls[0].get("transport") == "http", (
         f"NORA_MCP_TRANSPORT=http must select http; got {calls[0]!r}"
@@ -214,12 +208,10 @@ def test_cli_flags_override_env_vars(monkeypatch: object) -> None:
         sentinel = type("S", (), {"nora_oid_catalogs_path": "", "nora_devices_inventory_path": ""})()
         mp.setattr(cli, "Settings", lambda: sentinel)
 
-        with pytest.raises(SystemExit) as ei:
-            cli.main(argv=["nora-mcp", "--transport=http", "--port=9000"])
+        cli.main(argv=["--transport=http", "--port=9000"])
     finally:
         mp.undo()
 
-    assert ei.value.code == 0
     assert calls, "cli.main must invoke mcp.run exactly once"
     assert calls[0].get("transport") == "http"
     assert calls[0].get("port") == 9000, (
@@ -266,7 +258,7 @@ def test_invalid_transport_exits_2_with_stderr_naming_options(
         mp.setattr(cli, "Settings", lambda: sentinel)
 
         with pytest.raises(SystemExit) as ei:
-            cli.main(argv=["nora-mcp"])
+            cli.main(argv=[])
     finally:
         mp.undo()
 
@@ -333,7 +325,7 @@ def test_stateless_http_with_sse_rejected(
         mp.setattr(cli, "Settings", lambda: sentinel)
 
         with pytest.raises(SystemExit) as ei:
-            cli.main(argv=["nora-mcp", "--transport=sse", "--stateless-http"])
+            cli.main(argv=["--transport=sse", "--stateless-http"])
     finally:
         mp.undo()
 
@@ -375,7 +367,7 @@ def test_help_exits_zero_lists_transport_flag(
         mp.setattr(cli.mcp, "run", lambda *a, **kw: calls.append(kw))
 
         with pytest.raises(SystemExit) as ei:
-            cli.main(argv=["nora-mcp", "--help"])
+            cli.main(argv=["--help"])
     finally:
         mp.undo()
 
