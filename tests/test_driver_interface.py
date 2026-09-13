@@ -395,3 +395,104 @@ def test_inventory_path_still_works_no_regression(tmp_path: Path) -> None:
     assert report.device_id == "ap-7400-01"
     assert report.firmware == "15.2.1"
     assert report.modulation == "256QAM"
+
+
+# ---------------------------------------------------------------------------
+# Slice 2/3 stub coverage — `Pmp450iSnmpDriver.fetch_*` raises NotImplementedError
+# pointing at the slice that completes each method.
+# ---------------------------------------------------------------------------
+
+
+def test_registry_get_driver_raises_when_uninitialised() -> None:
+    """`get_driver()` raises `DriverError` when the singleton is None.
+
+    The boot-fatal contract: every code path that touches `get_driver()`
+    without first calling `set_driver(...)` from `__main__.main()`
+    surfaces a typed exception instead of returning a confusing None.
+    """
+    # Save/restore so the global singleton doesn't leak between tests.
+    import nora.drivers.registry as _registry
+    from nora.drivers import DriverError, get_driver, set_driver
+
+    saved = _registry._driver
+    _registry._driver = None
+    try:
+        with pytest.raises(DriverError) as exc_info:
+            get_driver()
+        assert "not initialised" in str(exc_info.value)
+    finally:
+        _registry._driver = saved
+        # Defensive: re-bind the module-level reference too in case
+        # get_driver is bound via the `from nora.drivers import ...`
+        # import path (mirrors what existing callers do).
+        set_driver(saved)
+
+
+def test_registry_accepts_both_driver_classes(tmp_path: Path) -> None:
+    """`set_driver(...)` accepts either `Pmp450iDriver` or `Pmp450iSnmpDriver`.
+
+    The union-typed singleton lets existing boot sequences pass the
+    legacy class while new boot sequences pass the Protocol adapter.
+    """
+    from nora.drivers import set_driver
+    from nora.drivers.snmp_pmp450i import Pmp450iDriver, Pmp450iSnmpDriver
+    from nora.drivers.snmp_pmp450i.client import SnmpClient
+
+    inv = _build_inventory(tmp_path)
+    registry = _build_catalog()
+
+    legacy = Pmp450iDriver(
+        inventory=inv,
+        catalog_registry=registry,
+        client_factory=lambda d: mock.MagicMock(spec=SnmpClient),
+    )
+    new = Pmp450iSnmpDriver(
+        inventory=inv,
+        catalog_registry=registry,
+        client_factory=lambda d: mock.MagicMock(spec=SnmpClient),
+    )
+
+    # Both must be accepted; the union widening pins the contract.
+    set_driver(legacy)
+    set_driver(new)
+    set_driver(None)
+
+
+# ---------------------------------------------------------------------------
+# Slice 2/3 stub coverage — `Pmp450iSnmpDriver.fetch_*` raises NotImplementedError
+# pointing at the slice that completes each method.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "method_name",
+    [
+        "fetch_ap_summary",
+        "fetch_frame_utilization",
+        "fetch_sm_table",
+        "fetch_sm_detailed_diagnostics",
+    ],
+)
+def test_slice_2_and_3_stubs_raise_not_implemented(method_name: str, tmp_path: Path) -> None:
+    """The four `fetch_*` stubs raise `NotImplementedError` with slice pointers.
+
+    PR 1 ships the Protocol surface; the bodies land in PR 2/3. Each
+    stub cites the slice + phase so a future contributor can find the
+    implementation site without grepping the codebase.
+    """
+    from nora.drivers.snmp_pmp450i import Pmp450iSnmpDriver
+
+    inv = _build_inventory(tmp_path)
+    registry = _build_catalog()
+    driver = Pmp450iSnmpDriver(
+        inventory=inv,
+        catalog_registry=registry,
+        client_factory=lambda d: mock.MagicMock(),
+    )
+
+    with pytest.raises(NotImplementedError) as exc_info:
+        getattr(driver, method_name)("ap-7400-01")
+    message = str(exc_info.value)
+    assert "PR " in message, (
+        f"{method_name!r} stub must reference the PR that lands it; got: {message!r}"
+    )
