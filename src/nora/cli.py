@@ -255,14 +255,27 @@ def main(argv: Sequence[str] | None = None) -> None:
     # Forward the resolved transport + kwargs to FastMCP. `show_banner=False`
     # keeps stderr clean of the FastMCP ASCII art + pypi.org update probe.
     # `cast` is safe: `_validate_transport` already raised on a bad value.
-    mcp.run(
-        transport=cast("TransportLiteral", config.transport),
-        host=config.host,
-        port=config.port,
-        path=config.path,
-        stateless_http=config.stateless_http,
-        show_banner=False,
-    )
+    #
+    # FastMCP's `run_stdio_async()` only accepts `show_banner / log_level /
+    # stateless`; passing `host / port / path / stateless_http` raises
+    # `TypeError`. So we forward the network kwargs ONLY when the chosen
+    # transport is HTTP-shaped (`http`, `streamable-http`, `sse`). For
+    # stdio we pass just `show_banner=False` — exactly what the previous
+    # `mcp.run(show_banner=False)` call site did.
+    if config.transport == "stdio":
+        mcp.run(
+            transport=cast("TransportLiteral", config.transport),
+            show_banner=False,
+        )
+    else:
+        mcp.run(
+            transport=cast("TransportLiteral", config.transport),
+            host=config.host,
+            port=config.port,
+            path=config.path,
+            stateless_http=config.stateless_http,
+            show_banner=False,
+        )
 
 
 if __name__ == "__main__":
