@@ -461,6 +461,11 @@ def test_registry_accepts_both_driver_classes(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # Slice 2/3 stub coverage — `Pmp450iSnmpDriver.fetch_*` raises NotImplementedError
 # pointing at the slice that completes each method.
+#
+# PR 3 (slice 3) shipped both ``fetch_sm_table`` and
+# ``fetch_sm_detailed_diagnostics`` so the parametrize list is now
+# empty. Slice 4 (``spectrum`` + ``migrate``) ships in PR 4 — its
+# stubs land there, not here.
 # ---------------------------------------------------------------------------
 
 
@@ -470,9 +475,9 @@ def test_registry_accepts_both_driver_classes(tmp_path: Path) -> None:
         # Slice 2 (PR 2) — implemented; no longer stub.
         # "fetch_ap_summary",
         # "fetch_frame_utilization",
-        # Slice 3 — still stub; lands in PR 3.
-        "fetch_sm_table",
-        "fetch_sm_detailed_diagnostics",
+        # Slice 3 (PR 3) — implemented; no longer stub.
+        # "fetch_sm_table",
+        # "fetch_sm_detailed_diagnostics",
     ],
 )
 def test_slice_3_stubs_raise_not_implemented(method_name: str, tmp_path: Path) -> None:
@@ -480,9 +485,10 @@ def test_slice_3_stubs_raise_not_implemented(method_name: str, tmp_path: Path) -
 
     PR 1 ships the Protocol surface; slice 2 (`fetch_ap_summary` +
     `fetch_frame_utilization`) lands in PR 2 — see
-    ``tests/test_snmp_summaries.py``. Slice 3 stubs remain until PR 3.
-    Each stub cites the slice + phase so a future contributor can find
-    the implementation site without grepping the codebase.
+    ``tests/test_snmp_summaries.py``. Slice 3 (`fetch_sm_table` +
+    `fetch_sm_detailed_diagnostics`) lands in PR 3 — see
+    ``tests/test_snmp_subscribers.py``. The remaining stubs (slice 4
+    `spectrum` + `migrate`) ship in PR 4.
     """
     from nora.drivers.snmp_pmp450i import Pmp450iSnmpDriver
 
