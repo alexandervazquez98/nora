@@ -191,11 +191,13 @@ def test_python_dash_m_nora_emits_deprecation_warning(tmp_path: Path) -> None:
     tool_names = {t.get("name") for t in tools}
     expected = {
         "snmp_get_pmp450i_radio_metrics",
+        "snmp_get_ap_summary",
+        "snmp_get_frame_utilization",
         "search_intervention_history",
         "get_device_lifecycle_summary",
         "correlate_sector_interference",
         "save_intervention_record",
     }
     assert tool_names == expected, (
-        f"`python -m nora` must expose the same 5 tools as nora-mcp; got {tool_names}"
+        f"`python -m nora` must expose the same 7 tools as nora-mcp; got {tool_names}"
     )

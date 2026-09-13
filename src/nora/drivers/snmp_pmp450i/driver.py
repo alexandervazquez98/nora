@@ -235,21 +235,42 @@ class Pmp450iSnmpDriver(Pmp450iDriver):
                 pass
         return _parse_sysdescr_version(str(raw_value))
 
-    # -- slice 2 (stubs) ---------------------------------------------------
+    # -- slice 2 ----------------------------------------------------------
 
     def fetch_ap_summary(self, device_id: str) -> Any:
-        """Slice 2 method — lands in PR 2 (`snmp_get_ap_summary`)."""
-        raise NotImplementedError(
-            "Pmp450iSnmpDriver.fetch_ap_summary lands in PR 2 "
-            "(snmp_get_ap_summary); see tasks.md phase 2.6"
-        )
+        """Return a typed ``ApSummary`` for ``device_id``.
+
+        Slice 2 implementation: delegates to ``summaries.fetch_ap_summary``
+        which resolves the catalog, opens a client, fetches one wire
+        GET per AP-summary OID name, and folds the response into a
+        typed Pydantic model. Missing fields become ``None`` (with a
+        literal ``"OID catalog fallback: ..."`` warning); wire
+        failures surface as typed driver exceptions via the Protocol
+        seam.
+
+        Per `pmp450i-radio-tools/spec.md` sub-cluster 1 requirement
+        "Both tools SHALL ... MUST call ``OidCatalogRegistry.resolve``
+        before any wire frame".
+        """
+        from nora.drivers.snmp_pmp450i.summaries import fetch_ap_summary
+
+        return fetch_ap_summary(driver=self, device_id=device_id)
 
     def fetch_frame_utilization(self, device_id: str) -> Any:
-        """Slice 2 method — lands in PR 2 (`snmp_get_frame_utilization`)."""
-        raise NotImplementedError(
-            "Pmp450iSnmpDriver.fetch_frame_utilization lands in PR 2 "
-            "(snmp_get_frame_utilization); see tasks.md phase 2.6"
-        )
+        """Return a typed ``FrameUtilization`` for ``device_id``.
+
+        Slice 2 implementation: delegates to ``summaries.fetch_frame_utilization``
+        which resolves the catalog, opens a client, fetches one wire
+        GET per frame-utilisation OID name, and folds the response into
+        a typed Pydantic model.
+
+        Per `pmp450i-radio-tools/spec.md` sub-cluster 1 requirement
+        "Both tools SHALL ... MUST call ``OidCatalogRegistry.resolve``
+        before any wire frame".
+        """
+        from nora.drivers.snmp_pmp450i.summaries import fetch_frame_utilization
+
+        return fetch_frame_utilization(driver=self, device_id=device_id)
 
     # -- slice 3 (stubs) ---------------------------------------------------
 

@@ -467,18 +467,22 @@ def test_registry_accepts_both_driver_classes(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "method_name",
     [
-        "fetch_ap_summary",
-        "fetch_frame_utilization",
+        # Slice 2 (PR 2) — implemented; no longer stub.
+        # "fetch_ap_summary",
+        # "fetch_frame_utilization",
+        # Slice 3 — still stub; lands in PR 3.
         "fetch_sm_table",
         "fetch_sm_detailed_diagnostics",
     ],
 )
-def test_slice_2_and_3_stubs_raise_not_implemented(method_name: str, tmp_path: Path) -> None:
-    """The four `fetch_*` stubs raise `NotImplementedError` with slice pointers.
+def test_slice_3_stubs_raise_not_implemented(method_name: str, tmp_path: Path) -> None:
+    """The remaining `fetch_*` stubs raise `NotImplementedError` with slice pointers.
 
-    PR 1 ships the Protocol surface; the bodies land in PR 2/3. Each
-    stub cites the slice + phase so a future contributor can find the
-    implementation site without grepping the codebase.
+    PR 1 ships the Protocol surface; slice 2 (`fetch_ap_summary` +
+    `fetch_frame_utilization`) lands in PR 2 — see
+    ``tests/test_snmp_summaries.py``. Slice 3 stubs remain until PR 3.
+    Each stub cites the slice + phase so a future contributor can find
+    the implementation site without grepping the codebase.
     """
     from nora.drivers.snmp_pmp450i import Pmp450iSnmpDriver
 

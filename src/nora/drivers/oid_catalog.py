@@ -64,20 +64,40 @@ logger = logging.getLogger("nora.drivers.oid_catalog")
 _REQUIRED_OIDS_BY_VENDOR_MODEL: Final[dict[tuple[str, str], frozenset[str]]] = {
     ("cambium", "pmp450i"): frozenset(
         {
+            # Radio-metrics seed (PR 1).
             "radioDownlinkRate",
             "radioUplinkRate",
             "signalStrengthRx",
             "signalStrengthTx",
             "ssr",
             "modulationMode",
+            # Read-summary additions (PR 2 — slice 2).
+            "apFirmwareVersion",
+            "subscribersCount",
+            "frameUtilizationDlPct",
+            "frameUtilizationUlPct",
         }
     ),
 }
 
 # Derived alias — what the existing driver import and the R5 test assert
-# against. New code SHOULD use `_REQUIRED_OIDS_BY_VENDOR_MODEL[...]` so a
-# second vendor is additive.
-REQUIRED_OIDS: Final[frozenset[str]] = _REQUIRED_OIDS_BY_VENDOR_MODEL[("cambium", "pmp450i")]
+# against. ``Pmp450iDriver._fetch_all`` iterates ``REQUIRED_OIDS`` for
+# ``fetch_radio_metrics`` and MUST stay scoped to the radio-metrics
+# subset; PR 2's read-summary OIDs live in the per-`(vendor, model)`
+# set above (catalog-verification gate) but are NOT iterated by the
+# radio-metrics driver path. The summary helpers in
+# ``nora.drivers.snmp_pmp450i.summaries`` look up the summary OIDs
+# directly against the resolved catalog's ``oids`` dict.
+REQUIRED_OIDS: Final[frozenset[str]] = frozenset(
+    {
+        "radioDownlinkRate",
+        "radioUplinkRate",
+        "signalStrengthRx",
+        "signalStrengthTx",
+        "ssr",
+        "modulationMode",
+    }
+)
 
 
 class OidCatalog(BaseModel):
