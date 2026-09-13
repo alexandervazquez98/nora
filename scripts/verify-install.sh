@@ -7,9 +7,10 @@
 # binaries present + version-pinned, paths + files exist, signing_key has
 # mode 0600 owned by nora:nora, nora.env has mode 0640 (or 0600), systemd
 # is active, and the running daemon responds over JSON-RPC with the
-# canonical 4 tools + 2 prompts (snmp_get_pmp450i_radio_metrics,
+# canonical 5 tools + 2 prompts (snmp_get_pmp450i_radio_metrics,
 # search_intervention_history, get_device_lifecycle_summary,
-# correlate_sector_interference / netops_orchestrator, snmp_pmp450i).
+# correlate_sector_interference, save_intervention_record /
+# netops_orchestrator, snmp_pmp450i).
 #
 # Exit codes:
 #   0  all OK or all WARN (default mode)
@@ -473,8 +474,8 @@ check_functional() {
                 if [ "${name}" = "nora" ]; then init_ok=1; fi
                 ;;
             2)
-                # tools/list → exactly the four canonical tool names.
-                expected="snmp_get_pmp450i_radio_metrics search_intervention_history get_device_lifecycle_summary correlate_sector_interference"
+                # tools/list → exactly the five canonical tool names.
+                expected="snmp_get_pmp450i_radio_metrics search_intervention_history get_device_lifecycle_summary correlate_sector_interference save_intervention_record"
                 actual="$(json_get "${line}" '" ".join(t.get("name", "") for t in data.get("result", {}).get("tools", []))' 2>/dev/null || echo "")"
                 if [ "${actual}" = "${expected}" ]; then tools_ok=1; fi
                 ;;
