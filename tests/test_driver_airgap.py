@@ -85,6 +85,22 @@ def test_no_banned_imports_in_driver_layer() -> None:
     )
 
 
+def test_resolver_path_is_in_ast_walked_set() -> None:
+    """The new `drivers/resolver.py` module is covered by the static AST scan.
+
+    The IP-direct resolution path introduced for #14 must not regress
+    the air-gap: any banned import that lands in `resolver.py` must be
+    caught by `_iter_python_files`. This test pins `drivers/resolver.py`
+    to the walked set so a future refactor that narrows the rglob
+    (e.g. an allow-list) cannot silently exclude the new module.
+    """
+    walked = {p.relative_to(PROJECT_ROOT).as_posix() for p in _iter_python_files()}
+    assert "src/nora/drivers/resolver.py" in walked, (
+        f"src/nora/drivers/resolver.py is not in the AST-walked set: "
+        f"{sorted(p for p in walked if 'drivers' in p)}"
+    )
+
+
 def test_no_banned_dotted_attribute_paths() -> None:
     """Inline references to `urllib.request.urlopen(...)` etc. are banned."""
     offenders: list[tuple[str, int, str]] = []

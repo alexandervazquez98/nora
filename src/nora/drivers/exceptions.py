@@ -17,6 +17,16 @@ Contract map (from the change specs):
                                    schema failure, or key rotation.
 * `PromptNotFoundError`         — Prompt-R4 / R5: missing or invalid
                                    prompt at boot.
+
+Slice-1 stubs (raise sites land in PR 4 + PR 5):
+
+* `AutonomousMutationRejected`  — slice 4 (HITL-gated migration).
+* `MaintenanceWindowViolation`  — slice 4 (spectrum sweep window).
+* `UncataloguedToolError`       — slice 5 (registration-time guard).
+
+The classes are intentionally defined here ahead of their raise sites
+so that downstream code can `import` the names and wire them into
+`except` clauses without requiring slice 4/5 to land first.
 """
 
 from __future__ import annotations
@@ -93,6 +103,65 @@ class PromptNotFoundError(DriverError):
     """
 
 
+# ---------------------------------------------------------------------------
+# Slice-1 stubs — concrete raise sites land in PR 4 (HITL-gated migration +
+# spectrum sweep) and PR 5 (tool-registration guard). The classes are
+# defined here so downstream imports stay stable across the chain.
+# ---------------------------------------------------------------------------
+
+
+class AutonomousMutationRejected(DriverError):
+    """Raised when code attempts to mutate a device without an HITL token.
+
+    Slice 4 / PR 4 — the migration tool (`snmp_migrate_radio_frequency`)
+    calls `hitl.tokens.verify_approval_token(...)` first; missing or
+    invalid tokens raise this exception. The literal wording
+    ``"autonomous device mutation rejected: HITL approval token
+    required"`` is asserted in
+    `tests/test_hitl_tokens.py::migrate_autonomous_call_raises_autonomous_mutation_rejected`
+    (slice 4); pinning it here as the canonical exception keeps the
+    contract auditable before slice 4 lands.
+
+    Slice-1 invariant: the class MUST inherit from `DriverError` so a
+    caller writing `except DriverError` catches it without special-case
+    imports.
+    """
+
+
+class MaintenanceWindowViolation(DriverError):
+    """Raised when a tool call lands outside the operator's maintenance window.
+
+    Slice 4 / PR 4 — `snmp_pmp450i.spectrum.fetch_spectrum` queries
+    `Settings.nora_maintenance_window_*` and refuses the call when
+    ``now`` falls outside the configured window. The typed exception
+    lets the caller distinguish "we're not allowed to touch this now"
+    from generic `NetworkUnreachableError` / `SnmpTimeoutError`.
+
+    Defined here as a stub so the spectrum module can import the
+    name at PR 4 without waiting on this module to grow.
+    """
+
+
+class UncataloguedToolError(DriverError):
+    """Raised when an `@mcp.tool` is registered without an OID catalog entry.
+
+    Slice 5 / PR 5 — `cli.py` walks the registered tools at boot and
+    raises this for any tool name absent from
+    `OidCatalogRegistry.required_oids_by_tool((vendor, model))`.
+    Without this guard, slice 2/3/4 tools could ship with no catalog
+    reference and silently miss the runtime warning from
+    `OidCatalogRegistry.resolve`.
+
+    Constructor takes ``tool_name`` and ``reason`` (both keyword-only)
+    so the boot error message points at the offending tool.
+    """
+
+    def __init__(self, *, tool_name: str, reason: str) -> None:
+        super().__init__(f"{tool_name}: {reason}")
+        self.tool_name = tool_name
+        self.reason = reason
+
+
 __all__ = [
     "DriverError",
     "RefusesWriteError",
@@ -102,4 +171,8 @@ __all__ = [
     "CatalogNotFoundError",
     "CatalogVerificationError",
     "PromptNotFoundError",
+    # Slice-1 stubs (raise sites in PR 4 + PR 5).
+    "AutonomousMutationRejected",
+    "MaintenanceWindowViolation",
+    "UncataloguedToolError",
 ]
