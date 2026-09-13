@@ -79,10 +79,20 @@ OID_CATALOG_V1: dict[str, str] = {
     "subscribersCount": "1.3.6.1.4.1.161.19.3.1.1.60.0",
     "frameUtilizationDlPct": "1.3.6.1.4.1.161.19.3.1.1.53.0",
     "frameUtilizationUlPct": "1.3.6.1.4.1.161.19.3.1.1.54.0",
+    # PR 3 — slice 3 SM-table additions (sub-cluster 2 — unbiased baseline).
+    "smSessionUptime": "1.3.6.1.4.1.161.19.3.2.1.70.0",
+    "smCinr": "1.3.6.1.4.1.161.19.3.2.1.71.0",
+    "smLinkStatus": "1.3.6.1.4.1.161.19.3.2.1.72.0",
+    "smLuid": "1.3.6.1.4.1.161.19.3.2.1.73.0",
+    # PR 3 — slice 3 SM diagnostics additions.
+    "smJitter": "1.3.6.1.4.1.161.19.3.2.1.80.0",
+    "smRetransmits": "1.3.6.1.4.1.161.19.3.2.1.81.0",
+    "smRxLevel": "1.3.6.1.4.1.161.19.3.2.1.82.0",
+    "smTxLevel": "1.3.6.1.4.1.161.19.3.2.1.83.0",
 }
 
 
-# Per-tool OID-name map — slice 2 surface (PR 2).
+# Per-tool OID-name map — slices 2 + 3 surface (PR 2 + PR 3).
 #
 # The catalog envelope carries this map so PR 5 can build the
 # ``REQUIRED_OIDS_BY_TOOL`` index at boot. The keys are MCP tool
@@ -93,7 +103,11 @@ OID_CATALOG_V1: dict[str, str] = {
 # (``frequency``, ``channelBandwidth``, ``transmitPower``, ``upTime``)
 # from the v1 radio-metrics seed so the read tool has the full
 # carrier/channel/tx-power picture without forcing slice 2 to add
-# more dotted OIDs.
+# more dotted OIDs. PR 3's ``snmp_get_sm_table`` reads the SM-table
+# subtree (one ``walk`` per OID-name base) and folds the response into
+# a typed ``SubscriberSummary``; ``snmp_get_sm_detailed_diagnostics``
+# reads the four per-SM diagnostics OIDs via individual ``get_oid``
+# calls.
 TOOLS_V1: dict[str, list[str]] = {
     "snmp_get_ap_summary": [
         "apFirmwareVersion",
@@ -106,6 +120,19 @@ TOOLS_V1: dict[str, list[str]] = {
     "snmp_get_frame_utilization": [
         "frameUtilizationDlPct",
         "frameUtilizationUlPct",
+    ],
+    "snmp_get_sm_table": [
+        "smSessionUptime",
+        "smCinr",
+        "smLinkStatus",
+        "smLuid",
+    ],
+    "snmp_get_sm_detailed_diagnostics": [
+        "smJitter",
+        "smCinr",
+        "smRetransmits",
+        "smRxLevel",
+        "smTxLevel",
     ],
 }
 

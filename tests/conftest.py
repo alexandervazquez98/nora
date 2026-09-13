@@ -30,6 +30,10 @@ import pytest
 # subset of the production catalog (radio-metrics seed + summary
 # additions + the legacy OIDs ``summaries.py`` reuses) so the
 # verification path is exercised end-to-end.
+# PR 3 (slice 3 of `2026-09-13-pmp450i-production-surface`) extends
+# the fixture with the eight NEW SM-table / diagnostics OID names so
+# the verification gate accepts the sample for the SM-table helpers
+# in `nora.drivers.snmp_pmp450i.subscribers`.
 _SAMPLE_CATALOG_PAYLOAD: dict[str, str] = {
     "radioDownlinkRate": "1.3.6.1.4.1.161.19.3.1.1.1.0",
     "radioUplinkRate": "1.3.6.1.4.1.161.19.3.1.1.2.0",
@@ -42,6 +46,16 @@ _SAMPLE_CATALOG_PAYLOAD: dict[str, str] = {
     "subscribersCount": "1.3.6.1.4.1.161.19.3.1.1.60.0",
     "frameUtilizationDlPct": "1.3.6.1.4.1.161.19.3.1.1.53.0",
     "frameUtilizationUlPct": "1.3.6.1.4.1.161.19.3.1.1.54.0",
+    # PR 3 — slice 3 SM-table additions.
+    "smSessionUptime": "1.3.6.1.4.1.161.19.3.2.1.70.0",
+    "smCinr": "1.3.6.1.4.1.161.19.3.2.1.71.0",
+    "smLinkStatus": "1.3.6.1.4.1.161.19.3.2.1.72.0",
+    "smLuid": "1.3.6.1.4.1.161.19.3.2.1.73.0",
+    # PR 3 — slice 3 SM diagnostics additions.
+    "smJitter": "1.3.6.1.4.1.161.19.3.2.1.80.0",
+    "smRetransmits": "1.3.6.1.4.1.161.19.3.2.1.81.0",
+    "smRxLevel": "1.3.6.1.4.1.161.19.3.2.1.82.0",
+    "smTxLevel": "1.3.6.1.4.1.161.19.3.2.1.83.0",
 }
 
 # Deterministic key for HMAC verification in tests. NOT for production.
