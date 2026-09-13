@@ -488,7 +488,7 @@ check_functional() {
             3)
                 # prompts/list → exactly the two canonical prompt names.
                 expected="netops_orchestrator snmp_pmp450i"
-                actual="$(json_get "${line}" '" ".join(p.get("name", "") for t in data.get("result", {}).get("prompts", []))' 2>/dev/null || echo "")"
+                actual="$(json_get "${line}" '" ".join(p.get("name", "") for p in data.get("result", {}).get("prompts", []))' 2>/dev/null || echo "")"
                 if [ "${actual}" = "${expected}" ]; then prompts_ok=1; fi
                 ;;
         esac
