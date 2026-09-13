@@ -23,20 +23,21 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SRC_DIR = PROJECT_ROOT / "src" / "nora"
 
 
-def test_server_exposes_exactly_nine_tools() -> None:
-    """After adding the SM-table + per-LUID diagnostics tools (PR 3), the
-    FastMCP instance exposes exactly 9 tools.
+def test_server_exposes_exactly_eleven_tools() -> None:
+    """The FastMCP instance exposes exactly 11 tools.
 
-    The nine tools are: 1 driver (`snmp_get_pmp450i_radio_metrics`)
+    The eleven tools are: 1 driver (`snmp_get_pmp450i_radio_metrics`)
     + 2 read-summary (`snmp_get_ap_summary`, `snmp_get_frame_utilization`)
     + 2 SM baseline (`snmp_get_sm_table`, `snmp_get_sm_detailed_diagnostics`)
+    + 1 spectrum sweep (`snmp_run_spectrum_analysis`)
+    + 1 HITL-gated migration (`snmp_migrate_radio_frequency`)
     + 3 intervention read (`search_intervention_history`,
     `get_device_lifecycle_summary`, `correlate_sector_interference`)
     + 1 writer (`save_intervention_record`).
 
-    PR 4 (slice 4 commit 2) added ``snmp_run_spectrum_analysis`` AND
-    commit 3 added ``snmp_migrate_radio_frequency`` — the expected
-    set is therefore 11 tools post-merge.
+    The surface grew from 5 → 7 (PR 2) → 9 (PR 3) → 11 (PR 4).
+    This test was renamed from ``test_server_exposes_exactly_nine_tools``
+    in PR 5 to track the current contract.
     """
     import asyncio
 
