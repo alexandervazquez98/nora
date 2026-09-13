@@ -163,6 +163,57 @@ def snmp_get_pmp450i_radio_metrics(device_id: str) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# PMP 450i read-summary tools — slice 2 (PR 2 of
+# `2026-09-13-pmp450i-production-surface`).
+#
+# Both tools delegate to `nora.drivers.snmp_pmp450i.summaries` helpers
+# which resolve the catalog, open a client, and fold the wire response
+# into a typed Pydantic model. The minor-mismatch fallback is emitted
+# through `OidCatalogRegistry.resolve` so the literal
+# `"OID catalog fallback: requested X, using Y (minor mismatch)"` line
+# reaches stderr for every tool caller (per `oid-catalog/spec.md`
+# MODIFIED scenario "minor mismatch returns closest lower minor with
+# literal warning via the tool path").
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool
+def snmp_get_ap_summary(device_id: str) -> dict[str, Any]:
+    """Read a typed AP summary for the named PMP 450i device.
+
+    Returns an `ApSummary` carrying firmware, carrier frequency,
+    channel width, tx power, subscriber count, and sys uptime. Every
+    field is a typed scalar (`str | int | None`); missing OIDs fall
+    back to ``None`` with a literal ``"OID catalog fallback: ..."``
+    warning rather than crashing the wire frame.
+
+    Per `pmp450i-radio-tools/spec.md` sub-cluster 1 requirement:
+    "Both tools SHALL ... MUST call ``OidCatalogRegistry.resolve``
+    before any wire frame".
+    """
+    from nora.drivers.snmp_pmp450i.summaries import fetch_ap_summary
+
+    driver = get_driver()
+    summary = fetch_ap_summary(driver=driver, device_id=device_id)
+    return summary.model_dump(mode="json")
+
+
+@mcp.tool
+def snmp_get_frame_utilization(device_id: str) -> dict[str, Any]:
+    """Read a typed frame-utilization report for the named PMP 450i device.
+
+    Returns a `FrameUtilization` carrying downlink + uplink percentages
+    as typed floats. Same catalog-fallback contract as
+    ``snmp_get_ap_summary``.
+    """
+    from nora.drivers.snmp_pmp450i.summaries import fetch_frame_utilization
+
+    driver = get_driver()
+    utilization = fetch_frame_utilization(driver=driver, device_id=device_id)
+    return utilization.model_dump(mode="json")
+
+
+# ---------------------------------------------------------------------------
 # Intervention memory MCP tools (read-only).
 # ---------------------------------------------------------------------------
 
@@ -364,6 +415,8 @@ __all__ = [
     "set_prompt_registry",
     "get_prompt_registry",
     "snmp_get_pmp450i_radio_metrics",
+    "snmp_get_ap_summary",
+    "snmp_get_frame_utilization",
     "search_intervention_history",
     "get_device_lifecycle_summary",
     "correlate_sector_interference",

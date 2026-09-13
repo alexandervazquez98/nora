@@ -23,10 +23,11 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SRC_DIR = PROJECT_ROOT / "src" / "nora"
 
 
-def test_server_exposes_exactly_five_tools() -> None:
-    """After adding the writer, the FastMCP instance exposes exactly 5 tools.
+def test_server_exposes_exactly_seven_tools() -> None:
+    """After adding the read-summary tools, the FastMCP instance exposes exactly 7 tools.
 
-    The five tools are: 1 driver (`snmp_get_pmp450i_radio_metrics`)
+    The seven tools are: 1 driver (`snmp_get_pmp450i_radio_metrics`)
+    + 2 read-summary (`snmp_get_ap_summary`, `snmp_get_frame_utilization`)
     + 3 intervention read (`search_intervention_history`,
     `get_device_lifecycle_summary`, `correlate_sector_interference`)
     + 1 writer (`save_intervention_record`).
@@ -42,13 +43,15 @@ def test_server_exposes_exactly_five_tools() -> None:
     names = asyncio.run(_names())
     expected = {
         "snmp_get_pmp450i_radio_metrics",
+        "snmp_get_ap_summary",
+        "snmp_get_frame_utilization",
         "search_intervention_history",
         "get_device_lifecycle_summary",
         "correlate_sector_interference",
         "save_intervention_record",
     }
     assert names == expected, (
-        f"Expected exactly 5 tools; got {sorted(names)} "
+        f"Expected exactly 7 tools; got {sorted(names)} "
         f"(missing: {sorted(expected - names)}, extra: {sorted(names - expected)})"
     )
 
@@ -359,8 +362,8 @@ def test_mcp_tool_wrapper_delegates_to_pure_library_function(tmp_path: Path) -> 
     assert result.data == sentinel
 
 
-def test_mcp_instance_exposes_all_nine_tools() -> None:  # noqa: F811 — alias kept for history
-    """Deprecated: use `test_server_exposes_exactly_five_tools` instead."""
+def test_mcp_instance_exposes_all_seven_tools() -> None:  # noqa: F811 — alias kept for history
+    """Deprecated: use `test_server_exposes_exactly_seven_tools` instead."""
     import asyncio
 
     from nora import server as server_mod
@@ -370,16 +373,19 @@ def test_mcp_instance_exposes_all_nine_tools() -> None:  # noqa: F811 — alias 
         return {t.name for t in tools}
 
     names = asyncio.run(_names())
-    # Post-thin-split + writer: exactly 5 tools. This alias test exists so any
-    # accidentally re-added legacy tool fails the test loudly.
+    # Post-thin-split + writer + slice 2 read-summary tools: exactly 7
+    # tools. This alias test exists so any accidentally re-added legacy
+    # tool fails the test loudly.
     expected = {
         "snmp_get_pmp450i_radio_metrics",
+        "snmp_get_ap_summary",
+        "snmp_get_frame_utilization",
         "search_intervention_history",
         "get_device_lifecycle_summary",
         "correlate_sector_interference",
         "save_intervention_record",
     }
-    assert names == expected, f"Expected exactly 5 tools after writer added; got: {sorted(names)}"
+    assert names == expected, f"Expected exactly 7 tools after slice 2; got: {sorted(names)}"
 
 
 def test_free_text_fields_in_search_output_sanitized_via_mcp_wrapper(tmp_path: Path) -> None:

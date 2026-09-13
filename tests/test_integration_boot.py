@@ -164,8 +164,8 @@ def _boot_env(tmp_path: Path) -> dict[str, str]:
     }
 
 
-def test_subprocess_nora_mcp_exposes_five_tools(tmp_path: Path) -> None:
-    """Boot the `nora-mcp` console script and assert the 5-tool surface."""
+def test_subprocess_nora_mcp_exposes_seven_tools(tmp_path: Path) -> None:
+    """Boot the `nora-mcp` console script and assert the 7-tool surface."""
     # The `nora-mcp` console script lives in `.venv/bin/`. uv installs it
     # from the `[project.scripts]` entry in `pyproject.toml`.
     nora_mcp = PROJECT_ROOT / ".venv" / "bin" / "nora-mcp"
@@ -180,20 +180,22 @@ def test_subprocess_nora_mcp_exposes_five_tools(tmp_path: Path) -> None:
 
     expected = [
         "snmp_get_pmp450i_radio_metrics",
+        "snmp_get_ap_summary",
+        "snmp_get_frame_utilization",
         "search_intervention_history",
         "get_device_lifecycle_summary",
         "correlate_sector_interference",
         "save_intervention_record",
     ]
     assert tool_names == expected, (
-        f"`nora-mcp` must expose exactly the 5 thin tools in order; got {tool_names!r}"
+        f"`nora-mcp` must expose exactly the 7 thin tools in order; got {tool_names!r}"
     )
     # The boot log line is on stderr.
     assert "nora-mcp boot complete" in stderr, f"Expected startup log on stderr; got: {stderr!r}"
 
 
 def test_subprocess_python_dash_m_nora_exposes_same_tools(tmp_path: Path) -> None:
-    """Boot `python -m nora` and assert the SAME 5-tool surface as nora-mcp."""
+    """Boot `python -m nora` and assert the SAME 7-tool surface as nora-mcp."""
     py = _venv_python()
 
     tool_names, stderr = _drive_tools_list(
@@ -204,13 +206,15 @@ def test_subprocess_python_dash_m_nora_exposes_same_tools(tmp_path: Path) -> Non
 
     expected = [
         "snmp_get_pmp450i_radio_metrics",
+        "snmp_get_ap_summary",
+        "snmp_get_frame_utilization",
         "search_intervention_history",
         "get_device_lifecycle_summary",
         "correlate_sector_interference",
         "save_intervention_record",
     ]
     assert tool_names == expected, (
-        f"`python -m nora` must expose exactly the 5 thin tools in order; got {tool_names!r}"
+        f"`python -m nora` must expose exactly the 7 thin tools in order; got {tool_names!r}"
     )
     # DeprecationWarning is emitted on stderr.
     assert "DeprecationWarning" in stderr, (
