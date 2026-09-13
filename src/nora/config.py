@@ -159,4 +159,32 @@ class Settings(BaseSettings):
         )
 
 
-__all__ = ["Settings", "LoadSource"]
+def hitl_kill_switch_active() -> bool:
+    """Return True when the operator has disabled HITL via the kill switch.
+
+    The HITL approval-token verifier at ``nora.hitl.tokens`` honours an
+    operational backout escape hatch: setting the
+    ``NORA_HITL_TOKEN_TTL_SECONDS`` environment variable to ``0``
+    disables HITL acceptance even for well-formed, unexpired tokens.
+
+    The kill switch lives here (and reads the process environment
+    directly) so the operator can rotate the gate without going
+    through :class:`Settings` — the design contract is that the kill
+    switch MUST work even when ``Settings`` is locked or the process
+    is reading from a pinned config. :mod:`nora.hitl.tokens` is
+    therefore exempt from the repo-wide ``no direct ``os.environ``
+    outside the allow-list`` rule (see
+    ``tests/test_config.py::test_no_os_environ_in_src_nora``); the
+    helper is co-located with the ``Settings`` boundary so the
+    audit trail remains in one module.
+    """
+    raw = os.environ.get("NORA_HITL_TOKEN_TTL_SECONDS")
+    if raw is None:
+        return False
+    try:
+        return int(raw.strip()) == 0
+    except (TypeError, ValueError):
+        return False
+
+
+__all__ = ["Settings", "LoadSource", "hitl_kill_switch_active"]
