@@ -30,6 +30,7 @@ from nora.drivers.inventory import Device, Inventory
 from nora.drivers.snmp_pmp450i.client import SnmpClient
 from nora.drivers.snmp_pmp450i.driver import (
     Pmp450iDriver,
+    Pmp450iSnmpDriver,
     default_client_factory,
 )
 from nora.drivers.snmp_pmp450i.report import RadioMetricsReport
@@ -54,5 +55,6 @@ __all__ = [
     "make_v3_client",
     "RadioMetricsReport",
     "Pmp450iDriver",
+    "Pmp450iSnmpDriver",
     "default_client_factory",
 ]

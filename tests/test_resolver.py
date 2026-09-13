@@ -59,13 +59,9 @@ def test_secret_str_safety_no_plaintext_in_repr() -> None:
 
     # ---- repr(device) ------------------------------------------------------
     rendered = repr(device)
-    assert "**********" in rendered, (
-        f"repr must mask secrets with '**********'; got: {rendered!r}"
-    )
+    assert "**********" in rendered, f"repr must mask secrets with '**********'; got: {rendered!r}"
     for pattern in _BANNED_LITERAL_PATTERNS:
-        assert not pattern.search(rendered), (
-            f"repr leaked banned literal: {rendered!r}"
-        )
+        assert not pattern.search(rendered), f"repr leaked banned literal: {rendered!r}"
 
     # ---- device.model_dump() ----------------------------------------------
     dumped = device.model_dump()
@@ -75,9 +71,7 @@ def test_secret_str_safety_no_plaintext_in_repr() -> None:
         f"model_dump must mask secrets with '**********'; got: {dumped_repr!r}"
     )
     for pattern in _BANNED_LITERAL_PATTERNS:
-        assert not pattern.search(dumped_repr), (
-            f"model_dump leaked banned literal: {dumped_repr!r}"
-        )
+        assert not pattern.search(dumped_repr), f"model_dump leaked banned literal: {dumped_repr!r}"
 
     # ---- sanity: get_secret_value() DOES return the real bytes ------------
     # The masking is representational; the value is recoverable inside

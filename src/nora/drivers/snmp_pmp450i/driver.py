@@ -20,9 +20,12 @@ codebase entirely (locked decision 3 + 5).
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timezone
 from functools import lru_cache
-from typing import Callable, Protocol
+from typing import Any, Callable, Protocol
+
+from packaging.version import InvalidVersion, Version
 
 from nora.drivers.exceptions import (
     NetworkUnreachableError,
@@ -34,6 +37,12 @@ from nora.drivers.snmp_pmp450i.client import SnmpClient
 from nora.drivers.snmp_pmp450i.report import RadioMetricsReport
 
 logger = logging.getLogger("nora.drivers.snmp_pmp450i")
+
+# RFC 1213 sysDescr — the agent's "human-readable" identification string.
+# Cambium firmware advertises the version somewhere inside this string;
+# the parser below extracts the first semver-shaped token it finds.
+_SYSDESCR_OID: str = "1.3.6.1.2.1.1.1.0"
+_FIRMWARE_RE: re.Pattern[str] = re.compile(r"(\d+\.\d+(?:\.\d+)?)")
 
 
 class _ClientFactory(Protocol):
@@ -145,4 +154,115 @@ class Pmp450iDriver:
         return values
 
 
-__all__ = ["Pmp450iDriver", "default_client_factory"]
+__all__ = [
+    "Pmp450iDriver",
+    "Pmp450iSnmpDriver",
+    "default_client_factory",
+]
+
+
+# ---------------------------------------------------------------------------
+# Slice 1 — `Pmp450iSnmpDriver` adapter + `report_firmware()` typed return.
+#
+# `Pmp450iSnmpDriver` IS-A `Pmp450iDriver` (preserved public surface) AND
+# IS-A `DeviceDriverInterface` (the seam). It adds:
+#
+# * `report_firmware(device_id) -> Version` — slice 1 (the named test
+#   `report_firmware_returns_typed_version` pins it).
+# * Five `fetch_*` stubs that land in slices 2/3 — each raises
+#   `NotImplementedError` referencing the slice that completes it.
+#
+# Subclassing `Pmp450iDriver` keeps the original fetch path byte-identical
+# (the 39 back-compat tests in `tests/test_driver_*` stay green).
+# ---------------------------------------------------------------------------
+
+
+def _parse_sysdescr_version(sys_descr: str) -> Version:
+    """Return the first semver-shaped token found in `sys_descr`.
+
+    Cambium's sysDescr strings vary by firmware release — e.g.
+    ``"Cambium Networks PMP 450i Access Point. Software Version 15.3.0 build 1"``
+    or ``"PMP 450i AP, 15.2.1"``. The regex pulls the first
+    ``<digits>.<digits>[.<digits>]`` token; ``Version(...)`` then parses
+    it. Raises ``ValueError`` when no version token is present (the
+    caller maps it to a typed driver exception).
+    """
+    match = _FIRMWARE_RE.search(sys_descr)
+    if match is None:
+        raise ValueError(f"could not parse firmware from sysDescr: {sys_descr!r}")
+    try:
+        return Version(match.group(1))
+    except InvalidVersion as exc:
+        raise ValueError(f"invalid firmware token in sysDescr: {sys_descr!r}") from exc
+
+
+class Pmp450iSnmpDriver(Pmp450iDriver):
+    """`DeviceDriverInterface` adapter over the read-only `Pmp450iDriver`.
+
+    Slice 1: ``report_firmware`` is the only new working method. The
+    other four ``fetch_*`` methods on the Protocol raise
+    ``NotImplementedError`` with a pointer to the slice that completes
+    them; their bodies land in PRs 2 and 3 of the chain.
+
+    Subclassing ``Pmp450iDriver`` keeps the legacy
+    ``fetch_radio_metrics`` path bit-identical (every back-compat
+    test in ``tests/test_driver_*`` stays green).
+    """
+
+    # -- slice 1 -----------------------------------------------------------
+
+    def report_firmware(self, device_id: str) -> Version:
+        """Query the agent's sysDescr and parse the advertised firmware.
+
+        Steps:
+
+        1. Resolve the device (inventory path; ad-hoc devices land in
+           the same call frame).
+        2. Open a client and GET ``sysDescr`` (``1.3.6.1.2.1.1.1.0``).
+        3. Parse the first semver-shaped token into ``Version``.
+
+        Wire failures keep the existing typed-error mapping from
+        ``_call_async`` (``SnmpTimeoutError`` / ``NetworkUnreachableError``).
+        """
+        device = self._inventory.get(device_id)
+        client = self._client_factory(device)
+        try:
+            raw_value = client.get_oid(_SYSDESCR_OID)
+        finally:
+            try:
+                client.close()
+            except Exception:  # pragma: no cover - close is best-effort
+                pass
+        return _parse_sysdescr_version(str(raw_value))
+
+    # -- slice 2 (stubs) ---------------------------------------------------
+
+    def fetch_ap_summary(self, device_id: str) -> Any:
+        """Slice 2 method — lands in PR 2 (`snmp_get_ap_summary`)."""
+        raise NotImplementedError(
+            "Pmp450iSnmpDriver.fetch_ap_summary lands in PR 2 "
+            "(snmp_get_ap_summary); see tasks.md phase 2.6"
+        )
+
+    def fetch_frame_utilization(self, device_id: str) -> Any:
+        """Slice 2 method — lands in PR 2 (`snmp_get_frame_utilization`)."""
+        raise NotImplementedError(
+            "Pmp450iSnmpDriver.fetch_frame_utilization lands in PR 2 "
+            "(snmp_get_frame_utilization); see tasks.md phase 2.6"
+        )
+
+    # -- slice 3 (stubs) ---------------------------------------------------
+
+    def fetch_sm_table(self, device_id: str) -> Any:
+        """Slice 3 method — lands in PR 3 (`snmp_get_sm_table`)."""
+        raise NotImplementedError(
+            "Pmp450iSnmpDriver.fetch_sm_table lands in PR 3 "
+            "(snmp_get_sm_table); see tasks.md phase 3.8"
+        )
+
+    def fetch_sm_detailed_diagnostics(self, device_id: str) -> Any:
+        """Slice 3 method — lands in PR 3 (`snmp_get_sm_detailed_diagnostics`)."""
+        raise NotImplementedError(
+            "Pmp450iSnmpDriver.fetch_sm_detailed_diagnostics lands in PR 3 "
+            "(snmp_get_sm_detailed_diagnostics); see tasks.md phase 3.9"
+        )

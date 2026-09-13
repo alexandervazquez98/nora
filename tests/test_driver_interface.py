@@ -1,0 +1,397 @@
+"""Tests for `DeviceDriverInterface` Protocol + IP-direct resolution path.
+
+PR 1 — slice 1 of the PMP 450i production surface. These tests pin the
+public contract that:
+
+* `DeviceResolver.build(host, snmp_version, creds)` returns a frozen
+  `Device` whose `device_id` is the collision-safe stem
+  ``f"adhoc-{host}-{secrets.token_hex(3)}"``.
+* `Pmp450iSnmpDriver` adapts `Pmp450iDriver` AND exposes
+  `report_firmware(device_id) -> packaging.version.Version`.
+* The inventory path stays back-compatible (regression suite stays green).
+
+Named tests for slice 1:
+
+* ``test_ip_direct_resolution_builds_ephemeral_device``
+* ``test_report_firmware_returns_typed_version``
+* ``test_inventory_path_still_works_no_regression``
+
+Zero-Leakage: only TEST-NET-1 (``192.0.2.x``) host literals; no real
+IPs, hostnames, serials, or credentials.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+from unittest import mock
+
+import pytest
+import yaml
+from packaging.version import Version
+from pydantic import SecretStr
+
+from nora.drivers.inventory import Device, Inventory
+from nora.drivers.oid_catalog import OidCatalog, OidCatalogRegistry
+
+# ---------------------------------------------------------------------------
+# Helpers (mirror those used in tests/test_driver_snmp_pmp450i.py)
+# ---------------------------------------------------------------------------
+
+
+def _build_inventory(tmp_path: Path) -> Inventory:
+    """Hermetic inventory with one v2c AP and one v3 SM."""
+    payload = {
+        "devices": [
+            {
+                "device_id": "ap-7400-01",
+                "vendor": "cambium",
+                "model": "pmp450i",
+                "firmware": "15.2.1",
+                "host": "192.0.2.10",
+                "snmp_version": "v2c",
+                "community": "change-me-v2c",
+            },
+            {
+                "device_id": "sm-7400-02",
+                "vendor": "cambium",
+                "model": "pmp450i",
+                "firmware": "15.2.1",
+                "host": "192.0.2.11",
+                "snmp_version": "v3",
+                "auth_password": "change-me-auth",
+                "priv_password": "change-me-priv",
+            },
+        ]
+    }
+    inv_path = tmp_path / "devices.yaml"
+    inv_path.write_text(yaml.safe_dump(payload))
+    return Inventory.from_yaml(inv_path)
+
+
+def _build_catalog() -> OidCatalogRegistry:
+    """Catalog with the 6 required OIDs."""
+    catalog = OidCatalog(
+        vendor="cambium",
+        model="pmp450i",
+        firmware="15.2.1",
+        oids={
+            "radioDownlinkRate": "1.3.6.1.4.1.161.19.3.1.1.1.0",
+            "radioUplinkRate": "1.3.6.1.4.1.161.19.3.1.1.2.0",
+            "signalStrengthRx": "1.3.6.1.4.1.161.19.3.1.1.3.0",
+            "signalStrengthTx": "1.3.6.1.4.1.161.19.3.1.1.4.0",
+            "ssr": "1.3.6.1.4.1.161.19.3.1.1.5.0",
+            "modulationMode": "1.3.6.1.4.1.161.19.3.1.1.6.0",
+        },
+    )
+    return OidCatalogRegistry(
+        _catalogs_path=Path("."),
+        _catalogs={("cambium", "pmp450i", "15.2.1"): catalog},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Named test #1 — ip_direct_resolution_builds_ephemeral_device
+# ---------------------------------------------------------------------------
+
+
+def test_ip_direct_resolution_builds_ephemeral_device() -> None:
+    """`DeviceResolver.build("192.0.2.10", "v3", creds)` returns a frozen Device.
+
+    The returned `device_id` is ``"adhoc-<host>-<6-hex>"`` so two
+    concurrent calls against the same host never share a stem.
+    """
+    from nora.drivers.resolver import DeviceResolver, SnmpCredentials
+
+    creds = SnmpCredentials(
+        auth_password=SecretStr("test-auth-only"),
+        priv_password=SecretStr("test-priv-only"),
+    )
+    device = DeviceResolver.build("192.0.2.10", "v3", creds)
+
+    assert isinstance(device, Device)
+    assert device.device_id.startswith("adhoc-192.0.2.10-")
+    # The trailing 6-hex comes from `secrets.token_hex(3)` (3 bytes).
+    suffix = device.device_id.split("-")[-1]
+    assert len(suffix) == 6 and all(c in "0123456789abcdef" for c in suffix), (
+        f"entropy suffix must be 6 lowercase hex chars, got {suffix!r}"
+    )
+    assert device.host == "192.0.2.10"
+    assert device.snmp_version == "v3"
+    assert device.vendor == "cambium"
+    assert device.model == "pmp450i"
+
+
+def test_stem_collisions_resolved_by_entropy_suffix() -> None:
+    """Two consecutive `DeviceResolver.build(host, ...)` calls yield different stems.
+
+    Triangulation: same host + same creds → two distinct device_ids, both
+    sharing the host prefix. This pins the entropy-suffix derivation
+    (not just a counter) so two callers in the same process never collide.
+    """
+    from nora.drivers.resolver import DeviceResolver, SnmpCredentials
+
+    creds = SnmpCredentials(
+        community=SecretStr("change-me"),
+    )
+    first = DeviceResolver.build("192.0.2.10", "v2c", creds)
+    second = DeviceResolver.build("192.0.2.10", "v2c", creds)
+
+    assert first.device_id != second.device_id
+    assert first.device_id.startswith("adhoc-192.0.2.10-")
+    assert second.device_id.startswith("adhoc-192.0.2.10-")
+    # Same host / vendor / model / snmp_version — only the entropy differs.
+    assert first.host == second.host
+    assert first.snmp_version == second.snmp_version
+
+
+def test_adhoc_device_is_frozen(tmp_path: Path) -> None:
+    """`DeviceResolver.build(...)` returns a frozen `Device`.
+
+    The same invariant as inventory-loaded Devices — a Pydantic `frozen`
+    model — so neither the driver nor the caller can mutate the resolved
+    `Device` mid-flight.
+    """
+    from nora.drivers.resolver import DeviceResolver, SnmpCredentials
+
+    creds = SnmpCredentials(
+        community=SecretStr("change-me"),
+    )
+    device = DeviceResolver.build("192.0.2.10", "v2c", creds)
+
+    with pytest.raises(Exception):
+        # Pydantic frozen models raise ValidationError (TypeError pre-2.x).
+        device.host = "192.0.2.99"  # type: ignore[misc]
+
+
+def test_adhoc_v3_requires_auth_and_priv() -> None:
+    """v3 credentials REQUIRE both auth_password and priv_password.
+
+    Pin the Device model's intrinsic validator: a half-supplied v3
+    credential set must NOT silently degrade to v2c.
+    """
+    from nora.drivers.resolver import DeviceResolver, SnmpCredentials
+
+    creds = SnmpCredentials(
+        auth_password=SecretStr("only-auth"),
+        # priv_password intentionally absent.
+    )
+    with pytest.raises(ValueError):
+        DeviceResolver.build("192.0.2.10", "v3", creds)
+
+
+# ---------------------------------------------------------------------------
+# Named test #2 — report_firmware_returns_typed_version
+# ---------------------------------------------------------------------------
+
+
+def test_report_firmware_returns_typed_version(tmp_path: Path) -> None:
+    """`Pmp450iSnmpDriver.report_firmware("ap-7400-01")` returns `Version("15.3.0")`.
+
+    The agent advertises the firmware via sysDescr; the driver
+    parses the string and returns a `packaging.version.Version` — the
+    upstream of `OidCatalogRegistry.resolve(...)` per ADR #17 P2.
+    """
+    from nora.drivers.snmp_pmp450i import Pmp450iSnmpDriver
+    from nora.drivers.snmp_pmp450i.report import RadioMetricsReport
+
+    inv = _build_inventory(tmp_path)
+    registry = _build_catalog()
+
+    canned_report = RadioMetricsReport(
+        device_id="ap-7400-01",
+        fetched_at=datetime(2026, 1, 1, 12, 0, 0),
+        firmware="15.2.1",
+        radio_dl_rate_bps=54000000,
+        radio_ul_rate_bps=21000000,
+        rx_signal_dbm=-58,
+        tx_signal_dbm=23,
+        ssr=75,
+        modulation="256QAM",
+    )
+
+    class _SysDescrClient:
+        """Fake SnmpClient that returns a Cambium sysDescr string."""
+
+        def __init__(self, sys_descr: str) -> None:
+            self._sys_descr = sys_descr
+
+        def get_oid(self, oid: str) -> str | int:
+            if oid == "1.3.6.1.2.1.1.1.0":
+                return self._sys_descr
+            # Mirror the same canned values used elsewhere for the
+            # radio-metrics OIDs so the driver is exercised too.
+            return {
+                "1.3.6.1.4.1.161.19.3.1.1.1.0": str(canned_report.radio_dl_rate_bps),
+                "1.3.6.1.4.1.161.19.3.1.1.2.0": str(canned_report.radio_ul_rate_bps),
+                "1.3.6.1.4.1.161.19.3.1.1.3.0": str(canned_report.rx_signal_dbm),
+                "1.3.6.1.4.1.161.19.3.1.1.4.0": str(canned_report.tx_signal_dbm),
+                "1.3.6.1.4.1.161.19.3.1.1.5.0": str(canned_report.ssr),
+                "1.3.6.1.4.1.161.19.3.1.1.6.0": canned_report.modulation,
+            }[oid]
+
+        def walk(self, base_oid: str) -> list[tuple[str, str | int]]:
+            return []
+
+        def close(self) -> None:
+            return None
+
+    sys_descr = "Cambium Networks PMP 450i Access Point. Software Version 15.3.0 build 1"
+    driver = Pmp450iSnmpDriver(
+        inventory=inv,
+        catalog_registry=registry,
+        client_factory=lambda d: _SysDescrClient(sys_descr),
+    )
+
+    version = driver.report_firmware("ap-7400-01")
+
+    assert isinstance(version, Version)
+    assert version == Version("15.3.0")
+
+
+def test_report_firmware_via_snmprec_style_sysdescr(tmp_path: Path) -> None:
+    """Triangulation: alternative sysDescr wording (e.g. comma-separated).
+
+    Different Cambium firmware revisions emit slightly different
+    sysDescr strings; the parser must still extract the semver.
+    """
+    from nora.drivers.snmp_pmp450i import Pmp450iSnmpDriver
+
+    inv = _build_inventory(tmp_path)
+    registry = _build_catalog()
+
+    sys_descr = "PMP 450i AP, 15.2.1"
+
+    class _Client:
+        def get_oid(self, oid: str) -> str | int:
+            return sys_descr if oid == "1.3.6.1.2.1.1.1.0" else ""
+
+        def walk(self, base_oid: str) -> list[tuple[str, str | int]]:
+            return []
+
+        def close(self) -> None:
+            return None
+
+    driver = Pmp450iSnmpDriver(
+        inventory=inv,
+        catalog_registry=registry,
+        client_factory=lambda d: _Client(),
+    )
+    version = driver.report_firmware("ap-7400-01")
+    assert version == Version("15.2.1")
+
+
+# ---------------------------------------------------------------------------
+# Protocol runtime check
+# ---------------------------------------------------------------------------
+
+
+def test_protocol_runtime_check_passes_for_pmp450i_snmp_driver(tmp_path: Path) -> None:
+    """`isinstance(driver, DeviceDriverInterface)` is True for `Pmp450iSnmpDriver`."""
+    from nora.drivers.interface import DeviceDriverInterface
+    from nora.drivers.snmp_pmp450i import Pmp450iSnmpDriver
+    from nora.drivers.snmp_pmp450i.client import SnmpClient
+
+    inv = _build_inventory(tmp_path)
+    registry = _build_catalog()
+
+    fake_client = mock.MagicMock(spec=SnmpClient)
+    driver = Pmp450iSnmpDriver(
+        inventory=inv,
+        catalog_registry=registry,
+        client_factory=lambda d: fake_client,
+    )
+    assert isinstance(driver, DeviceDriverInterface)
+    # Every declared method is callable.
+    for method in (
+        "fetch_radio_metrics",
+        "fetch_ap_summary",
+        "fetch_frame_utilization",
+        "fetch_sm_table",
+        "fetch_sm_detailed_diagnostics",
+        "report_firmware",
+    ):
+        assert callable(getattr(driver, method, None)), f"{method!r} not callable"
+
+
+def test_a_missing_method_fails_the_runtime_check(tmp_path: Path) -> None:
+    """`isinstance(stub, DeviceDriverInterface)` is False for a partial stub.
+
+    The runtime_checkable Protocol uses the structural shape; a class
+    missing one method MUST fail the check so the boot sequence aborts.
+    """
+    from nora.drivers.interface import DeviceDriverInterface
+
+    class _PartialStub:
+        """Has four of the six Protocol methods — missing two on purpose."""
+
+        def fetch_radio_metrics(self, device_id: str) -> Any:  # pragma: no cover - stub
+            return None
+
+        def fetch_ap_summary(self, device_id: str) -> Any:  # pragma: no cover
+            return None
+
+        def fetch_frame_utilization(self, device_id: str) -> Any:  # pragma: no cover
+            return None
+
+        # Missing: fetch_sm_table, fetch_sm_detailed_diagnostics, report_firmware.
+
+    assert isinstance(_PartialStub(), DeviceDriverInterface) is False
+
+
+def test_pmp450i_snmp_driver_subclass_of_pmp450i_driver(tmp_path: Path) -> None:
+    """`Pmp450iSnmpDriver` is a subclass of `Pmp450iDriver` (public surface preserved).
+
+    Slice-1 invariant: any code that holds a `Pmp450iDriver` reference
+    can be handed a `Pmp450iSnmpDriver` without breaking.
+    """
+    from nora.drivers.snmp_pmp450i import Pmp450iDriver, Pmp450iSnmpDriver
+
+    inv = _build_inventory(tmp_path)
+    registry = _build_catalog()
+    driver = Pmp450iSnmpDriver(
+        inventory=inv,
+        catalog_registry=registry,
+        client_factory=lambda d: mock.MagicMock(),
+    )
+    assert isinstance(driver, Pmp450iDriver)
+
+
+# ---------------------------------------------------------------------------
+# Back-compat regression — inventory_path_still_works_no_regression
+# ---------------------------------------------------------------------------
+
+
+def test_inventory_path_still_works_no_regression(tmp_path: Path) -> None:
+    """The existing `Pmp450iDriver.fetch_radio_metrics(...)` path is preserved.
+
+    Triangulation: with the new Protocol seam in place, the legacy
+    inventory fetch still returns a typed `RadioMetricsReport`.
+    """
+    from nora.drivers.snmp_pmp450i import Pmp450iDriver, RadioMetricsReport
+    from nora.drivers.snmp_pmp450i.client import SnmpClient
+
+    inv = _build_inventory(tmp_path)
+    registry = _build_catalog()
+    fake_client = mock.MagicMock(spec=SnmpClient)
+    fake_client.get_oid.side_effect = lambda oid: {
+        "1.3.6.1.4.1.161.19.3.1.1.1.0": "54000000",
+        "1.3.6.1.4.1.161.19.3.1.1.2.0": "21000000",
+        "1.3.6.1.4.1.161.19.3.1.1.3.0": "-58",
+        "1.3.6.1.4.1.161.19.3.1.1.4.0": "23",
+        "1.3.6.1.4.1.161.19.3.1.1.5.0": "75",
+        "1.3.6.1.4.1.161.19.3.1.1.6.0": "256QAM",
+    }[oid]
+
+    # Use Pmp450iDriver (not the new SnmpDriver) to exercise the
+    # legacy entry point; Pmp450iSnmpDriver.test_report_firmware_returns_typed_version
+    # already covers the new class.
+    driver = Pmp450iDriver(
+        inventory=inv, catalog_registry=registry, client_factory=lambda d: fake_client
+    )
+    report = driver.fetch_radio_metrics("ap-7400-01")
+    assert isinstance(report, RadioMetricsReport)
+    assert report.device_id == "ap-7400-01"
+    assert report.firmware == "15.2.1"
+    assert report.modulation == "256QAM"

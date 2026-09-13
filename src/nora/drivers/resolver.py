@@ -75,17 +75,23 @@ class DeviceResolver:
         # inventory-loaded `Device.firmware` field is not authoritative
         # for the ad-hoc path. The literal `(adhoc)` keeps the field
         # parseable while making the path obvious to an operator.
-        device_kwargs: dict[str, object] = {
-            "device_id": device_id,
-            "vendor": "cambium",
-            "model": "pmp450i",
-            "firmware": "(adhoc)",
-            "host": host,
-            "snmp_version": snmp_version,
-        }
         if snmp_version == "v2c":
-            device_kwargs["community"] = creds.community
-        else:
-            device_kwargs["auth_password"] = creds.auth_password
-            device_kwargs["priv_password"] = creds.priv_password
-        return Device(**device_kwargs)
+            return Device(
+                device_id=device_id,
+                vendor="cambium",
+                model="pmp450i",
+                firmware="(adhoc)",
+                host=host,
+                snmp_version="v2c",
+                community=creds.community,
+            )
+        return Device(
+            device_id=device_id,
+            vendor="cambium",
+            model="pmp450i",
+            firmware="(adhoc)",
+            host=host,
+            snmp_version="v3",
+            auth_password=creds.auth_password,
+            priv_password=creds.priv_password,
+        )
