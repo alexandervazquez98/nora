@@ -68,6 +68,7 @@ STRICT=0
 JSON_OUT=0
 SKIP_FUNCTIONAL=0
 SKIP_SYSTEMD=0
+CHECK_HTTP=0
 
 # CHECK_RESULTS holds one entry per check in the form:
 #   name|status|detail
@@ -160,6 +161,8 @@ Options:
   --strict                Exit non-zero on any WARN (not just FAIL).
   --skip-functional       Skip the JSON-RPC live probe.
   --skip-systemd          Skip the systemd is-active check.
+  --check-http            Probe the HTTP listener when transport != stdio.
+                          Default off so stdio-only operators see no change.
   --help                  Show this help and exit 0.
 
 Exit codes:
@@ -196,6 +199,7 @@ parse_args() {
             --strict) STRICT=1 ;;
             --skip-functional) SKIP_FUNCTIONAL=1 ;;
             --skip-systemd) SKIP_SYSTEMD=1 ;;
+            --check-http) CHECK_HTTP=1 ;;
             --help|-h) usage; exit 0 ;;
             --) shift; break ;;
             -*) fail "unknown flag: $1"; usage; exit 2 ;;
@@ -502,6 +506,69 @@ check_functional() {
     return 2
 }
 
+check_http_listener() {
+    # Opt-in HTTP smoke. Reads /etc/nora/nora-mcp.env; if transport is stdio
+    # or unset, skip silently (default mode). Otherwise TCP-probe the bind
+    # address + curl the MCP path. Stdout output is suppressed; only the
+    # HTTP status code (or 'no-curl') is captured for the check row.
+    #
+    # Failure modes:
+    #   * Transport != stdio AND /etc/nora/nora-mcp.env is missing → WARN
+    #     (operator forgot to run install.sh or the env file was deleted).
+    #   * TCP probe fails (connect refused / timeout) → FAIL.
+    #   * curl is absent → WARN with `no-curl`; the TCP probe is enough
+    #     evidence the socket is bound.
+    local env_file="${CONFIG_DIR}/nora-mcp.env"
+
+    if [ ! -f "${env_file}" ]; then
+        record_check "http.listener" "warn" "${env_file} missing (transport probe skipped)"
+        return 1
+    fi
+
+    # Source the transport env file in a sub-shell so we don't leak vars
+    # into the verifier's namespace. `set -a` exports every assignment.
+    # shellcheck disable=SC1090,SC1091
+    local transport host port path
+    transport="$(NORA_MCP_TRANSPORT="${NORA_MCP_TRANSPORT:-}" NORA_MCP_HOST="${NORA_MCP_HOST:-}" NORA_MCP_PORT="${NORA_MCP_PORT:-}" NORA_MCP_PATH="${NORA_MCP_PATH:-}" sh -c "set -a; . '${env_file}' >/dev/null 2>&1; printf '%s' \"\${NORA_MCP_TRANSPORT:-stdio}\"")"
+    host="$(NORA_MCP_TRANSPORT="${NORA_MCP_TRANSPORT:-}" NORA_MCP_HOST="${NORA_MCP_HOST:-}" NORA_MCP_PORT="${NORA_MCP_PORT:-}" NORA_MCP_PATH="${NORA_MCP_PATH:-}" sh -c "set -a; . '${env_file}' >/dev/null 2>&1; printf '%s' \"\${NORA_MCP_HOST:-127.0.0.1}\"")"
+    port="$(NORA_MCP_TRANSPORT="${NORA_MCP_TRANSPORT:-}" NORA_MCP_HOST="${NORA_MCP_HOST:-}" NORA_MCP_PORT="${NORA_MCP_PORT:-}" NORA_MCP_PATH="${NORA_MCP_PATH:-}" sh -c "set -a; . '${env_file}' >/dev/null 2>&1; printf '%s' \"\${NORA_MCP_PORT:-8005}\"")"
+    path="$(NORA_MCP_TRANSPORT="${NORA_MCP_TRANSPORT:-}" NORA_MCP_HOST="${NORA_MCP_HOST:-}" NORA_MCP_PORT="${NORA_MCP_PORT:-}" NORA_MCP_PATH="${NORA_MCP_PATH:-}" sh -c "set -a; . '${env_file}' >/dev/null 2>&1; printf '%s' \"\${NORA_MCP_PATH:-/mcp}\"")"
+
+    if [ "${transport}" = "stdio" ] || [ -z "${transport}" ]; then
+        record_check "http.listener" "ok" "skip (transport=stdio)"
+        return 0
+    fi
+
+    # TCP-probe the bind address. `/dev/tcp/<host>/<port>` is a bash
+    # builtin that opens a TCP socket and exits non-zero on connect
+    # refused / unreachable. We trap exit so a failed probe surfaces a
+    # FAIL row, not a script abort (`set -e` is on).
+    if ! bash -c "exec 3<>/dev/tcp/${host}/${port}" 2>/dev/null; then
+        record_check "http.listener" "fail" "${host}:${port} unreachable"
+        return 2
+    fi
+
+    if ! command -v curl >/dev/null 2>&1; then
+        record_check "http.listener" "warn" "tcp ok, curl absent (no HTTP probe)"
+        return 1
+    fi
+
+    local http_code
+    http_code="$(curl --max-time 3 -s -o /dev/null -w '%{http_code}' "http://${host}:${port}${path}" 2>/dev/null || echo "000")"
+    # 405/406/415 are expected: FastMCP rejects GET on /mcp but the socket
+    # is bound. Anything in the 2xx/3xx/4xx band means the listener is up.
+    case "${http_code}" in
+        2*|3*|4*)
+            record_check "http.listener" "ok" "tcp+http ${host}:${port}${path} -> ${http_code}"
+            return 0
+            ;;
+        *)
+            record_check "http.listener" "fail" "tcp ok, http probe returned ${http_code}"
+            return 2
+            ;;
+    esac
+}
+
 # ---------------------------------------------------------------------------
 # Report — aggregate results + emit human or JSON output.
 # ---------------------------------------------------------------------------
@@ -599,6 +666,10 @@ main() {
         record_check "functional.jsonrpc" "ok" "skipped (--skip-functional)"
     else
         check_functional || true
+    fi
+
+    if [ "${CHECK_HTTP}" = "1" ]; then
+        check_http_listener || true
     fi
 
     report
