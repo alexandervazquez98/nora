@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 
+from nora.data import BUILTIN_BASELINE_SIGNING_KEY
 from nora.drivers.exceptions import (
     CatalogNotFoundError,
     CatalogVerificationError,
@@ -475,7 +476,7 @@ class TestMultiRoot:
             model="pmp450i",
             firmware="15.2.1",
             oids=builtin_payload,
-            key=SAMPLE_CATALOG_KEY,
+            key=BUILTIN_BASELINE_SIGNING_KEY,
         )
 
         operator_payload = dict(_SAMPLE_BUILTIN_OIDS)
@@ -522,7 +523,7 @@ class TestMultiRoot:
             model="pmp450i",
             firmware="15.2.1",
             oids=dict(_SAMPLE_BUILTIN_OIDS),
-            key=SAMPLE_CATALOG_KEY,
+            key=BUILTIN_BASELINE_SIGNING_KEY,
         )
         _write_signed_catalog(
             tmp_builtin_root,
@@ -530,7 +531,7 @@ class TestMultiRoot:
             model="pmp450i",
             firmware="15.3.0",
             oids=dict(_SAMPLE_BUILTIN_OIDS),
-            key=SAMPLE_CATALOG_KEY,
+            key=BUILTIN_BASELINE_SIGNING_KEY,
         )
         _write_signed_catalog(
             tmp_catalogs_dir,
@@ -625,20 +626,24 @@ class TestMultiRoot:
     ) -> None:
         """Scenario: invalid HMAC in any root aborts boot.
 
-        Built-in has a valid catalog; operator root contains one catalog
-        whose HMAC was signed with a *different* key. ``verify`` MUST
-        raise :class:`CatalogVerificationError` — the driver MUST NOT
-        start. Symmetrically, a tampered built-in also aborts even when
-        the operator root is empty.
+        Built-in has a valid catalog (signed with the baseline key it
+        was shipped with); operator root contains one catalog whose HMAC
+        was signed with a *different* key. ``verify`` MUST raise
+        :class:`CatalogVerificationError` — the driver MUST NOT start.
+        Symmetrically, a tampered built-in also aborts even when the
+        operator root is empty (covered by the dedicated
+        ``test_invalid_hmac_in_builtin_raises_when_operator_root_empty``
+        case below).
         """
-        # Built-in: valid signed catalog.
+        # Built-in: valid signed catalog (with the baseline key, the
+        # shipped-builtin verification path will look up).
         _write_signed_catalog(
             tmp_builtin_root,
             vendor="cambium",
             model="pmp450i",
             firmware="15.2.1",
             oids=dict(_SAMPLE_BUILTIN_OIDS),
-            key=SAMPLE_CATALOG_KEY,
+            key=BUILTIN_BASELINE_SIGNING_KEY,
         )
         # Operator: catalog signed with the wrong key.
         _write_signed_catalog(
@@ -701,8 +706,6 @@ class TestMultiRoot:
         """
         from importlib.resources import files
 
-        from nora.data import BUILTIN_BASELINE_SIGNING_KEY
-
         built_in_root = files("nora.data.oid-catalogs")
         # `files(...)` may return a `Path` (dev/source) or `MultiplexedPath`
         # (wheel); the registry accepts either. The walk must surface the
@@ -720,6 +723,67 @@ class TestMultiRoot:
         assert ("cambium", "pmp450i", "15.2.1") in {tuple(ref) for ref in registry.loaded_refs}
         catalog = registry.resolve(("cambium", "pmp450i", "15.2.1"))
         assert catalog.oids["ssr"] == "1.3.6.1.4.1.161.19.3.1.1.5.0"
+
+    def test_builtin_baseline_key_and_operator_key_are_independent(
+        self,
+        tmp_builtin_root: Path,
+        tmp_catalogs_dir: Path,
+    ) -> None:
+        """Production scenario (#33): built-in + operator keys are independent.
+
+        The shipped built-in baseline is signed at build time with the
+        :data:`nora.data.BUILTIN_BASELINE_SIGNING_KEY` placeholder (it
+        can't be re-signed post-install without rebuilding the wheel).
+        The operator's installer (``scripts/install.sh``) generates a
+        FRESH random key and re-signs only the operator root. So at
+        boot the two keys are different by design — ``verify`` MUST use
+        the baseline key for the built-in scan and the operator key for
+        the operator scan, otherwise the built-in fails HMAC against
+        the operator key and the server crashes at boot with
+        ``CatalogVerificationError: HMAC-SHA256 signature mismatch
+        (tampered or wrong key)``.
+        """
+        # Built-in: signed with the shipped baseline key (the key the
+        # operator will NEVER have — that's the whole point of the fix).
+        _write_signed_catalog(
+            tmp_builtin_root,
+            vendor="cambium",
+            model="pmp450i",
+            firmware="15.2.1",
+            oids=dict(_SAMPLE_BUILTIN_OIDS),
+            key=BUILTIN_BASELINE_SIGNING_KEY,
+        )
+        # Operator: disjoint triple so this is not a shadowing scenario,
+        # just an HMAC correctness check on the operator key path.
+        _write_signed_catalog(
+            tmp_catalogs_dir,
+            vendor="cambium",
+            model="pmp450i",
+            firmware="15.3.0",
+            oids=dict(_SAMPLE_BUILTIN_OIDS),
+            key="OPERATOR-GENERATED-RANDOM-KEY",
+        )
+
+        registry = OidCatalogRegistry.verify(
+            built_in_root=tmp_builtin_root,
+            operator_root=tmp_catalogs_dir,
+            signing_key="OPERATOR-GENERATED-RANDOM-KEY",
+        )
+
+        # Both triples load (no HMAC mismatch on either root).
+        loaded = {tuple(ref) for ref in registry.loaded_refs}
+        assert loaded == {
+            ("cambium", "pmp450i", "15.2.1"),
+            ("cambium", "pmp450i", "15.3.0"),
+        }, f"expected both triples to load, got {loaded}"
+
+        # And resolving either triple returns a usable catalog.
+        assert registry.resolve(("cambium", "pmp450i", "15.2.1")).oids["ssr"] == (
+            "1.3.6.1.4.1.161.19.3.1.1.5.0"
+        )
+        assert registry.resolve(("cambium", "pmp450i", "15.3.0")).oids["ssr"] == (
+            "1.3.6.1.4.1.161.19.3.1.1.5.0"
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -47,6 +47,7 @@ from packaging.version import InvalidVersion, Version
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from nora.config import Settings
+from nora.data import BUILTIN_BASELINE_SIGNING_KEY
 from nora.drivers.exceptions import CatalogNotFoundError, CatalogVerificationError
 
 logger = logging.getLogger("nora.drivers.oid_catalog")
@@ -341,6 +342,13 @@ class OidCatalogRegistry:
         (sorted at every level) so filesystem ordering never leaks into
         ``loaded_refs``.
 
+        PR 33: the built-in root is HMAC-verified against the baseline
+        key (:data:`nora.data.BUILTIN_BASELINE_SIGNING_KEY`) and the
+        operator root against ``signing_key``. The two keys are
+        independent by design — a vanilla ``scripts/install.sh`` install
+        generates a fresh random operator key that intentionally differs
+        from the shipped baseline placeholder.
+
         ``signing_key`` accepts either a :class:`SecretStr` (production,
         from :class:`Settings`) or a plain ``str`` (hermetic tests).
         Empty / ``None`` → :class:`CatalogVerificationError`.
@@ -348,9 +356,11 @@ class OidCatalogRegistry:
         Order of operations:
 
         1. Resolve the signing key.
-        2. Walk the built-in root (if any) first; verify every JSON file.
-        3. Walk the operator root (if it exists); verify every JSON file,
-           shadowing any built-in copy of the same triple.
+        2. Walk the built-in root (if any) first; verify every JSON file
+           against the baseline key.
+        3. Walk the operator root (if it exists); verify every JSON file
+           against ``signing_key``, shadowing any built-in copy of the
+           same triple.
         4. Build the registry; ``operator_root`` is the canonical path on
            the returned instance (mirrors pre-PR1 behaviour).
         """
@@ -361,6 +371,14 @@ class OidCatalogRegistry:
                 reason="missing signing key (NORA_OID_CATALOG_SIGNING_KEY is empty)",
             )
         key_bytes = key_str.encode("utf-8")
+        # Built-in catalogs ship signed with the baseline key (a
+        # placeholder constant the runtime cannot change without
+        # rebuilding the wheel — see `nora.data`). Verify the built-in
+        # root against THAT key, not the operator's key, otherwise a
+        # vanilla ``install.sh`` install (operator key ≠ baseline key)
+        # aborts at boot with an HMAC mismatch on the shipped baseline.
+        # Closes #33.
+        builtin_key_bytes = BUILTIN_BASELINE_SIGNING_KEY.encode("utf-8")
         catalogs: dict[tuple[str, str, str], OidCatalog] = {}
         # dict-as-set: the readonly driver test bans the bare built-in
         # constructor call inside src/nora/drivers (it confuses the AST
@@ -370,7 +388,7 @@ class OidCatalogRegistry:
         operator_seen: dict[tuple[str, str, str], None] = {}
 
         for path in _iter_json_files(built_in_root):
-            vendor, model, firmware, catalog = cls._verify_one(path, key_bytes)
+            vendor, model, firmware, catalog = cls._verify_one(path, builtin_key_bytes)
             ref = (vendor, model, firmware)
             if ref in builtin_seen:
                 raise CatalogVerificationError(
