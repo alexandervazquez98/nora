@@ -70,6 +70,7 @@ DEST=""
 DOWNLOAD_ONLY="false"
 KEEP_CLONE="false"
 FORCE_ENV_FILE="false"
+FORCE_TRANSPORT_ENV="false"
 
 # Set by main() — used by the cleanup trap so it knows whether to keep
 # the temp directory around on failure.
@@ -100,6 +101,7 @@ Options:
   --keep-clone          Do not delete the temporary clone after install.
                         Useful for debugging a failed install.
   --yes                 Pass --force-env-file to install.sh if a previous nora.env differs.
+  --force-transport-env Pass --force-transport-env to install.sh (re-materialize nora-mcp.env).
   --help, -h            Show this help and exit.
 
 Exit codes:
@@ -128,6 +130,7 @@ parse_args() {
             --dest)          DEST="$2"; shift 2 ;;
             --keep-clone)    KEEP_CLONE="true"; shift ;;
             --yes)           FORCE_ENV_FILE="true"; shift ;;
+            --force-transport-env) FORCE_TRANSPORT_ENV="true"; shift ;;
             --help|-h)       usage; exit 0 ;;
             --)              shift; break ;;
             -*)
@@ -264,6 +267,9 @@ run_install() {
     )
     if [[ "${FORCE_ENV_FILE}" == "true" ]]; then
         install_args+=(--force-env-file)
+    fi
+    if [[ "${FORCE_TRANSPORT_ENV}" == "true" ]]; then
+        install_args+=(--force-transport-env)
     fi
 
     log "Invoking ${install_script} ${install_args[*]}..."
