@@ -144,4 +144,7 @@ def test_signed_envelope_round_trips_through_registry(tmp_path: Path) -> None:
     catalog = registry.resolve(("cambium", "pmp450i", "15.2.1"))
     # At least one of the v1 OIDs lands in the catalog body.
     assert "ssr" in catalog.oids
-    assert catalog.oids["ssr"] == "1.3.6.1.4.1.161.19.3.1.1.5.0"
+    # Issue #35: the verified WHISP-APS-MIB position for ``ssr`` is
+    # column 86 in ``whispLinkTable`` (.3.1.4.1), not the placeholder
+    # sequential position (.3.1.1.5) the original v1 seed used.
+    assert catalog.oids["ssr"] == "1.3.6.1.4.1.161.19.3.1.4.1.86.0"

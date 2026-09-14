@@ -68,18 +68,24 @@ def _build_inventory(tmp_path: Path) -> Inventory:
 
 
 def _build_catalog() -> OidCatalogRegistry:
-    """Build a registry with the 6 required OIDs as dotted strings."""
+    """Build a registry with the 6 required OIDs as dotted strings.
+
+    Issue #35 — verified WHISP-APS-MIB positions under whispLinkTable
+    (.3.1.4.1) for the radio-metrics leaf columns. The placeholder
+    sequential positions used in the original v1 seed (.3.1.1.X) were
+    never reachable against a real Cambium PMP 450i radio.
+    """
     catalog = OidCatalog(
         vendor="cambium",
         model="pmp450i",
         firmware="15.2.1",
         oids={
-            "radioDownlinkRate": "1.3.6.1.4.1.161.19.3.1.1.1.0",
-            "radioUplinkRate": "1.3.6.1.4.1.161.19.3.1.1.2.0",
-            "signalStrengthRx": "1.3.6.1.4.1.161.19.3.1.1.3.0",
-            "signalStrengthTx": "1.3.6.1.4.1.161.19.3.1.1.4.0",
-            "ssr": "1.3.6.1.4.1.161.19.3.1.1.5.0",
-            "modulationMode": "1.3.6.1.4.1.161.19.3.1.1.6.0",
+            "radioDownlinkRate": "1.3.6.1.4.1.161.19.3.1.4.1.36.0",
+            "radioUplinkRate": "1.3.6.1.4.1.161.19.3.1.4.1.38.0",
+            "signalStrengthRx": "1.3.6.1.4.1.161.19.3.1.4.1.34.0",
+            "signalStrengthTx": "1.3.6.1.4.1.161.19.3.1.4.1.89.0",
+            "ssr": "1.3.6.1.4.1.161.19.3.1.4.1.86.0",
+            "modulationMode": "1.3.6.1.4.1.161.19.3.1.4.1.40.0",
         },
     )
     return OidCatalogRegistry(
@@ -90,12 +96,12 @@ def _build_catalog() -> OidCatalogRegistry:
 
 def _fake_values() -> dict[str, str]:
     return {
-        "1.3.6.1.4.1.161.19.3.1.1.1.0": "54000000",
-        "1.3.6.1.4.1.161.19.3.1.1.2.0": "21000000",
-        "1.3.6.1.4.1.161.19.3.1.1.3.0": "-58",
-        "1.3.6.1.4.1.161.19.3.1.1.4.0": "23",
-        "1.3.6.1.4.1.161.19.3.1.1.5.0": "75",
-        "1.3.6.1.4.1.161.19.3.1.1.6.0": "256QAM",
+        "1.3.6.1.4.1.161.19.3.1.4.1.36.0": "54000000",
+        "1.3.6.1.4.1.161.19.3.1.4.1.38.0": "21000000",
+        "1.3.6.1.4.1.161.19.3.1.4.1.34.0": "-58",
+        "1.3.6.1.4.1.161.19.3.1.4.1.89.0": "23",
+        "1.3.6.1.4.1.161.19.3.1.4.1.86.0": "75",
+        "1.3.6.1.4.1.161.19.3.1.4.1.40.0": "256QAM",
     }
 
 
@@ -215,7 +221,10 @@ def test_malformed_oid_value_raises_typed_error(tmp_path: Path) -> None:
     registry = _build_catalog()
     fake_client = mock.MagicMock(spec=SnmpClient)
     values = _fake_values()
-    values["1.3.6.1.4.1.161.19.3.1.1.1.0"] = "not-a-number"
+    # Issue #35: the verified radioDownlinkRate position is
+    # whispLinkTable (.3.1.4.1.36), not the placeholder sequential
+    # .3.1.1.1.
+    values["1.3.6.1.4.1.161.19.3.1.4.1.36.0"] = "not-a-number"
     fake_client.get_oid.side_effect = lambda oid: values[oid]
     driver = Pmp450iDriver(
         inventory=inv, catalog_registry=registry, client_factory=lambda d: fake_client

@@ -75,22 +75,22 @@ def _build_inventory(tmp_path: Path) -> Inventory:
 def _radio_seed_oids() -> dict[str, str]:
     """The six radio-metrics REQUIRED_OIDs."""
     return {
-        "radioDownlinkRate": "1.3.6.1.4.1.161.19.3.1.1.1.0",
-        "radioUplinkRate": "1.3.6.1.4.1.161.19.3.1.1.2.0",
-        "signalStrengthRx": "1.3.6.1.4.1.161.19.3.1.1.3.0",
-        "signalStrengthTx": "1.3.6.1.4.1.161.19.3.1.1.4.0",
-        "ssr": "1.3.6.1.4.1.161.19.3.1.1.5.0",
-        "modulationMode": "1.3.6.1.4.1.161.19.3.1.1.6.0",
+        "radioDownlinkRate": "1.3.6.1.4.1.161.19.3.1.4.1.36.0",
+        "radioUplinkRate": "1.3.6.1.4.1.161.19.3.1.4.1.38.0",
+        "signalStrengthRx": "1.3.6.1.4.1.161.19.3.1.4.1.34.0",
+        "signalStrengthTx": "1.3.6.1.4.1.161.19.3.1.4.1.89.0",
+        "ssr": "1.3.6.1.4.1.161.19.3.1.4.1.86.0",
+        "modulationMode": "1.3.6.1.4.1.161.19.3.1.4.1.40.0",
     }
 
 
 def _sm_table_oids() -> dict[str, str]:
     """SM table OID names + dotted OIDs (slice 3 additions)."""
     return {
-        "smSessionUptime": "1.3.6.1.4.1.161.19.3.2.1.70.0",
-        "smCinr": "1.3.6.1.4.1.161.19.3.2.1.71.0",
-        "smLinkStatus": "1.3.6.1.4.1.161.19.3.2.1.72.0",
-        "smLuid": "1.3.6.1.4.1.161.19.3.2.1.73.0",
+        "smSessionUptime": "1.3.6.1.4.1.161.19.3.1.4.1.46.0",
+        "smCinr": "1.3.6.1.4.1.161.19.3.1.4.1.74.0",
+        "smLinkStatus": "1.3.6.1.4.1.161.19.3.1.4.1.19.0",
+        "smLuid": "1.3.6.1.4.1.161.19.3.1.4.1.1.0",
     }
 
 
@@ -102,8 +102,8 @@ def _migration_oids() -> dict[str, str]:
     with the existing seed.
     """
     return {
-        "migrateCarrierFrequency": "1.3.6.1.4.1.161.19.3.1.1.95.0",
-        "migratePriorCarrierFrequency": "1.3.6.1.4.1.161.19.3.1.1.96.0",
+        "migrateCarrierFrequency": "1.3.6.1.4.1.161.19.3.1.4.1.38.0",
+        "migratePriorCarrierFrequency": "1.3.6.1.4.1.161.19.3.1.4.1.38.0",
     }
 
 
@@ -145,36 +145,36 @@ def _sm_subtree_rows(
     rows carry uptime == 0 (the central categoriser treats this as
     pre-existing offline even without history).
     """
-    base = "1.3.6.1.4.1.161.19.3.2.1"
+    base = "1.3.6.1.4.1.161.19.3.1.4.1"
     rows: list[tuple[str, str | int]] = []
     sm_index = 1
     for luid in online_luids:
         rows.extend(
             [
-                (f"{base}.70.{sm_index}", 86400),
-                (f"{base}.71.{sm_index}", 25),
-                (f"{base}.72.{sm_index}", "LINKED"),
-                (f"{base}.73.{sm_index}", luid),
+                (f"{base}.46.{sm_index}", 86400),
+                (f"{base}.74.{sm_index}", 25),
+                (f"{base}.19.{sm_index}", "LINKED"),
+                (f"{base}.1.{sm_index}", luid),
             ]
         )
         sm_index += 1
     for luid in degraded_luids:
         rows.extend(
             [
-                (f"{base}.70.{sm_index}", 43200),
-                (f"{base}.71.{sm_index}", 12),
-                (f"{base}.72.{sm_index}", "LINKED"),
-                (f"{base}.73.{sm_index}", luid),
+                (f"{base}.46.{sm_index}", 43200),
+                (f"{base}.74.{sm_index}", 12),
+                (f"{base}.19.{sm_index}", "LINKED"),
+                (f"{base}.1.{sm_index}", luid),
             ]
         )
         sm_index += 1
     for luid in pre_existing_luids:
         rows.extend(
             [
-                (f"{base}.70.{sm_index}", 0),
-                (f"{base}.71.{sm_index}", 0),
-                (f"{base}.72.{sm_index}", "DOWN"),
-                (f"{base}.73.{sm_index}", luid),
+                (f"{base}.46.{sm_index}", 0),
+                (f"{base}.74.{sm_index}", 0),
+                (f"{base}.19.{sm_index}", "DOWN"),
+                (f"{base}.1.{sm_index}", luid),
             ]
         )
         sm_index += 1
@@ -279,7 +279,7 @@ def test_migrate_requires_hitl_approval_token(
     canned = _FakeSnmpClient(
         values={},
         walk_results={
-            "1.3.6.1.4.1.161.19.3.2.1": _sm_subtree_rows(
+            "1.3.6.1.4.1.161.19.3.1.4.1": _sm_subtree_rows(
                 online_luids=["001"],
                 degraded_luids=["002"],
                 pre_existing_luids=["003"],
@@ -356,7 +356,7 @@ def test_migrate_make_before_break_migrates_online_active_first(
     canned = _FakeSnmpClient(
         values={},
         walk_results={
-            "1.3.6.1.4.1.161.19.3.2.1": _sm_subtree_rows(
+            "1.3.6.1.4.1.161.19.3.1.4.1": _sm_subtree_rows(
                 online_luids=["001", "002"],
                 degraded_luids=["003"],
                 pre_existing_luids=["004"],
@@ -423,7 +423,7 @@ def test_migrate_make_before_break_migrates_online_active_first(
     assert len(canned._set_calls) == 1, (
         f"Expected exactly 1 AP SET frame; got {canned._set_calls!r}"
     )
-    migration_freq_oid = "1.3.6.1.4.1.161.19.3.1.1.95.0="
+    migration_freq_oid = "1.3.6.1.4.1.161.19.3.1.4.1.38.0="
     assert canned._set_calls[0].startswith(migration_freq_oid)
 
     assert result["rolled_back"] is False
@@ -451,7 +451,7 @@ def test_migrate_excludes_pre_existing_offline_subscribers(
     canned = _FakeSnmpClient(
         values={},
         walk_results={
-            "1.3.6.1.4.1.161.19.3.2.1": _sm_subtree_rows(
+            "1.3.6.1.4.1.161.19.3.1.4.1": _sm_subtree_rows(
                 online_luids=["001"],
                 degraded_luids=["002"],
                 pre_existing_luids=["003", "004", "005"],
@@ -533,7 +533,7 @@ def test_migrate_rolls_back_within_timeout_on_loss_of_management(
     canned = _FakeSnmpClient(
         values={},
         walk_results={
-            "1.3.6.1.4.1.161.19.3.2.1": _sm_subtree_rows(
+            "1.3.6.1.4.1.161.19.3.1.4.1": _sm_subtree_rows(
                 online_luids=["001"],
                 degraded_luids=[],
                 pre_existing_luids=[],
@@ -627,7 +627,7 @@ def test_migrate_rolls_back_within_timeout_on_loss_of_management(
     assert len(canned._set_calls) >= 2, (
         f"Watchdog MUST issue a revert SET; got {canned._set_calls!r}"
     )
-    assert canned._set_calls[-1].startswith("1.3.6.1.4.1.161.19.3.1.1.96.0="), (
+    assert canned._set_calls[-1].startswith("1.3.6.1.4.1.161.19.3.1.4.1.38.0="), (
         f"Revert SET MUST target the prior-carrier OID; got {canned._set_calls[-1]!r}"
     )
 
@@ -702,7 +702,7 @@ def test_migrate_emits_intervention_record_on_completion(
     canned = _FakeSnmpClient(
         values={},
         walk_results={
-            "1.3.6.1.4.1.161.19.3.2.1": _sm_subtree_rows(
+            "1.3.6.1.4.1.161.19.3.1.4.1": _sm_subtree_rows(
                 online_luids=["001"],
                 degraded_luids=["002"],
                 pre_existing_luids=["003"],

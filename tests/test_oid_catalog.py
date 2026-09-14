@@ -722,7 +722,12 @@ class TestMultiRoot:
         )
         assert ("cambium", "pmp450i", "15.2.1") in {tuple(ref) for ref in registry.loaded_refs}
         catalog = registry.resolve(("cambium", "pmp450i", "15.2.1"))
-        assert catalog.oids["ssr"] == "1.3.6.1.4.1.161.19.3.1.1.5.0"
+        # Issue #35: verified WHISP-APS-MIB position for ``ssr`` is
+        # column 86 of ``whispLinkTable`` (.3.1.4.1), not the
+        # placeholder sequential position (.3.1.1.5) the original v1
+        # seed used. See ``data/oid-catalogs/sources/cambium/pmp450i/
+        # 15.2.1.source.json``.
+        assert catalog.oids["ssr"] == "1.3.6.1.4.1.161.19.3.1.4.1.86.0"
 
     def test_builtin_baseline_key_and_operator_key_are_independent(
         self,

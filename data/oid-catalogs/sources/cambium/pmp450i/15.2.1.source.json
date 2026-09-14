@@ -1,8 +1,17 @@
 {
-  "version": 1,
   "vendor": "cambium",
   "model": "pmp450i",
   "firmware": "15.2.1",
+  "_provenance": {
+    "source": "live SNMP walk against AP Cambium PMP 450i (192.0.2.10)",
+    "verification_date": "2026-09-13",
+    "mib_references": [
+      "WHISP-BOX-MIBV2-MIB (whispBoxSwVersion, activeTxPowerStr)",
+      "WHISP-APS-MIB (whispApsConfig, whispApsFrUtlStats, whispLinkTable)",
+      "WHISP-GLOBAL-REG-MIB (enterprises.161.19.3 root)"
+    ],
+    "notes": "Aliases preserved as separate keys per issue #35 design: Cambium hardware exposes a single OID per physical quantity; the multiple names document which slice reads each (Slice 1 radio metrics, Slice 2 read-summary, Slice 3 SM table, Slice 4 RF migration)."
+  },
   "oids": {
     "radioDownlinkRate": "1.3.6.1.4.1.161.19.3.1.4.1.36.0",
     "radioUplinkRate": "1.3.6.1.4.1.161.19.3.1.4.1.38.0",
@@ -38,54 +47,5 @@
     "spectrumScanStatus": "1.3.6.1.4.1.161.19.3.3.2.221.0",
     "migrateCarrierFrequency": "1.3.6.1.4.1.161.19.3.1.1.2.0",
     "migratePriorCarrierFrequency": "1.3.6.1.4.1.161.19.3.1.1.2.0"
-  },
-  "tools": {
-    "snmp_get_ap_summary": [
-      "apFirmwareVersion",
-      "frequency",
-      "channelBandwidth",
-      "transmitPower",
-      "subscribersCount",
-      "upTime"
-    ],
-    "snmp_get_frame_utilization": [
-      "frameUtilizationDlPct",
-      "frameUtilizationUlPct"
-    ],
-    "snmp_get_sm_table": [
-      "smSessionUptime",
-      "smCinr",
-      "smLinkStatus",
-      "smLuid"
-    ],
-    "snmp_get_sm_detailed_diagnostics": [
-      "smJitter",
-      "smCinr",
-      "smRetransmits",
-      "smRxLevel",
-      "smTxLevel"
-    ],
-    "snmp_run_spectrum_analysis": [
-      "spectrumNoiseFloorA",
-      "spectrumNoiseFloorB",
-      "spectrumNoiseFloorC",
-      "spectrumChannelRank",
-      "spectrumScanStatus"
-    ],
-    "snmp_migrate_radio_frequency": [
-      "migrateCarrierFrequency",
-      "migratePriorCarrierFrequency"
-    ]
-  },
-  "hmac_sha256": "27139589b5a0f10881a4af6555b823baf3ea841b2130d3145a930e6de99dc7cf",
-  "_provenance": {
-    "source": "live SNMP walk against AP Cambium PMP 450i (192.0.2.10)",
-    "verification_date": "2026-09-13",
-    "mib_references": [
-      "WHISP-BOX-MIBV2-MIB (whispBoxSwVersion, activeTxPowerStr)",
-      "WHISP-APS-MIB (whispApsConfig, whispApsFrUtlStats, whispLinkTable)",
-      "WHISP-GLOBAL-REG-MIB (enterprises.161.19.3 root)"
-    ],
-    "notes": "Aliases preserved as separate keys per issue #35 design: Cambium hardware exposes a single OID per physical quantity; the multiple names document which slice reads each (Slice 1 radio metrics, Slice 2 read-summary, Slice 3 SM table, Slice 4 RF migration)."
   }
 }
