@@ -356,6 +356,29 @@ def test_install_phase_catalog_invokes_sign_catalog(
     )
 
 
+def test_install_phase_catalog_passes_vendor_model_firmware(
+    install_script_source: str,
+) -> None:
+    """phase_catalog MUST pass ``--vendor``/``--model``/``--firmware`` to sign_catalog.py.
+
+    Without these flags, ``sign_catalog.py`` defaults to
+    ``cambium/pmp450i/15.2.1`` so every iteration of the find loop
+    re-signs the SAME catalog file and every other firmware (e.g.
+    ``15.3.0.json``) is left unsigned. ``OidCatalogRegistry.verify_all()``
+    then crashes on boot with an HMAC mismatch on the unsigned file
+    (closes #32).
+    """
+    # All three flags MUST appear as literal CLI args. The substring
+    # match is precise enough to catch a missing flag without false
+    # positives against any other use of these words in the script.
+    for flag in ("--vendor", "--model", "--firmware"):
+        assert flag in install_script_source, (
+            f"install.sh must pass {flag!r} to sign_catalog.py in phase_catalog; "
+            "without it sign_catalog.py defaults to cambium/pmp450i/15.2.1 and "
+            "every other catalog in the loop is re-signed with the wrong triple."
+        )
+
+
 def test_install_does_not_echo_signing_key(install_script_source: str) -> None:
     """`printf`/`echo` MUST NEVER print the raw signing key.
 

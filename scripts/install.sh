@@ -394,10 +394,23 @@ phase_catalog() {
     # because catalog paths are constrained (vendor/model/firmware.json)
     # and the failure mode (space in path) is benign — the runner will
     # just fail to find that file.
+    #
+    # Each catalog lives at <output_root>/<vendor>/<model>/<firmware>.json.
+    # We MUST pass --vendor / --model / --firmware so sign_catalog.py
+    # writes the correct envelope; without them it defaults to
+    # cambium/pmp450i/15.2.1 and every iteration of this loop re-signs
+    # the SAME file, leaving the other firmware (e.g. 15.3.0.json)
+    # unsigned. That unsigned catalog then fails HMAC verification at
+    # boot with `CatalogVerificationError: signature mismatch`. Closes
+    # #32.
     while IFS= read -r catalog; do
         [ -z "${catalog}" ] && continue
-        run "sign $(basename "${catalog}")" \
-            "cd '${PREFIX}' && NORA_OID_CATALOG_SIGNING_KEY=\"\${NORA_OID_CATALOG_SIGNING_KEY:-}\" '${PREFIX}/.venv/bin/python' '${PREFIX}/scripts/sign_catalog.py' --output-root '${PREFIX}/data/oid-catalogs'"
+        local firmware vendor model
+        firmware="$(basename "${catalog}" .json)"
+        model="$(basename "$(dirname "${catalog}")")"
+        vendor="$(basename "$(dirname "$(dirname "${catalog}")")")"
+        run "sign ${vendor}/${model}/${firmware}.json" \
+            "cd '${PREFIX}' && NORA_OID_CATALOG_SIGNING_KEY=\"\${NORA_OID_CATALOG_SIGNING_KEY:-}\" '${PREFIX}/.venv/bin/python' '${PREFIX}/scripts/sign_catalog.py' --vendor '${vendor}' --model '${model}' --firmware '${firmware}' --output-root '${PREFIX}/data/oid-catalogs'"
     done < <(find "${PREFIX}/data/oid-catalogs" -name '*.json' -type f)
 }
 
