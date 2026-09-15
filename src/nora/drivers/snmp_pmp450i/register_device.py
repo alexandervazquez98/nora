@@ -159,7 +159,7 @@ def _register_device_impl(
     community: str,
     validate: bool,
     sanitizer: Any | None,
-    mutable_inventory: MutableInventory,
+    mutable_inventory: MutableInventory | None = None,
     client_factory: Callable[[Device], SnmpClient] | None = None,
 ) -> DeviceRecord:
     """Build + validate + insert a runtime device.
@@ -167,8 +167,11 @@ def _register_device_impl(
     Parameters
     ----------
     driver
-        The driver singleton (reserved for future telemetry hooks;
-        unused by the v1 validate path). Pass ``None`` for tests.
+        The driver singleton. Used as the single source of truth for
+        the mutable inventory AND (when supplied) the
+        ``client_factory``. The server-layer wrapper at ``server.py``
+        passes ``get_driver()`` here. Tests that don't need a driver
+        pass ``None`` AND supply ``mutable_inventory=`` directly.
     host
         IPv4 literal the operator pasted in chat. Validated pre-wire
         against :func:`ipaddress.IPv4Address`.
@@ -185,9 +188,9 @@ def _register_device_impl(
         ``_sanitizer`` and the helper can use it for free-text field
         sanitisation. v1 accepts but does not require it.
     mutable_inventory
-        The wrapper that holds runtime-registered devices. Inserted
-        ONLY on the success path — every failure mode leaves the
-        overlay unchanged.
+        The wrapper that holds runtime-registered devices. Defaults to
+        ``driver._inventory`` when not supplied. Inserted ONLY on the
+        success path — every failure mode leaves the overlay unchanged.
     client_factory
         Callable that returns an :class:`SnmpClient` for the resolved
         ``Device``. Tests inject fakes here; production passes the
@@ -216,29 +219,38 @@ def _register_device_impl(
         ``DeviceResolver.build`` uses ``secrets.token_hex(3)``, but
         the typed exception surfaces it for completeness.)
     """
-    del driver  # reserved for future telemetry hooks
+    del sanitizer  # reserved for future telemetry hooks
 
     device = _build_device(host, community)
 
     if validate:
         if client_factory is None:
-            from nora.drivers.snmp_pmp450i.driver import default_client_factory
+            if driver is not None:
+                client_factory = driver._client_factory
+            else:
+                from nora.drivers.snmp_pmp450i.driver import default_client_factory
 
-            client_factory = default_client_factory
+                client_factory = default_client_factory
         client = client_factory(device)
         try:
             try:
                 _validate_sysdescr(client)
-            except DeviceUnreachable as exc:
+            except DeviceUnreachable:
                 # Re-raise with the actual host the operator typed.
-                raise DeviceUnreachable(host) from exc
-            except InvalidCommunity as exc:
-                raise InvalidCommunity(community) from exc
+                raise DeviceUnreachable(host) from None
+            except InvalidCommunity:
+                raise InvalidCommunity(community) from None
         finally:
             try:
                 client.close()
             except Exception:  # pragma: no cover - close is best-effort
                 pass
+
+    # Resolve the mutable inventory from the driver when not supplied.
+    if mutable_inventory is None:
+        if driver is None:
+            raise RuntimeError("register_device requires either driver= or mutable_inventory=")
+        mutable_inventory = driver._inventory
 
     try:
         mutable_inventory.register(device)

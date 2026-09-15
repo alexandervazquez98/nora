@@ -563,7 +563,7 @@ def test_unified_tool_catalog_references_required_oids_per_tool(tmp_path: Path) 
             "verify_tools_are_catalogued",
         }
     }
-    # All eleven tool functions are present.
+    # All twelve tool functions are present.
     assert server_tool_names == {
         "snmp_get_pmp450i_radio_metrics",
         "snmp_get_ap_summary",
@@ -576,6 +576,7 @@ def test_unified_tool_catalog_references_required_oids_per_tool(tmp_path: Path) 
         "get_device_lifecycle_summary",
         "correlate_sector_interference",
         "save_intervention_record",
+        "register_device",
     }, f"server.__all__ tool surface drifted; got {sorted(server_tool_names)!r}"
 
 

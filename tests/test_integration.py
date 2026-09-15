@@ -237,7 +237,8 @@ def test_subprocess_responds_to_tools_list_with_nine_tools(tmp_path: Path) -> No
 
     assert parsed_reply is not None, f"No `tools/list` reply found in stdout:\n{proc.stdout}"
 
-    # The reply's `result.tools` array MUST list exactly the eleven thin tools.
+    # The reply's `result.tools` array MUST list exactly the twelve thin tools
+    # (11 pre-`register_device` + `register_device` from issue #42).
     tools = parsed_reply["result"].get("tools", [])
     names = {t.get("name") for t in tools}
     expected = {
@@ -252,8 +253,9 @@ def test_subprocess_responds_to_tools_list_with_nine_tools(tmp_path: Path) -> No
         "get_device_lifecycle_summary",
         "correlate_sector_interference",
         "save_intervention_record",
+        "register_device",
     }
-    assert names == expected, f"Expected exactly the 11 thin tools; got {names}"
+    assert names == expected, f"Expected exactly the 12 thin tools; got {names}"
 
 
 def test_subprocess_emits_structured_startup_log_on_stderr(tmp_path: Path) -> None:

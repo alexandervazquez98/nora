@@ -87,7 +87,8 @@ class MutableInventory(_InventoryLike):
     @property
     def device_ids(self) -> list[str]:
         """Return every `device_id` (overlay + base), sorted."""
-        return sorted(set(self._overlay) | set(self._base.device_ids))
+        combined: set[str] = {*self._overlay, *self._base.device_ids}
+        return sorted(combined)
 
     # ------------------------------------------------------------------
     # Mutators — guarded by `_lock`.

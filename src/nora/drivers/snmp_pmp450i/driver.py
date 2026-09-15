@@ -93,6 +93,33 @@ class Pmp450iDriver:
         self._catalog_registry = catalog_registry
         self._client_factory = client_factory
 
+    # ------------------------------------------------------------------
+    # Runtime mutation — `register_device` MCP tool seam (issue #42).
+    # ------------------------------------------------------------------
+
+    def register(self, device: Device) -> None:
+        """Insert ``device`` into the runtime inventory.
+
+        Issue #42 / change `2026-09-15-register-device-mcp`: the
+        `register_device` MCP tool needs a single facade to mutate the
+        inventory. The driver exposes ``register(device)`` here so the
+        tool body in ``server.py`` calls ``driver.register(...)``
+        without reaching into the private ``_inventory`` attribute.
+
+        On a frozen `Inventory` (back-compat path) the call raises
+        `AttributeError` because ``Inventory`` is Pydantic-frozen —
+        ``cli.main()`` always wires a `MutableInventory` in production
+        so this surface is the boot contract.
+        """
+        self._inventory.register(device)  # type: ignore[attr-defined]
+
+    def unregister(self, device_id: str) -> None:
+        """Remove ``device_id`` from the runtime inventory.
+
+        Counterpart to :meth:`register` — same wiring story.
+        """
+        self._inventory.unregister(device_id)  # type: ignore[attr-defined]
+
     def fetch_radio_metrics(self, device_id: str) -> RadioMetricsReport:
         """Fetch + fold a typed `RadioMetricsReport` for `device_id`.
 

@@ -71,8 +71,10 @@ def _invoke(
     """Helper — invoke `_register_device_impl` with a fresh wrapper unless supplied."""
     from nora.drivers.snmp_pmp450i.register_device import _register_device_impl
 
-    wrapper = mutable_inventory if mutable_inventory is not None else MutableInventory(
-        base=Inventory(devices={})
+    wrapper = (
+        mutable_inventory
+        if mutable_inventory is not None
+        else MutableInventory(base=Inventory(devices={}))
     )
     client_factory = (
         (lambda _dev: canned) if canned is not None else (lambda _dev: _FakeSnmpClient())
@@ -296,3 +298,31 @@ def test_register_device_routes_through_wrapper() -> None:
     looked_up = wrapper.get(record.device_id)
     assert isinstance(looked_up, Device)
     assert looked_up.host == "192.0.2.10"
+
+
+# ---------------------------------------------------------------------------
+# R-NEW-1-S2 — `tools/list` over stdio returns the `register_device` schema.
+# ---------------------------------------------------------------------------
+
+
+def test_register_device_tools_list_schema() -> None:
+    """`tools/list` over stdio returns `register_device` with the right input schema."""
+    import asyncio
+
+    from nora import server as server_mod
+
+    async def _list() -> list[Any]:
+        return await server_mod.mcp.list_tools()
+
+    tools = asyncio.run(_list())
+    by_name = {t.name: t for t in tools}
+    assert "register_device" in by_name
+    tool = by_name["register_device"]
+    # FastMCP exposes the JSON schema under `.parameters` (Pydantic model).
+    schema = tool.parameters
+    assert isinstance(schema, dict)
+    props = schema.get("properties", {})
+    assert props["host"]["type"] == "string"
+    assert props["community"]["type"] == "string"
+    assert props["validate"]["type"] == "boolean"
+    assert props["validate"].get("default") is True
