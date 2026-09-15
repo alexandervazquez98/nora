@@ -239,3 +239,48 @@ def test_callers_can_catch_whole_hierarchy_with_driver_error() -> None:
         pass  # expected
     else:  # pragma: no cover - safety net
         pytest.fail("UncataloguedToolError was not caught by `except DriverError`")
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-15-register-device-mcp — typed errors for `register_device`.
+#
+# Each new exception subclasses `DriverError`, carries its offeding
+# identifier verbatim (host / community / device_id), and is caught by
+# the existing boundary polymorphism test above once added there.
+# ---------------------------------------------------------------------------
+
+
+def test_device_unreachable_is_driver_error_subclass() -> None:
+    """`DeviceUnreachable` is a `DriverError` carrying the host string."""
+    from nora.drivers.exceptions import DeviceUnreachable
+
+    exc = DeviceUnreachable("192.0.2.10")
+    assert isinstance(exc, DriverError)
+    assert "192.0.2.10" in str(exc)
+
+
+def test_invalid_community_is_driver_error_subclass() -> None:
+    """`InvalidCommunity` is a `DriverError` carrying the community string."""
+    from nora.drivers.exceptions import InvalidCommunity
+
+    exc = InvalidCommunity("bogus-community")
+    assert isinstance(exc, DriverError)
+    assert "bogus-community" in str(exc)
+
+
+def test_invalid_host_error_is_driver_error_subclass() -> None:
+    """`InvalidHostError` is a `DriverError` carrying the malformed host."""
+    from nora.drivers.exceptions import InvalidHostError
+
+    exc = InvalidHostError("not-an-ip")
+    assert isinstance(exc, DriverError)
+    assert "not-an-ip" in str(exc)
+
+
+def test_duplicate_device_error_is_driver_error_subclass() -> None:
+    """`DuplicateDeviceError` is a `DriverError` carrying the colliding id."""
+    from nora.drivers.exceptions import DuplicateDeviceError
+
+    exc = DuplicateDeviceError("ap-7400-01")
+    assert isinstance(exc, DriverError)
+    assert "ap-7400-01" in str(exc)
