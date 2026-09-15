@@ -59,6 +59,5 @@ def test_does_not_instruct_orchestrator_to_echo_community() -> None:
     pattern = re.compile(r"\becho\b[^.\n]*\bcommunity\b", re.IGNORECASE)
     matches = pattern.findall(body)
     assert matches == [], (
-        f"§4 must NOT instruct the orchestrator to echo the community string; "
-        f"found: {matches!r}"
+        f"§4 must NOT instruct the orchestrator to echo the community string; found: {matches!r}"
     )

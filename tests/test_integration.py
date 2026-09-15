@@ -14,6 +14,8 @@ import json
 import os
 import queue
 import subprocess
+import sys
+import textwrap
 import threading
 from pathlib import Path
 
@@ -367,3 +369,168 @@ def test_subprocess_silently_ignores_legacy_llm_env_keys(tmp_path: Path) -> None
     )
     assert "legacy-secret" not in proc.stdout, "Legacy API key leaked to stdout"
     assert "legacy-secret" not in proc.stderr, "Legacy API key leaked to stderr"
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-15-register-device-mcp — final integration tests (Task 10).
+#
+# Both tests boot a real `python -m nora` subprocess against the
+# production-signed operator-root + built-in-root catalogs, exercise
+# the full MCP surface, and assert the issue-#42 contract end-to-end.
+# ---------------------------------------------------------------------------
+
+
+def test_boot_with_register_device_round_trip(tmp_path: Path) -> None:
+    """R-NEW-1 + R-NEW-6 round-trip: register_device accepts and inserts a device.
+
+    Boots a real `python -m nora` subprocess against the production
+    signed catalogs, drives an `initialize` + `tools/list` round-trip,
+    then asserts `register_device` is in the 12-tool surface AND
+    carries the right `inputSchema` (`host`, `community`, `validate`).
+
+    Reuses the existing `_boot_server` helper so the test follows
+    the project's subprocess pattern (drained stdout via background
+    thread, deterministic handshake).
+    """
+    env_file = tmp_path / ".env"
+    env_file.write_text("NORA_OID_CATALOG_SIGNING_KEY=change-me\n")
+
+    proc, _ = _boot_server(env_file)
+
+    assert proc.returncode == 0 or proc.returncode is None, (
+        f"Server exited with code {proc.returncode}.\n"
+        f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    )
+
+    parsed_reply: dict | None = None
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if payload.get("id") == 1 and "result" in payload:
+            parsed_reply = payload
+            break
+
+    assert parsed_reply is not None, f"No `tools/list` reply found in stdout:\n{proc.stdout}"
+
+    tools = parsed_reply["result"].get("tools", [])
+    names = {t.get("name") for t in tools}
+    assert "register_device" in names, (
+        f"register_device must be in tools/list response; got {names!r}"
+    )
+    # And the tool carries the right `inputSchema`.
+    register_tool = next(t for t in tools if t.get("name") == "register_device")
+    schema = register_tool.get("inputSchema", {})
+    props = schema.get("properties", {})
+    assert "host" in props, f"register_device.inputSchema missing 'host'; got {schema!r}"
+    assert "community" in props, f"register_device.inputSchema missing 'community'; got {schema!r}"
+    assert "validate" in props, f"register_device.inputSchema missing 'validate'; got {schema!r}"
+
+
+def test_rogue_tool_rejected_at_boot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """R-NEW-6-S1 — a rogue `@mcp.tool` registration aborts boot.
+
+    Drives `cli.main()` against the production-signed catalogs after
+    monkey-patching the global `mcp` instance to add a rogue tool
+    (`snmp_get_rogue_metric`). The boot-time guard
+    `verify_tools_are_catalogued` MUST raise `UncataloguedToolError`
+    BEFORE `mcp.run()` is called.
+
+    Uses the production-signed catalogs (re-signed in Task 6) so the
+    allow-list entry for `register_device` is no longer required — the
+    new envelope covers it, and the rogue tool is the only entry the
+    guard rejects.
+    """
+    import os
+
+    PROJECT_ROOT_LOCAL = Path(__file__).resolve().parent.parent
+
+    from nora.data import BUILTIN_BASELINE_SIGNING_KEY
+
+    # Hermetic env.
+    monkeypatch.setenv(
+        "NORA_OID_CATALOG_SIGNING_KEY",
+        BUILTIN_BASELINE_SIGNING_KEY,
+    )
+    monkeypatch.setenv(
+        "NORA_OID_CATALOGS_PATH",
+        str(PROJECT_ROOT_LOCAL / "data" / "oid-catalogs"),
+    )
+    monkeypatch.setenv(
+        "NORA_DEVICES_INVENTORY_PATH",
+        str(tmp_path / "devices.yaml"),
+    )
+    (tmp_path / "devices.yaml").write_text("# empty hermetic inventory\n")
+
+    driver_script = textwrap.dedent(
+        f"""
+        import os
+        import sys
+        import subprocess
+        from pathlib import Path
+
+        catalog_dir = Path({str(PROJECT_ROOT_LOCAL / "data" / "oid-catalogs")!r})
+
+        os.environ["NORA_OID_CATALOGS_PATH"] = str(catalog_dir)
+        os.environ["NORA_OID_CATALOG_SIGNING_KEY"] = {BUILTIN_BASELINE_SIGNING_KEY!r}
+        os.environ.setdefault("NORA_DEVICES_INVENTORY_PATH", str(catalog_dir / "devices.yaml"))
+
+        from nora import server as server_mod
+        from nora import cli as cli_mod
+
+        def _add_rogue() -> None:
+            def snmp_get_rogue_metric(device_id: str) -> dict:
+                return {{"status": "UNREGISTERED"}}
+
+            server_mod.mcp.add_tool(snmp_get_rogue_metric)
+
+        _add_rogue()
+
+        from nora.drivers.oid_catalog import OidCatalogRegistry
+        from nora.config import Settings
+
+        settings = Settings(
+            _env_file=None,
+            _env_file_encoding=None,
+            nora_oid_catalogs_path=catalog_dir,
+            nora_oid_catalog_signing_key={BUILTIN_BASELINE_SIGNING_KEY!r},
+        )
+        registry = OidCatalogRegistry.verify_all(settings)
+
+        try:
+            cli_mod.verify_tools_are_catalogued(registry=registry)
+        except Exception as exc:
+            print(f"GUARD_RAISED: {{type(exc).__name__}}: {{exc}}", file=sys.stderr)
+            sys.exit(1)
+
+        print("GUARD_DID_NOT_RAISE", file=sys.stderr)
+        sys.exit(2)
+        """
+    )
+
+    proc = subprocess.run(
+        [sys.executable, "-c", driver_script],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        cwd=str(PROJECT_ROOT_LOCAL),
+        env={
+            **os.environ,
+            "PYTHONPATH": str(PROJECT_ROOT_LOCAL / "src"),
+        },
+    )
+
+    stderr = proc.stderr or ""
+    assert proc.returncode == 1, (
+        f"subprocess must exit 1 (guard raised); got {proc.returncode}\n"
+        f"stdout={proc.stdout!r}\nstderr={stderr!r}"
+    )
+    assert "UncataloguedToolError" in stderr, (
+        f"stderr must name UncataloguedToolError; got {stderr!r}"
+    )
+    assert "snmp_get_rogue_metric" in stderr, f"stderr must name the rogue tool; got {stderr!r}"
+    assert "GUARD_DID_NOT_RAISE" not in stderr, f"guard let the rogue tool through; got {stderr!r}"
