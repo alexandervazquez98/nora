@@ -27,21 +27,24 @@ PRIVATE_IPV4 = re.compile(
 
 
 def test_settings_has_seven_user_fields() -> None:
-    """After the thin split, `Settings.model_fields` has exactly 12 entries.
+    """After the thin split, `Settings.model_fields` has exactly 14 entries.
 
-    Eleven user-settable fields plus the computed `loaded_from` = 12 total.
+    Thirteen user-settable fields plus the computed `loaded_from` = 14 total.
     The nine former LLM/journal fields MUST be gone.
 
     PR 4 (slice 4) extends the set with four HITL/maintenance-window
     fields: ``nora_maintenance_window_minutes``,
     ``nora_maintenance_window_start_minutes_ago``,
     ``nora_hitl_rollback_timeout_seconds``, ``nora_hitl_token_ttl_seconds``.
+
+    Issue #43 (`2026-09-15-3tier-tool-governance`) extends the set with
+    two more: ``nora_hitl_signing_key``, ``nora_tool_specs_dir``.
     """
     from nora.config import Settings
 
     fields = Settings.model_fields
-    assert len(fields) == 12, (
-        f"Expected 12 model fields (11 user + loaded_from); got {len(fields)}: {sorted(fields)}"
+    assert len(fields) == 14, (
+        f"Expected 14 model fields (13 user + loaded_from); got {len(fields)}: {sorted(fields)}"
     )
 
     forbidden = {
@@ -381,3 +384,99 @@ def test_env_example_documents_three_intervention_memory_keys() -> None:
             if not re.search(r"example\.com|change-?me|localhost|placeholder", v, re.I):
                 offenders.append(f"{key}: hostname literal {v!r}")
     assert offenders == [], f".env.example has non-synthetic values: {offenders}"
+
+
+# --- Requirement: HITL signing key + tool-spec dir (issue #43) -------------
+
+
+def test_settings_has_new_hitl_signing_key_field() -> None:
+    """`Settings` exposes `nora_hitl_signing_key: SecretStr | None`.
+
+    Per `secure-configuration` scenario "Settings exposes
+    nora_hitl_signing_key as SecretStr". The field defaults to `None`
+    (lazy fail-closed at Tier-2 invocation time).
+    """
+    import os
+
+    from nora.config import Settings
+
+    for key in list(os.environ):
+        if key.startswith("NORA_"):
+            os.environ.pop(key, None)
+
+    settings = Settings(_env_file=None, _env_file_encoding=None)
+    assert hasattr(settings, "nora_hitl_signing_key")
+    assert settings.nora_hitl_signing_key is None, (
+        "nora_hitl_signing_key default must be None (lazy fail-closed at Tier-2 invocation)"
+    )
+
+
+def test_settings_loads_hitl_signing_key_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`NORA_HITL_SIGNING_KEY` env / `.env` is loaded into `Settings.nora_hitl_signing_key`.
+
+    Per `secure-configuration` scenario "Settings exposes
+    nora_hitl_signing_key as SecretStr". `repr()` MUST mask the value.
+    """
+    from pydantic import SecretStr
+
+    from nora.config import Settings
+
+    monkeypatch.setenv("NORA_HITL_SIGNING_KEY", "test-only-key-do-not-use")
+    settings = Settings(_env_file=None, _env_file_encoding=None)
+
+    assert isinstance(settings.nora_hitl_signing_key, SecretStr)
+    assert settings.nora_hitl_signing_key.get_secret_value() == "test-only-key-do-not-use"
+    assert "test-only-key-do-not-use" not in repr(settings), (
+        f"repr() leaked the signing key: {repr(settings)!r}"
+    )
+
+
+def test_settings_has_tool_specs_dir_field_with_default() -> None:
+    """`Settings.nora_tool_specs_dir` defaults to `Path(\"docs/tool_specs\")`.
+
+    Per `secure-configuration` scenario "default tool-spec dir is
+    resolved against the repo root".
+    """
+    import os
+
+    from nora.config import Settings
+
+    for key in list(os.environ):
+        if key.startswith("NORA_"):
+            os.environ.pop(key, None)
+
+    settings = Settings(_env_file=None, _env_file_encoding=None)
+    assert hasattr(settings, "nora_tool_specs_dir")
+    # The default is `Path("docs/tool_specs")` — resolved relative to the
+    # process CWD. The assertion only pins the field exists and is a Path.
+    from pathlib import Path
+
+    assert isinstance(settings.nora_tool_specs_dir, Path)
+    assert settings.nora_tool_specs_dir.name == "tool_specs"
+
+
+def test_settings_tool_specs_dir_overrides_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`NORA_TOOL_SPECS_DIR` overrides the default tool-spec dir.
+
+    Per `secure-configuration` scenario "operator override wins over default".
+    """
+    from pathlib import Path
+
+    from nora.config import Settings
+
+    monkeypatch.setenv("NORA_TOOL_SPECS_DIR", "/etc/nora/tool_specs/")
+    settings = Settings(_env_file=None, _env_file_encoding=None)
+    assert settings.nora_tool_specs_dir == Path("/etc/nora/tool_specs/")
+
+
+def test_env_example_lists_two_new_hitl_and_tool_spec_keys() -> None:
+    """`.env.example` lists `NORA_HITL_SIGNING_KEY` and `NORA_TOOL_SPECS_DIR`.
+
+    Per `secure-configuration` scenario ".env.example lists every new field".
+    Placeholder values only.
+    """
+    env_text = ENV_EXAMPLE.read_text()
+    declared = set(re.findall(r"^([A-Z][A-Z0-9_]+)\s*=", env_text, re.MULTILINE))
+
+    for key in ("NORA_HITL_SIGNING_KEY", "NORA_TOOL_SPECS_DIR"):
+        assert key in declared, f".env.example missing {key!r}"

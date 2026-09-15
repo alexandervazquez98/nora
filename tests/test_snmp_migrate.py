@@ -238,17 +238,26 @@ def _build_driver(
 
 def _mint_valid_token(operator_id: str = "tester") -> str:
     """Mint a stub approval token + JSON-encode it for the verifier."""
+    from pydantic import SecretStr
+
     from nora.hitl.tokens import mint_token
 
-    token_obj = mint_token(operator_id, ttl_seconds=900)
+    token_obj = mint_token(
+        operator_id,
+        ttl_seconds=900,
+        signing_key=SecretStr("test-snmp-migrate-hmac-key"),
+    )
     return json.dumps(token_obj.model_dump(mode="json"))
 
 
 def _settings_with_rollback_timeout(seconds: int) -> Settings:
+    from pydantic import SecretStr
+
     return Settings(
         _env_file=None,
         _env_file_encoding=None,
         nora_hitl_rollback_timeout_seconds=seconds,
+        nora_hitl_signing_key=SecretStr("test-snmp-migrate-hmac-key"),
     )
 
 

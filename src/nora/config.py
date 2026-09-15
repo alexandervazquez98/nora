@@ -94,6 +94,18 @@ class Settings(BaseSettings):
     # :func:`nora.config.hitl_kill_switch_active`) to disable HITL
     # acceptance.
     nora_hitl_token_ttl_seconds: int = 900
+    # Issue #43 / `2026-09-15-3tier-tool-governance`: HMAC-SHA256 signing
+    # key for HITL approval tokens. Mirrors `nora_oid_catalog_signing_key`
+    # (catalog HMAC). Lazy fail-closed: empty / missing key raises
+    # `AutonomousMutationRejected` at first Tier-2 invocation
+    # (`mint_token` / `verify_approval_token`); Tier-0 / Tier-1 boot
+    # proceeds regardless.
+    nora_hitl_signing_key: SecretStr | None = None
+    # Issue #43 / `2026-09-15-3tier-tool-governance`: operator-overridable
+    # tool-spec directory scanned alongside the packaged prompts at boot.
+    # `PromptRegistry.from_settings` reads this field; `None` (or a
+    # non-existent path) skips the tool-spec dir without raising.
+    nora_tool_specs_dir: Path | None = Path("docs/tool_specs")
 
     loaded_from: LoadSource = "defaults"
 

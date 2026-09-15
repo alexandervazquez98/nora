@@ -227,7 +227,8 @@ def fetch_migrate(
             invalid tokens BEFORE any wire frame.
         target_frequency_mhz: Requested carrier frequency in MHz.
         settings: Optional :class:`Settings` instance (carries
-            ``nora_hitl_rollback_timeout_seconds``).
+            ``nora_hitl_rollback_timeout_seconds`` and
+            ``nora_hitl_signing_key``).
 
     Returns:
         A dict matching the :class:`MigrationResult` schema. On
@@ -241,8 +242,14 @@ def fetch_migrate(
         CatalogNotFoundError: no catalog for the device's
             ``(vendor, model, firmware)`` triple.
     """
-    # 1. HITL gate — fires FIRST.
-    verify_approval_token(approval_token)
+    # 1. HITL gate — fires FIRST. The signing key is sourced from
+    # `Settings.nora_hitl_signing_key`; lazy fail-closed if empty.
+    signing_key = (
+        getattr(settings, "nora_hitl_signing_key", None)
+        if settings is not None
+        else None
+    )
+    verify_approval_token(approval_token, signing_key=signing_key)
 
     # 2. Resolve device + catalog.
     device = driver._inventory.get(device_id)  # noqa: SLF001 — internal API
