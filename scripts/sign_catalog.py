@@ -114,6 +114,12 @@ TOOLS_V1: dict[str, list[str]] = {
         "migrateCarrierFrequency",
         "migratePriorCarrierFrequency",
     ],
+    # Issue #42 / `2026-09-15-register-device-mcp`: `register_device`
+    # carries the cheapest possible reachability probe (`sysDescr` GET
+    # against `1.3.6.1.2.1.1.1.0`). The envelope entry retires the
+    # legacy `_ALLOWED_UNCATALOGUED_TOOLS` allow-list entry in the
+    # same PR (Task 7).
+    "register_device": ["sysDescr"],
 }
 
 

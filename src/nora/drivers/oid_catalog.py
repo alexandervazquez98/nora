@@ -630,6 +630,13 @@ def _iter_json_files(root: _TraversableRoot | None) -> Iterator[_TraversableRoot
     ``name``, so the walk is identical. A missing or non-directory root
     yields nothing; iteration proceeds top-down, sorted at each level so
     the on-disk ordering never leaks into ``loaded_refs``.
+
+    The walker explicitly skips ``*.source.json`` files (the editable
+    source-of-truth under `data/oid-catalogs/sources/` added by PR #40)
+    so the registry only loads the HMAC-signed envelopes. Skipping the
+    ``sources/`` directory name would be tempting but breaks if a vendor
+    names their model directory `sources/` — the extension test is the
+    safer contract.
     """
     if root is None:
         return
@@ -640,7 +647,7 @@ def _iter_json_files(root: _TraversableRoot | None) -> Iterator[_TraversableRoot
     for entry in children:
         if entry.is_dir():
             yield from _iter_json_files(entry)
-        elif entry.name.endswith(".json"):
+        elif entry.name.endswith(".json") and not entry.name.endswith(".source.json"):
             yield entry
 
 
