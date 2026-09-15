@@ -136,6 +136,19 @@ _INTEGRATION_CATALOG_TOOLS: dict[str, list[str]] = {
     # `sysDescr` as the registered OID for the boot-time guard to
     # accept the tool without an allow-list entry.
     "register_device": ["sysDescr"],
+    # Slice-1 radio-metrics tool — promoted from the legacy
+    # `_ALLOWED_UNCATALOGUED_TOOLS` allow-list (Task 7). The hermetic
+    # fixture mirrors the production re-signed catalog envelope so
+    # the rogue-tool guard test below finds the rogue FIRST.
+    "snmp_get_pmp450i_radio_metrics": [
+        "radioDownlinkRate",
+        "radioUplinkRate",
+        "signalStrengthRx",
+        "signalStrengthTx",
+        "ssr",
+        "modulationMode",
+        "sysDescr",
+    ],
 }
 
 

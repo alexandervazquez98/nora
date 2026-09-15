@@ -684,14 +684,13 @@ _ALLOWED_UNCATALOGUED_TOOLS: frozenset[str] = frozenset(
         "get_device_lifecycle_summary",
         "correlate_sector_interference",
         "save_intervention_record",
-        "snmp_get_pmp450i_radio_metrics",
-        # Issue #42 / `2026-09-15-register-device-mcp`: `register_device`
-        # lands BEFORE the catalog re-sign adds the
-        # `"register_device": ["sysDescr"]` envelope (Task 6). The
-        # allow-list keeps the boot-time guard green between Tasks 5
-        # and 6; Task 6 retires this entry by extending the catalog
-        # envelope.
-        "register_device",
+        # Issue #42 / `2026-09-15-register-device-mcp`: both
+        # `register_device` and `snmp_get_pmp450i_radio_metrics` were
+        # retired from this allow-list once their catalog envelope
+        # entries landed in the re-signed baselines (Tasks 6 + 7).
+        # The four remaining entries are intervention-memory operators
+        # that consume the on-disk filesystem, not SNMP — they will
+        # never carry an OID catalog entry.
     }
 )
 

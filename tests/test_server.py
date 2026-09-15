@@ -354,6 +354,35 @@ def test_server_module_exports_three_new_tool_names() -> None:
     assert "correlate_sector_interference" in server_mod.__all__
 
 
+def test_snmp_get_pmp450i_radio_metrics_no_longer_in_allowlist() -> None:
+    """R-NEW-6-S5 — `_ALLOWED_UNCATALOGUED_TOOLS` retired the radio-metrics entry.
+
+    After the Task 6 + 7 catalog re-sign, every PMP 450i baseline
+    carries `snmp_get_pmp450i_radio_metrics` in its `tools` envelope,
+    so the legacy allow-list entry is dead weight. This test pins
+    the contract: the entry is NOT in the frozenset, AND the four
+    remaining entries (the intervention-memory operators) are unchanged.
+    """
+    import nora.server as server_mod
+
+    allow = server_mod._ALLOWED_UNCATALOGUED_TOOLS  # type: ignore[attr-defined]
+    assert "snmp_get_pmp450i_radio_metrics" not in allow, (
+        f"legacy radio-metrics entry must be retired; allow-list is {sorted(allow)!r}"
+    )
+    # The four remaining entries (intervention-memory operators) stay
+    # unchanged — those tools consume the on-disk filesystem, not SNMP.
+    expected_remaining = {
+        "search_intervention_history",
+        "get_device_lifecycle_summary",
+        "correlate_sector_interference",
+        "save_intervention_record",
+    }
+    assert expected_remaining.issubset(allow), (
+        f"intervention-memory entries must remain in allow-list; "
+        f"missing: {sorted(expected_remaining - allow)!r}"
+    )
+
+
 def test_mcp_tool_wrapper_delegates_to_pure_library_function(tmp_path: Path) -> None:
     """R-NEW-1-S2 — the MCP wrapper delegates to the library function with the same kwargs.
 
