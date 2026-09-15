@@ -341,3 +341,98 @@ def test_subprocess_python_dash_m_nora_exits_nonzero_on_empty_signing_key(tmp_pa
     assert "signing" in stderr_lower or "catalog" in stderr_lower, (
         f"stderr should mention signing/catalog; got: {proc.stderr!r}"
     )
+
+
+# --- Issue #43 / `2026-09-15-3tier-tool-governance` — boot wires multi-dir
+# registry; all 12 tools are classified into the 3-tier taxonomy. ---
+
+
+def test_boot_wires_prompt_registry_from_settings(tmp_path: Path) -> None:
+    """`cli.main()` invokes `PromptRegistry.from_settings(settings)` at boot.
+
+    Per `nora-mcp-server` R-NEW-9 scenario "cli.main wires
+    PromptRegistry.from_settings". The text scan proves the
+    wiring is present and precedes `mcp.run()`.
+    """
+    import inspect
+
+    from nora import cli
+
+    src = inspect.getsource(cli.main)
+    assert "PromptRegistry.from_settings" in src, (
+        f"cli.main MUST invoke PromptRegistry.from_settings(settings) at boot; got: {src!r}"
+    )
+    # The call must precede the mcp.run invocation.
+    from_settings_idx = src.find("PromptRegistry.from_settings")
+    mcp_run_idx = src.find("mcp.run(")
+    assert 0 <= from_settings_idx < mcp_run_idx, (
+        f"PromptRegistry.from_settings must precede mcp.run; "
+        f"got from_settings={from_settings_idx}, mcp_run={mcp_run_idx}"
+    )
+
+
+def test_tool_specs_dir_scanned_at_boot_when_present(tmp_path: Path) -> None:
+    """`from_settings(settings)` reads `nora_tool_specs_dir` when the dir exists.
+
+    Per `prompt-registry` R8 + `secure-configuration` "default tool-spec
+    dir is resolved against the repo root". The test exercises
+    `PromptRegistry.from_settings` end-to-end with an override path.
+    """
+    from nora.config import Settings
+    from nora.prompts.registry import PromptRegistry
+
+    tool_specs_dir = tmp_path / "custom_tool_specs"
+    tool_specs_dir.mkdir()
+    (tool_specs_dir / "example_tool.md").write_text(
+        "---\nname: example_tool\ndescription: hermetic tool spec\ntier: 0\n---\nhermetic body\n"
+    )
+
+    settings = Settings(
+        _env_file=None,
+        _env_file_encoding=None,
+        nora_tool_specs_dir=tool_specs_dir,
+    )
+    registry = PromptRegistry.from_settings(settings)
+    prompt = registry.get("example_tool")
+    assert prompt.metadata["tier"] == 0
+
+
+def test_tier_classification_covers_all_eleven_tools(tmp_path: Path) -> None:
+    """Every registered `@mcp.tool` is classified into exactly one tier.
+
+    Per `tool-service-impact-tiers` "Tool-To-Tier Mapping Is Verbatim":
+    Tier 0 (8): snmp_get_ap_summary, snmp_get_sm_table,
+    snmp_get_pmp450i_radio_metrics, snmp_get_frame_utilization,
+    snmp_get_sm_detailed_diagnostics, search_intervention_history,
+    get_device_lifecycle_summary, correlate_sector_interference.
+    Tier 1 (1): snmp_run_spectrum_analysis.
+    Tier 2 (2): snmp_migrate_radio_frequency, save_intervention_record.
+    """
+    from nora.prompts.registry import PromptRegistry
+
+    specs_dir = PROJECT_ROOT / "docs" / "tool_specs"
+    registry = PromptRegistry.scan(specs_dir)
+
+    expected_tiers: dict[str, int] = {
+        # Tier 0
+        "snmp_get_ap_summary": 0,
+        "snmp_get_sm_table": 0,
+        "snmp_get_pmp450i_radio_metrics": 0,
+        "snmp_get_frame_utilization": 0,
+        "snmp_get_sm_detailed_diagnostics": 0,
+        "search_intervention_history": 0,
+        "get_device_lifecycle_summary": 0,
+        "correlate_sector_interference": 0,
+        # Tier 1
+        "snmp_run_spectrum_analysis": 1,
+        # Tier 2
+        "snmp_migrate_radio_frequency": 2,
+        "save_intervention_record": 2,
+    }
+    assert len(expected_tiers) == 11
+
+    for tool_name, expected_tier in expected_tiers.items():
+        prompt = registry.get(tool_name)
+        assert prompt.metadata["tier"] == expected_tier, (
+            f"{tool_name} MUST be classified as tier {expected_tier}; got {prompt.metadata['tier']}"
+        )

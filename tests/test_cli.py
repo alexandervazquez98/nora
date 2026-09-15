@@ -66,6 +66,41 @@ _FAKE_SETTINGS = type(
 )()
 
 
+# Sentinel `PromptRegistry` carrying one stub `Prompt` per canonical
+# tool name, with metadata `tier` matching the canonical taxonomy. The
+# Issue #43 boot guard (`verify_tools_have_tier_classification`) walks
+# the registered `@mcp.tool` surface and looks up each tool's tier here;
+# the stub matches every name so the guard passes without error.
+class _FakePrompt:
+    def __init__(self, tier: int) -> None:
+        self.metadata = {"tier": tier}
+
+
+class _FakePromptRegistry:
+    _TIER_BY_TOOL = {
+        # Tier 0
+        "snmp_get_ap_summary": 0,
+        "snmp_get_sm_table": 0,
+        "snmp_get_pmp450i_radio_metrics": 0,
+        "snmp_get_frame_utilization": 0,
+        "snmp_get_sm_detailed_diagnostics": 0,
+        "search_intervention_history": 0,
+        "get_device_lifecycle_summary": 0,
+        "correlate_sector_interference": 0,
+        # Tier 1
+        "snmp_run_spectrum_analysis": 1,
+        # Tier 2
+        "snmp_migrate_radio_frequency": 2,
+        "save_intervention_record": 2,
+        # Tier 0 (legacy)
+        "register_device": 0,
+    }
+
+    def get(self, name: str) -> _FakePrompt:
+        tier = self._TIER_BY_TOOL.get(name, 0)
+        return _FakePrompt(tier=tier)
+
+
 def _install_cli_stubs(mp: object) -> list[dict]:
     """Patch every boot collaborator on the `cli` module with a no-op stub.
 
@@ -84,7 +119,11 @@ def _install_cli_stubs(mp: object) -> list[dict]:
     mp.setattr(
         cli,
         "PromptRegistry",
-        type("PR", (), {"from_settings": classmethod(lambda cls, s: object())}),
+        type(
+            "PR",
+            (),
+            {"from_settings": classmethod(lambda cls, s: _FakePromptRegistry())},
+        ),
     )
     mp.setattr(
         cli.OidCatalogRegistry,
@@ -99,6 +138,7 @@ def _install_cli_stubs(mp: object) -> list[dict]:
     mp.setattr(cli, "set_driver", lambda d: None)
     mp.setattr(cli, "register_tool_log_middleware", lambda: None)
     mp.setattr(cli, "verify_tools_are_catalogued", lambda registry: None)
+    mp.setattr(cli, "verify_tools_have_tier_classification", lambda pr: None)
     mp.setattr(cli, "Settings", lambda: _FAKE_SETTINGS)
     return calls
 

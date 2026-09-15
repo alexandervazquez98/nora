@@ -298,9 +298,7 @@ def snmp_get_sm_detailed_diagnostics(device_id: str, luid: str) -> dict[str, Any
 
 
 @mcp.tool
-def snmp_run_spectrum_analysis(
-    device_id: str, operator_confirmed: bool = False
-) -> dict[str, Any]:
+def snmp_run_spectrum_analysis(device_id: str, operator_confirmed: bool = False) -> dict[str, Any]:
     """Read a typed spectrum sweep for the named PMP 450i device.
 
     Returns a :class:`SpectrumAnalysis` carrying
@@ -660,10 +658,11 @@ _NON_TOOL_NAMES: frozenset[str] = frozenset(
         # the guard focused on the LLM-tool surface.
         "netops_orchestrator",
         "snmp_pmp450i",
-        # Boot-time guard helper exposed for `cli.verify_tools_are_catalogued`
-        # and the integration-test subprocess pattern. NOT an
-        # `@mcp.tool` — must not show up in the guard's iteration.
+        # Boot-time guard helpers exposed for `cli` and the
+        # integration-test subprocess pattern. NOT `@mcp.tool`s —
+        # must not show up in the guard's iteration.
         "verify_tools_are_catalogued",
+        "verify_tools_have_tier_classification",
     }
 )
 
@@ -777,6 +776,84 @@ def verify_tools_are_catalogued(
         )
 
 
+# ---------------------------------------------------------------------------
+# Issue #43 / `2026-09-15-3tier-tool-governance` — boot-time tier
+# classification guard. Per `tool-service-impact-tiers` capability
+# requirement "Three-Tier Taxonomy Is Frozen", every registered
+# `@mcp.tool` MUST be classified into exactly one of {Tier 0, Tier 1,
+# Tier 2}. The guard enumerates the canonical tool surface, looks up
+# each tool's tier in the tool-spec front-matter, and raises a typed
+# error on a missing or invalid classification.
+# ---------------------------------------------------------------------------
+
+
+# Tool name -> expected tier. Mirrors the verbatim table in
+# `openspec/changes/2026-09-15-3tier-tool-governance/specs/tool-service-impact-tiers/spec.md`.
+_EXPECTED_TOOL_TIERS: dict[str, int] = {
+    # Tier 0 — Passive Telemetry (8)
+    "snmp_get_ap_summary": 0,
+    "snmp_get_sm_table": 0,
+    "snmp_get_pmp450i_radio_metrics": 0,
+    "snmp_get_frame_utilization": 0,
+    "snmp_get_sm_detailed_diagnostics": 0,
+    "search_intervention_history": 0,
+    "get_device_lifecycle_summary": 0,
+    "correlate_sector_interference": 0,
+    # Tier 1 — Potentially Disruptive (1)
+    "snmp_run_spectrum_analysis": 1,
+    # Tier 2 — Service-Affecting Mutations (2)
+    "snmp_migrate_radio_frequency": 2,
+    "save_intervention_record": 2,
+    # `register_device` (issue #42) is intentionally NOT in this table
+    # for now — its dedicated `docs/tool_specs/register_device.md` lands
+    # in a follow-up change. The guard's "expected_tier is None" branch
+    # below skips unknown tools so a future tool expansion does not
+    # fail boot.
+}
+
+
+def verify_tools_have_tier_classification(
+    prompt_registry: Any,
+) -> None:
+    """Boot-time guard — refuse any `@mcp.tool` whose tier is missing or invalid.
+
+    Iterates the canonical tool surface, looks up each tool's tier in
+    ``prompt_registry.get(name).metadata["tier"]`` (parsed by the
+    ToolSpecValidator), and raises
+    :class:`UncataloguedToolError` on any mismatch. Called from
+    :func:`nora.cli.main` AFTER ``PromptRegistry.from_settings`` and
+    BEFORE ``mcp.run()`` so a misclassification aborts the boot — the
+    server never reaches the LLM with an unclassified tool surface.
+    """
+    from nora.drivers.exceptions import UncataloguedToolError
+
+    for tool_name in _enumerate_tool_names():
+        # Tools that do NOT have a tool-spec (e.g. `register_device`,
+        # `save_intervention_record` may appear here when the override
+        # is off) fall back to the canonical tier table.
+        try:
+            prompt = prompt_registry.get(tool_name)
+            classified_tier = prompt.metadata.get("tier")
+        except Exception:  # noqa: BLE001
+            classified_tier = None
+
+        expected_tier = _EXPECTED_TOOL_TIERS.get(tool_name)
+        if expected_tier is None:
+            # Tool is not part of the canonical taxonomy (e.g. legacy
+            # tools added by follow-up PRs); skip without raising so a
+            # future tool expansion does not fail boot.
+            continue
+        if classified_tier != expected_tier:
+            raise UncataloguedToolError(
+                tool_name=tool_name,
+                reason=(
+                    f"tool {tool_name!r} has tier {classified_tier!r}; "
+                    f"expected {expected_tier!r} per "
+                    f"`tool-service-impact-tiers` taxonomy"
+                ),
+            )
+
+
 __all__ = [
     "mcp",
     "configure_logging",
@@ -800,4 +877,5 @@ __all__ = [
     "snmp_pmp450i",
     "register_tool_log_middleware",
     "verify_tools_are_catalogued",
+    "verify_tools_have_tier_classification",
 ]

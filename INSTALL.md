@@ -38,8 +38,9 @@ uv sync
 scripts:
 
 - `nora-mcp` — canonical entry point (use this).
-- `nora` — deprecated alias for `python -m nora`; emits a `DeprecationWarning`
-  and delegates to `nora-mcp`. Kept for backward compatibility only.
+- `nora` — sub-command dispatcher. `nora` (no args) emits a `DeprecationWarning`
+  and boots MCP (back-compat alias). `nora mcp` boots MCP. `nora hitl mint …`
+  mints a signed HITL approval token.
 
 Verify the install:
 

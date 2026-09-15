@@ -585,6 +585,9 @@ def test_unified_tool_catalog_references_required_oids_per_tool(tmp_path: Path) 
             "netops_orchestrator",
             "snmp_pmp450i",
             "verify_tools_are_catalogued",
+            # Issue #43 / `2026-09-15-3tier-tool-governance`:
+            # boot-time tier-classification helper.
+            "verify_tools_have_tier_classification",
         }
     }
     # All twelve tool functions are present.

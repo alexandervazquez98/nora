@@ -47,6 +47,7 @@ from nora.server import (  # noqa: E402
     set_prompt_registry,
     set_runtime_state,
     verify_tools_are_catalogued,
+    verify_tools_have_tier_classification,
 )
 
 logger = logging.getLogger("nora.cli")
@@ -256,6 +257,12 @@ def main(argv: Sequence[str] | None = None) -> None:
     # `UncataloguedToolError` carries the offending tool name so the
     # operator can see which registration needs to be signed.
     verify_tools_are_catalogued(catalog_registry)
+    # Issue #43 / `2026-09-15-3tier-tool-governance`: refuse any
+    # `@mcp.tool` whose tier does NOT match the canonical 3-tier
+    # taxonomy. Runs AFTER `from_settings` (so the tool-spec dir was
+    # scanned) and BEFORE `mcp.run()` (so an unclassified tool never
+    # reaches the LLM).
+    verify_tools_have_tier_classification(prompt_registry)
     register_tool_log_middleware()
     logger.info(
         "nora-mcp boot complete: catalogs=%s devices=%s transport=%s host=%s port=%s",
