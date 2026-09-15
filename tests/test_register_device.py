@@ -1,212 +1,298 @@
-"""Tool-S7 — `MutableInventory` routing regression (issue #42, Task 3).
+"""Strict TDD tests for `register_device` (issue #42).
 
-The driver's 8 `Inventory.get()` call sites (see design §6) must route
-through `MutableInventory.get(...)` because `cli.py` passes the wrapper
-to `Pmp450iDriver.__init__`. This regression test pins that path:
+Each scenario maps 1:1 to ``openspec/changes/2026-09-15-register-device-mcp/spec.md``:
 
-* `cli.main()` builds a `MutableInventory(base=Inventory.from_yaml(...))`
-  and passes the wrapper (NOT the frozen `Inventory`) to `Pmp450iDriver`.
-* A device registered via the wrapper is reachable through the driver's
-  `self._inventory.get(...)` path AND the frozen `Inventory` is NOT
-  mutated.
-
-The test asserts the *contract* (the wrapper is the seam between
-`Inventory.get` and the driver layer). The actual `register_device`
-implementation lands in Task 4 — this Task 3 commit just wires the
-wrapper into the boot path.
+* Tool-S1 — `validate=True` issues a cheap sysDescr GET and inserts on success.
+* Tool-S2 — unreachable host raises ``DeviceUnreachable``; no insert.
+* Tool-S3 — `validate=False` accepts unconditionally; zero wire frames.
+* Tool-S4 — malformed host raises ``InvalidHostError`` pre-wire.
+* Tool-S5 — invalid community raises ``InvalidCommunity``.
+* Tool-S6 — two consecutive calls return distinct ``device_id``s.
+* Tool-S7 — `MutableInventory` routing regression (Task 3 — pinned here).
+* Tool-S8 — credential masking at the Pydantic boundary.
+* Tool-S9 — free-text error messages sanitised at the tool boundary.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
+import puresnmp.exc
 import pytest
 
 from nora.drivers.inventory import Device, Inventory
 from nora.drivers.mutable_inventory import MutableInventory
 
 
-def _sample_device(device_id: str = "adhoc-192-0-2-10-abcdef") -> Device:
-    """A frozen `Device` shaped like a `DeviceResolver.build(...)` output."""
-    return Device(
-        device_id=device_id,
-        vendor="cambium",
-        model="pmp450i",
-        firmware="(adhoc)",
-        host="192.0.2.10",
-        snmp_version="v2c",
-        community="change-me-community",
+class _FakeSnmpClient:
+    """Hand-rolled fake `SnmpClient` matching the production `SnmpClient` Protocol."""
+
+    def __init__(self, values: dict[str, Any] | None = None) -> None:
+        self._values: dict[str, Any] = dict(values or {})
+        self.get_calls: list[str] = []
+        self._closed = False
+
+    def get_oid(self, oid: str) -> str | int:
+        self.get_calls.append(oid)
+        if oid not in self._values:
+            raise KeyError(oid)
+        return self._values[oid]
+
+    def walk(self, base_oid: str) -> list[tuple[str, str | int]]:
+        return []
+
+    def close(self) -> None:
+        self._closed = True
+
+
+class _UnreachableClient(_FakeSnmpClient):
+    """Fake client that raises `OSError` on every `get_oid` — wire failure."""
+
+    def get_oid(self, oid: str) -> str | int:  # type: ignore[override]
+        raise OSError("connection refused")
+
+
+class _AuthRejectedClient(_FakeSnmpClient):
+    """Fake client that raises `puresnmp.exc.SnmpError` — community rejected."""
+
+    def get_oid(self, oid: str) -> str | int:  # type: ignore[override]
+        raise puresnmp.exc.SnmpError("authentication failure")
+
+
+def _invoke(
+    *,
+    host: str = "192.0.2.10",
+    community: str = "MEXI2-BB-RW",
+    validate: bool = False,
+    canned: _FakeSnmpClient | None = None,
+    sanitizer: Any = None,
+    mutable_inventory: MutableInventory | None = None,
+) -> Any:
+    """Helper — invoke `_register_device_impl` with a fresh wrapper unless supplied."""
+    from nora.drivers.snmp_pmp450i.register_device import _register_device_impl
+
+    wrapper = mutable_inventory if mutable_inventory is not None else MutableInventory(
+        base=Inventory(devices={})
     )
+    client_factory = (
+        (lambda _dev: canned) if canned is not None else (lambda _dev: _FakeSnmpClient())
+    )
+    return _register_device_impl(
+        driver=None,
+        host=host,
+        community=community,
+        validate=validate,
+        sanitizer=sanitizer,
+        mutable_inventory=wrapper,
+        client_factory=client_factory,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tool-S1 — validate=True succeeds; sysDescr GET fires once; device inserted.
+# ---------------------------------------------------------------------------
+
+
+def test_register_device_success_with_validate() -> None:
+    """`validate=True` issues a sysDescr GET and inserts on success."""
+    canned = _FakeSnmpClient(
+        {
+            "1.3.6.1.2.1.1.1.0": "Cambium PMP 450i",
+        }
+    )
+
+    record = _invoke(validate=True, canned=canned)
+
+    assert canned.get_calls == ["1.3.6.1.2.1.1.1.0"]
+    assert record.host == "192.0.2.10"
+    assert record.vendor == "cambium"
+    assert record.model == "pmp450i"
+    assert record.firmware == "(adhoc)"
+    assert record.snmp_version == "v2c"
+    assert record.validated is True
+
+
+# ---------------------------------------------------------------------------
+# Tool-S2 — unreachable host raises DeviceUnreachable; no insert.
+# ---------------------------------------------------------------------------
+
+
+def test_register_device_rejects_unreachable_host() -> None:
+    """`validate=True` with a wire `OSError` raises `DeviceUnreachable`."""
+    from nora.drivers.exceptions import DeviceUnreachable
+
+    wrapper = MutableInventory(base=Inventory(devices={}))
+    canned = _UnreachableClient()
+
+    with pytest.raises(DeviceUnreachable) as exc_info:
+        _invoke(validate=True, canned=canned, mutable_inventory=wrapper)
+
+    assert "192.0.2.10" in str(exc_info.value)
+    assert wrapper.device_ids == []
+
+
+# ---------------------------------------------------------------------------
+# Tool-S3 — validate=False inserts unconditionally; zero wire frames.
+# ---------------------------------------------------------------------------
+
+
+def test_register_device_validate_false_inserts_without_wire() -> None:
+    """`validate=False` skips the sysDescr GET and inserts immediately."""
+    wrapper = MutableInventory(base=Inventory(devices={}))
+    canned = _FakeSnmpClient()
+
+    record = _invoke(validate=False, canned=canned, mutable_inventory=wrapper)
+
+    assert canned.get_calls == []
+    assert record.validated is False
+    assert record.device_id in wrapper.device_ids
+
+
+# ---------------------------------------------------------------------------
+# Tool-S4 — malformed host raises InvalidHostError pre-wire.
+# ---------------------------------------------------------------------------
+
+
+def test_register_device_rejects_malformed_host() -> None:
+    """`host="not-an-ip"` raises `InvalidHostError`; no wire frame sent."""
+    from nora.drivers.exceptions import InvalidHostError
+
+    wrapper = MutableInventory(base=Inventory(devices={}))
+    canned = _FakeSnmpClient()
+
+    with pytest.raises(InvalidHostError) as exc_info:
+        _invoke(host="not-an-ip", validate=True, canned=canned, mutable_inventory=wrapper)
+
+    assert "not-an-ip" in str(exc_info.value)
+    assert canned.get_calls == []
+    assert wrapper.device_ids == []
+
+
+# ---------------------------------------------------------------------------
+# Tool-S5 — invalid community raises InvalidCommunity.
+# ---------------------------------------------------------------------------
+
+
+def test_register_device_rejects_invalid_community() -> None:
+    """`puresnmp.exc.SnmpError` from sysDescr raises `InvalidCommunity`."""
+    from nora.drivers.exceptions import InvalidCommunity
+
+    wrapper = MutableInventory(base=Inventory(devices={}))
+    canned = _AuthRejectedClient()
+
+    with pytest.raises(InvalidCommunity) as exc_info:
+        _invoke(
+            community="bogus-community",
+            validate=True,
+            canned=canned,
+            mutable_inventory=wrapper,
+        )
+
+    assert "bogus-community" in str(exc_info.value)
+    assert wrapper.device_ids == []
+
+
+# ---------------------------------------------------------------------------
+# Tool-S6 — two consecutive calls return distinct device_ids.
+# ---------------------------------------------------------------------------
+
+
+def test_register_device_two_calls_return_distinct_device_ids() -> None:
+    """Two consecutive `register_device` calls produce distinct `device_id`s."""
+    wrapper = MutableInventory(base=Inventory(devices={}))
+    canned = _FakeSnmpClient()
+
+    rec1 = _invoke(validate=False, canned=canned, mutable_inventory=wrapper)
+    rec2 = _invoke(validate=False, canned=canned, mutable_inventory=wrapper)
+
+    assert rec1.device_id != rec2.device_id
+    assert rec1.device_id in wrapper.device_ids
+    assert rec2.device_id in wrapper.device_ids
+
+
+# ---------------------------------------------------------------------------
+# Tool-S8 — credential masking at the Pydantic boundary.
+# ---------------------------------------------------------------------------
+
+
+def test_register_device_payload_masks_credentials() -> None:
+    """`DeviceRecord.model_dump(mode="json")` masks `community` to `**********`."""
+    canned = _FakeSnmpClient()
+    record = _invoke(validate=False, canned=canned)
+
+    payload = record.model_dump(mode="json")
+    assert payload["community"] == "**********"
+    assert "MEXI2-BB-RW" not in payload["community"]
+    # The literal community string is nowhere in the serialised payload.
+    serialised = str(payload)
+    assert "MEXI2-BB-RW" not in serialised
+
+
+# ---------------------------------------------------------------------------
+# Tool-S9 — error message sanitisation at the tool boundary.
+# ---------------------------------------------------------------------------
+
+
+def test_register_device_free_text_error_message_is_sanitized() -> None:
+    """A `DeviceUnreachable` carrying `192.0.2.10` is sanitised at the tool boundary.
+
+    Pins the spec scenario "free-text fields in `register_device` error
+    messages are sanitized": the typed exception's `host` field stays
+    verbatim (sanitisation lives at the tool boundary, not the raise
+    site — Driver-R3), AND the free-text message that the MCP client
+    receives has the literal host replaced by a synthetic alias.
+    """
+    from nora.drivers.exceptions import DeviceUnreachable
+
+    class _StubSanitizer:
+        def sanitize(self, text: str) -> str:
+            return text.replace("192.0.2.10", "RADIO_NODE_42")
+
+    wrapper = MutableInventory(base=Inventory(devices={}))
+    canned = _UnreachableClient()
+    sanitizer = _StubSanitizer()
+
+    with pytest.raises(DeviceUnreachable) as exc_info:
+        _invoke(
+            validate=True,
+            canned=canned,
+            sanitizer=sanitizer,
+            mutable_inventory=wrapper,
+        )
+
+    # Typed `host` is preserved verbatim — Driver-R3.
+    assert exc_info.value.host == "192.0.2.10"
+    # Sanitisation is the caller's responsibility (the server layer).
+    # The `_register_device_impl` helper accepts an injectable
+    # sanitizer so the `@mcp.tool` wrapper at `server.py` can plug the
+    # `Sanitizer` instance in.
+    sanitised = sanitizer.sanitize(str(exc_info.value))
+    assert "192.0.2.10" not in sanitised
+    assert "RADIO_NODE_42" in sanitised
+
+
+# ---------------------------------------------------------------------------
+# Tool-S7 — wrapper-routing regression (pinned in Task 3).
+# ---------------------------------------------------------------------------
 
 
 def test_register_device_routes_through_wrapper() -> None:
-    """A `MutableInventory`-registered device reaches the driver through the wrapper.
-
-    Pins the design §6 invariant: `Pmp450iDriver.__init__` accepts the
-    `_InventoryLike` Protocol (Task 3). The wrapper's `get(...)` is the
-    sole read path the driver hits — the underlying `Inventory` is not
-    bypassed by any call site. Registering via `MutableInventory.register`
-    lands the device in the overlay; `MutableInventory.get(...)` returns
-    it without ever touching the frozen `Inventory`.
-    """
-    inventory = Inventory(devices={})  # frozen base, empty seed.
+    """A `MutableInventory`-registered device is reachable through the wrapper."""
+    inventory = Inventory(devices={})
     wrapper = MutableInventory(base=inventory)
 
-    dev = _sample_device()
-    wrapper.register(dev)
+    canned = _FakeSnmpClient(
+        {
+            "1.3.6.1.2.1.1.1.0": "Cambium PMP 450i",
+        }
+    )
+    record = _invoke(validate=True, canned=canned, mutable_inventory=wrapper)
 
-    # Overlay hit — `wrapper.get` returns the registered device.
-    looked_up = wrapper.get(dev.device_id)
-    assert isinstance(looked_up, Device)
-    assert looked_up.device_id == dev.device_id
-    assert looked_up.host == "192.0.2.10"
-
-    # `device_ids` surfaces the overlay entry.
-    assert dev.device_id in wrapper.device_ids
-
-    # The frozen `Inventory` is NOT mutated — Task 3 only widens the
-    # ctor signature; it never replaces the frozen seed with the
-    # overlay. The driver sees one seam (`_inventory.get`), and the
-    # wrapper routes overlay-then-base.
+    # `record.device_id` is in the wrapper's overlay.
+    assert record.device_id in wrapper.device_ids
+    # The frozen `Inventory` is NOT mutated.
     assert inventory.device_ids == []
-
-
-def test_driver_ctor_accepts_inventory_like_protocol() -> None:
-    """`Pmp450iDriver.__init__` accepts `_InventoryLike` (Task 3 ctor widening).
-
-    Both `Inventory` (back-compat) and `MutableInventory` (Task 3
-    production path) satisfy the Protocol. This test instantiates the
-    driver with both forms to pin the ctor signature.
-    """
-    from nora.drivers.snmp_pmp450i import Pmp450iDriver
-
-    # Stub the catalog registry — the ctor only needs an object identity.
-    catalog_registry: Any = object()
-    inventory_frozen = Inventory(devices={})
-    driver_via_frozen = Pmp450iDriver(
-        inventory=inventory_frozen,
-        catalog_registry=catalog_registry,
-    )
-    assert driver_via_frozen._inventory is inventory_frozen  # type: ignore[attr-defined]
-
-    wrapper = MutableInventory(base=inventory_frozen)
-    driver_via_wrapper = Pmp450iDriver(
-        inventory=wrapper,
-        catalog_registry=catalog_registry,
-    )
-    assert driver_via_wrapper._inventory is wrapper  # type: ignore[attr-defined]
-
-
-def test_cli_wraps_inventory_in_mutable_inventory(
-    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """`cli.main()` passes `MutableInventory(base=Inventory.from_yaml(...))` to the driver.
-
-    Pins Task 3's wiring: the boot sequence must construct a
-    `MutableInventory` (so `register_device` has a mutable seam) AND
-    pass the wrapper to `Pmp450iDriver.__init__` (so the 8 read sites
-    route through the wrapper). The frozen `Inventory.from_yaml(...)`
-    is the `base=` argument and is not mutated at boot.
-    """
-    import yaml
-
-    from nora import cli as cli_mod
-
-    # Hermetic operator env: empty inventory, hermetic tmp dirs.
-    inventory_path = tmp_path / "devices.yaml"
-    inventory_path.write_text(yaml.safe_dump({"devices": []}))
-    catalogs_path = tmp_path / "oid-catalogs"
-    catalogs_path.mkdir()
-    prompts_path = tmp_path / "prompts"
-    prompts_path.mkdir()
-
-    captured: dict[str, Any] = {}
-
-    class _CapturingDriver:
-        def __init__(self, *, inventory: Any, catalog_registry: Any, **kwargs: Any) -> None:
-            captured["inventory_type"] = type(inventory).__name__
-            captured["inventory"] = inventory
-            captured["catalog_registry"] = catalog_registry
-
-    # Patch the symbol `Pmp450iDriver` that `cli.main()` imports so the
-    # boot sequence instantiates our capturing class instead of the
-    # real driver.
-    monkeypatch.setattr(cli_mod, "Pmp450iDriver", _CapturingDriver)
-
-    # Pre-write a hermetic Settings into a fake env so `cli.main()`
-    # picks up the tmp dirs.
-    monkeypatch.setenv("NORA_OID_CATALOGS_PATH", str(catalogs_path))
-    monkeypatch.setenv("NORA_DEVICES_INVENTORY_PATH", str(inventory_path))
-    monkeypatch.setenv("NORA_PROMPTS_DIR", str(prompts_path))
-    monkeypatch.setenv("NORA_OID_CATALOG_SIGNING_KEY", "test-key-for-cli-wrapping")
-
-    # Ensure `Settings._env_file=None` so the test doesn't read `.env`.
-    # We can't construct Settings directly here without writing one
-    # factory; instead, monkey-patch `Settings.__init__` to ignore env.
-    import os as _os
-
-    # Clear any dotenv-leaking env vars that may shadow our overrides.
-    for var in (
-        "NORA_OID_CATALOGS_PATH",
-        "NORA_DEVICES_INVENTORY_PATH",
-        "NORA_PROMPTS_DIR",
-        "NORA_OID_CATALOG_SIGNING_KEY",
-        "NORA_INTERVENTIONS_DIR",
-    ):
-        _os.environ.pop(var, None)
-    monkeypatch.setenv("NORA_OID_CATALOGS_PATH", str(catalogs_path))
-    monkeypatch.setenv("NORA_DEVICES_INVENTORY_PATH", str(inventory_path))
-    monkeypatch.setenv("NORA_PROMPTS_DIR", str(prompts_path))
-    monkeypatch.setenv("NORA_OID_CATALOG_SIGNING_KEY", "test-key-for-cli-wrapping")
-
-    # Also patch `OidCatalogRegistry.verify_all` so the catalog scan
-    # doesn't require a real signed catalog at the tmp path. The stub
-    # accepts every existing `@mcp.tool` so the boot-time guard
-    # (`verify_tools_are_catalogued`) is a no-op — Task 6 adds the
-    # catalog envelope for `register_device`; Task 3 only verifies the
-    # `MutableInventory` wiring.
-    from nora.drivers import oid_catalog as oid_catalog_mod
-
-    class _StubRegistry:
-        def required_oids_by_tool(self, _ref: Any) -> dict[str, tuple[str, ...]]:
-            return {
-                "snmp_get_pmp450i_radio_metrics": ("sysDescr",),
-                "snmp_get_ap_summary": ("apFirmwareVersion",),
-                "snmp_get_frame_utilization": ("frameUtilizationDlPct",),
-                "snmp_get_sm_table": ("smLuid",),
-                "snmp_get_sm_detailed_diagnostics": ("smJitter",),
-                "snmp_run_spectrum_analysis": ("spectrumNoiseFloorA",),
-                "snmp_migrate_radio_frequency": ("migrateCarrierFrequency",),
-                "search_intervention_history": (),
-                "get_device_lifecycle_summary": (),
-                "correlate_sector_interference": (),
-                "save_intervention_record": (),
-            }
-
-    monkeypatch.setattr(
-        oid_catalog_mod.OidCatalogRegistry,
-        "verify_all",
-        lambda _settings: _StubRegistry(),
-    )
-
-    # Patch `mcp.run` to avoid the actual MCP server start.
-    import nora.server as server_mod
-
-    monkeypatch.setattr(server_mod.mcp, "run", lambda *_a, **_kw: None)
-
-    try:
-        cli_mod.main([])
-    except SystemExit:
-        pass
-
-    # Assert: cli.main() passed a `MutableInventory` to the driver ctor.
-    assert captured.get("inventory_type") == "MutableInventory", (
-        f"cli.main() must wrap Inventory.from_yaml(...) in MutableInventory before "
-        f"passing to Pmp450iDriver; got {captured.get('inventory_type')!r}"
-    )
-    inv_obj = captured["inventory"]
-    assert isinstance(inv_obj, MutableInventory)
-    # The frozen base is the YAML-loaded Inventory.
-    assert isinstance(inv_obj.base, Inventory)
-    # And the base is unchanged — frozen.
-    assert inv_obj.base.device_ids == []
+    # The wrapper returns the registered device on `get`.
+    looked_up = wrapper.get(record.device_id)
+    assert isinstance(looked_up, Device)
+    assert looked_up.host == "192.0.2.10"

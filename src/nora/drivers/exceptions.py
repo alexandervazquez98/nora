@@ -180,8 +180,13 @@ class DeviceUnreachable(DriverError):
     `register_device` validate path distinguishes wire-level failures
     (`OSError` / `TimeoutError`) from auth-rejected ones
     (`InvalidCommunity`) so the orchestrator can show a typed error per
-    failure mode. Carries the offending host string.
+    failure mode. Carries the offending host string verbatim via the
+    `.host` attribute (the message is the same string, by convention).
     """
+
+    def __init__(self, host: str) -> None:
+        super().__init__(host)
+        self.host = host
 
 
 class InvalidCommunity(DriverError):
@@ -191,9 +196,13 @@ class InvalidCommunity(DriverError):
     `register_device` validate path maps `puresnmp.exc.SnmpError` to
     this typed error so the orchestrator sees a distinct error code
     (auth-rejected, not unreachable). Carries the offending community
-    string verbatim (the operator typed it; the tool boundary sanitises
-    before serialisation).
+    string verbatim via the `.community` attribute (the operator typed
+    it; the tool boundary sanitises before serialisation).
     """
+
+    def __init__(self, community: str) -> None:
+        super().__init__(community)
+        self.community = community
 
 
 class InvalidHostError(DriverError):
@@ -203,8 +212,12 @@ class InvalidHostError(DriverError):
     `register_device` Pydantic boundary validates the host BEFORE any
     wire frame so a malformed value (e.g. `not-an-ip`) raises a typed
     error without sending any traffic. Carries the offending host
-    string verbatim.
+    string verbatim via the `.host` attribute.
     """
+
+    def __init__(self, host: str) -> None:
+        super().__init__(host)
+        self.host = host
 
 
 __all__ = [
