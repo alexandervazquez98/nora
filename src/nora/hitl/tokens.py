@@ -87,9 +87,9 @@ def _canonical_payload(
     NOT a JSON dict — eliminates canonicalization drift (key ordering,
     whitespace, separator drift).
     """
-    return (
-        f"{operator_id}|{issued_at.isoformat()}|{expires_at.isoformat()}|{token}"
-    ).encode("utf-8")
+    return (f"{operator_id}|{issued_at.isoformat()}|{expires_at.isoformat()}|{token}").encode(
+        "utf-8"
+    )
 
 
 def _coerce_key_bytes(signing_key: SecretStr | str | None) -> bytes:
@@ -245,6 +245,7 @@ def verify_approval_token(
 
 
 __all__ = [
+    "AutonomousMutationRejected",
     "HitlApprovalToken",
     "mint_token",
     "verify_approval_token",

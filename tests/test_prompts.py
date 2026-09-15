@@ -387,3 +387,345 @@ def test_get_prompt_registry_raises_when_not_initialised() -> None:
         assert "set_prompt_registry" in str(exc.value)
     finally:
         server_mod._current_prompt_registry = previous  # type: ignore[attr-defined]
+
+
+# ---------------------------------------------------------------------------
+# Issue #43 / `2026-09-15-3tier-tool-governance` — multi-dir scan +
+# ADR-4 tool-spec validator.
+#
+# Adds:
+#  - `PromptRegistry.scan(sources: Sequence[Path])` accepts multiple dirs.
+#  - `PromptRegistry.from_settings(settings)` reads
+#    `Settings.nora_tool_specs_dir` (default `docs/tool_specs/`).
+#  - Tool-spec files MUST carry `tier: 0 | 1 | 2` and the cross-validator
+#    invariants from ADR-4:
+#      tier 1 -> requires_operator_confirmed=True (required)
+#      tier 2 -> requires_hitl_token=True (required)
+#      tier 0 -> both flags MAY be false / absent
+#  - README.md (no tier) is scanned but exempt from the cross-validator.
+#  - Orchestrator prompt body augmented with tier references at scan time.
+# ---------------------------------------------------------------------------
+
+
+def test_prompt_registry_scan_accepts_multiple_sources(tmp_path: Path) -> None:
+    """`scan([a, b])` loads files from BOTH directories.
+
+    Per `prompt-registry` R8 scenario "both source dirs are scanned at boot".
+    """
+    # Two source dirs.
+    dir_a = tmp_path / "a"
+    dir_b = tmp_path / "b"
+    dir_a.mkdir()
+    dir_b.mkdir()
+
+    (dir_a / "alpha.md").write_text("---\nname: alpha\ndescription: from a\n---\nbody-alpha\n")
+    (dir_b / "beta.md").write_text("---\nname: beta\ndescription: from b\n---\nbody-beta\n")
+
+    registry = PromptRegistry.scan([dir_a, dir_b])
+
+    assert registry.get("alpha").body.strip() == "body-alpha"
+    assert registry.get("beta").body.strip() == "body-beta"
+
+
+def test_tool_spec_with_tier_1_loads_with_operator_confirmed() -> None:
+    """A `tier: 1` tool-spec loads and exposes `requires_operator_confirmed=True`.
+
+    Per `prompt-registry` R8 scenario "tool specs with tier: 1 and tier: 2
+    load successfully".
+    """
+    spec_path = (
+        Path(__file__).resolve().parent.parent
+        / "docs"
+        / "tool_specs"
+        / "snmp_run_spectrum_analysis.md"
+    )
+    assert spec_path.is_file(), f"Expected shipped tool spec at {spec_path}"
+
+    # Open the registry as a regular prompt via single-dir scan.
+    registry = PromptRegistry.scan(spec_path.parent)
+    prompt = registry.get("snmp_run_spectrum_analysis")
+
+    # The validator stamps the canonical metadata on the body via the
+    # front-matter tier + requires_* fields. The Prompt model exposes
+    # the parsed front-matter as `metadata` (tool-spec schema).
+    assert prompt.metadata["tier"] == 1
+    assert prompt.metadata["requires_operator_confirmed"] is True
+
+
+def test_tool_spec_with_tier_2_loads_with_hitl_token() -> None:
+    """A `tier: 2` tool-spec exposes `requires_hitl_token=True`."""
+    spec_path = (
+        Path(__file__).resolve().parent.parent
+        / "docs"
+        / "tool_specs"
+        / "snmp_migrate_radio_frequency.md"
+    )
+    assert spec_path.is_file(), f"Expected shipped tool spec at {spec_path}"
+
+    registry = PromptRegistry.scan(spec_path.parent)
+    prompt = registry.get("snmp_migrate_radio_frequency")
+    assert prompt.metadata["tier"] == 2
+    assert prompt.metadata["requires_hitl_token"] is True
+
+
+def test_tool_spec_invalid_tier_raises_prompt_not_found(tmp_path: Path) -> None:
+    """A tool-spec with `tier: 9` (not in {0,1,2}) raises `PromptNotFoundError`.
+
+    Per `prompt-registry` R8 scenario "invalid tier marker raises
+    PromptNotFoundError".
+    """
+    tool_specs_dir = tmp_path / "tool_specs"
+    tool_specs_dir.mkdir()
+    bad_spec = tool_specs_dir / "bad_spec.md"
+    bad_spec.write_text("---\nname: bad_spec\ndescription: tier-out-of-range\ntier: 9\n---\nbody\n")
+    registry = PromptRegistry.scan(tool_specs_dir)
+    with pytest.raises(PromptNotFoundError) as exc:
+        registry.get("bad_spec")
+    assert "bad_spec" in str(exc.value)
+
+
+def test_tool_spec_tier_1_requires_operator_confirmed_cross_validator(
+    tmp_path: Path,
+) -> None:
+    """`tier: 1` WITHOUT `requires_operator_confirmed=True` fails validation.
+
+    Per ADR-4 cross-validator invariant: `tier 1 ⇒
+    requires_operator_confirmed=True`.
+    """
+    tool_specs_dir = tmp_path / "tool_specs"
+    tool_specs_dir.mkdir()
+    bad_spec = tool_specs_dir / "tier1_bad.md"
+    bad_spec.write_text(
+        "---\nname: tier1_bad\ndescription: tier 1 without clearance flag\ntier: 1\n---\nbody\n"
+    )
+    registry = PromptRegistry.scan(tool_specs_dir)
+    with pytest.raises(PromptNotFoundError) as exc:
+        registry.get("tier1_bad")
+    assert "tier1_bad" in str(exc.value)
+
+
+def test_tool_spec_tier_2_requires_hitl_token_cross_validator(
+    tmp_path: Path,
+) -> None:
+    """`tier: 2` WITHOUT `requires_hitl_token=True` fails validation.
+
+    Per ADR-4 cross-validator invariant: `tier 2 ⇒ requires_hitl_token=True`.
+    """
+    tool_specs_dir = tmp_path / "tool_specs"
+    tool_specs_dir.mkdir()
+    bad_spec = tool_specs_dir / "tier2_bad.md"
+    bad_spec.write_text(
+        "---\nname: tier2_bad\ndescription: tier 2 without HITL flag\ntier: 2\n---\nbody\n"
+    )
+    registry = PromptRegistry.scan(tool_specs_dir)
+    with pytest.raises(PromptNotFoundError) as exc:
+        registry.get("tier2_bad")
+    assert "tier2_bad" in str(exc.value)
+
+
+def test_tool_spec_readme_has_no_tier_and_is_scanned(
+    tmp_path: Path,
+) -> None:
+    """`docs/tool_specs/README.md` is scanned but carries no `tier`.
+
+    Per `prompt-registry` R8 scenario "README.md has no tier marker".
+    README is not a tool — it MUST NOT carry the `tier` field.
+    """
+    tool_specs_dir = tmp_path / "tool_specs"
+    tool_specs_dir.mkdir()
+    readme = tool_specs_dir / "README.md"
+    readme.write_text(
+        "---\nname: README\ndescription: index for tool specs\n---\nIndex of tool specs.\n"
+    )
+    registry = PromptRegistry.scan(tool_specs_dir)
+    prompt = registry.get("README")
+    assert prompt.metadata.get("tier") is None
+
+
+def test_from_settings_reads_tool_specs_dir(tmp_path: Path) -> None:
+    """`from_settings(settings)` scans both `_PACKAGED_PROMPTS_DIR` AND `nora_tool_specs_dir`."""
+    from nora.config import Settings
+
+    tool_specs_dir = tmp_path / "tool_specs"
+    tool_specs_dir.mkdir()
+    (tool_specs_dir / "snmp_get_ap_summary.md").write_text(
+        "---\nname: snmp_get_ap_summary\ndescription: passive AP summary\ntier: 0\n---\nbody\n"
+    )
+    settings = Settings(
+        _env_file=None,
+        _env_file_encoding=None,
+        nora_tool_specs_dir=tool_specs_dir,
+    )
+    registry = PromptRegistry.from_settings(settings)
+    # Packaged netops_orchestrator + shipped tool spec both load.
+    assert registry.get("netops_orchestrator") is not None
+    assert registry.get("snmp_get_ap_summary").metadata["tier"] == 0
+
+
+def test_from_settings_missing_tool_specs_dir_is_nonfatal(tmp_path: Path) -> None:
+    """`from_settings(settings)` skips an absent tool-specs dir without raising."""
+    from nora.config import Settings
+
+    absent_dir = tmp_path / "nonexistent"
+    settings = Settings(
+        _env_file=None,
+        _env_file_encoding=None,
+        nora_tool_specs_dir=absent_dir,
+    )
+    registry = PromptRegistry.from_settings(settings)
+    # Packaged prompts still load.
+    assert registry.get("netops_orchestrator") is not None
+
+
+def test_orchestrator_prompt_body_names_all_three_tiers() -> None:
+    """`netops_orchestrator.md` references `Tier 0`, `Tier 1`, and `Tier 2`.
+
+    Per `prompt-registry` R8 scenario "orchestrator body references every tier".
+    """
+    package_dir = Path(__file__).resolve().parent.parent / "src" / "nora" / "prompts"
+    text = (package_dir / "netops_orchestrator.md").read_text()
+
+    assert "Tier 0" in text
+    assert "Tier 1" in text
+    assert "Tier 2" in text
+    assert "Universal Service Impact & Disruption Gate" in text
+
+
+def test_orchestrator_prompt_body_names_clearance_and_hitl_protocols() -> None:
+    """The orchestrator body names `operator_confirmed=True` AND HITL approval token.
+
+    Per `prompt-registry` R8 scenario "orchestrator body names the
+    clearance and HITL protocols". Tier-1 protocol precedes Tier-2.
+    """
+    package_dir = Path(__file__).resolve().parent.parent / "src" / "nora" / "prompts"
+    text = (package_dir / "netops_orchestrator.md").read_text()
+
+    assert "operator_confirmed=True" in text
+    assert "HITL approval token" in text
+
+    # Ordering: Tier-1 protocol before Tier-2 protocol.
+    idx_t1 = text.find("operator_confirmed=True")
+    idx_t2 = text.find("HITL approval token")
+    assert 0 <= idx_t1 < idx_t2, (
+        f"Tier-1 protocol (operator_confirmed=True) MUST precede Tier-2 protocol "
+        f"(HITL approval token) in the orchestrator body; got t1={idx_t1}, t2={idx_t2}"
+    )
+
+
+def test_every_tool_spec_declares_tier() -> None:
+    """Every shipped `docs/tool_specs/*.md` (except README) carries `tier: 0|1|2`."""
+    specs_dir = Path(__file__).resolve().parent.parent / "docs" / "tool_specs"
+    expected_tool_specs = {
+        "snmp_get_ap_summary.md",
+        "snmp_get_sm_table.md",
+        "snmp_get_pmp450i_radio_metrics.md",
+        "snmp_get_frame_utilization.md",
+        "snmp_get_sm_detailed_diagnostics.md",
+        "search_intervention_history.md",
+        "get_device_lifecycle_summary.md",
+        "correlate_sector_interference.md",
+        "snmp_run_spectrum_analysis.md",
+        "snmp_migrate_radio_frequency.md",
+        "save_intervention_record.md",
+    }
+    assert specs_dir.is_dir(), f"Expected docs/tool_specs/ at {specs_dir}"
+    assert (specs_dir / "README.md").is_file(), f"Expected README.md at {specs_dir}"
+
+    actual = {p.name for p in specs_dir.glob("*.md")}
+    missing = expected_tool_specs - actual
+    assert not missing, f"Missing tool specs: {sorted(missing)}"
+
+    # Each spec carries `tier: 0|1|2`.
+    import yaml as _yaml
+
+    for name in expected_tool_specs:
+        path = specs_dir / name
+        text = path.read_text()
+        assert text.startswith("---"), f"{name} MUST have YAML front-matter"
+        rest = text[3:]
+        fence_end = rest.find("\n---")
+        assert fence_end != -1, f"{name} MUST close the front-matter fence"
+        fm = _yaml.safe_load(rest[:fence_end])
+        assert isinstance(fm, dict)
+        assert fm.get("tier") in {0, 1, 2}, (
+            f"{name} front-matter tier MUST be 0|1|2; got {fm.get('tier')!r}"
+        )
+
+
+def test_tool_spec_metadata_exposes_tier_and_prerequisites() -> None:
+    """`Prompt.metadata` exposes `tier`, `requires_operator_confirmed`, `requires_hitl_token`."""
+    specs_dir = Path(__file__).resolve().parent.parent / "docs" / "tool_specs"
+    registry = PromptRegistry.scan(specs_dir)
+    spec = registry.get("snmp_run_spectrum_analysis")
+    # metadata is a dict with validated tier + flags.
+    assert spec.metadata["tier"] == 1
+    assert spec.metadata["requires_operator_confirmed"] is True
+    assert "requires_hitl_token" in spec.metadata  # False or absent is fine for tier 1
+
+
+def test_tool_spec_validator_enforces_uses_operator_confirmed_equals_for_tier_1(
+    tmp_path: Path,
+) -> None:
+    """The validator MUST use a strict boolean check, NOT a Python `==` on the tier value.
+
+    Belt-and-braces: a future refactor that loosened the tier check via
+    `==` would re-introduce ambiguity. Static AST scan: the
+    `tool_spec_validator` / `_try_load` MUST NOT compare tier via `==`.
+    """
+    import ast
+
+    src = (
+        Path(__file__).resolve().parent.parent / "src" / "nora" / "prompts" / "registry.py"
+    ).read_text()
+    tree = ast.parse(src)
+    # Walk every Compare node and assert no `tier == 1` style equality.
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Compare):
+            continue
+        for left, op, comparator in zip(
+            node.left if isinstance(node.left, list) else [node.left],
+            node.ops,
+            node.comparators,
+        ):
+            if isinstance(op, ast.Eq) and isinstance(left, ast.Name) and left.id == "tier":
+                pytest.fail(
+                    "registry.py MUST NOT compare tier via `==`; "
+                    "use a validator that asserts membership in {0, 1, 2}"
+                )
+
+
+__all__ = [
+    "test_registry_loads_once_and_never_reloads",
+    "test_packaged_prompt_loads_on_boot",
+    "test_override_directory_wins_over_package_data",
+    "test_settings_prompts_dir_is_used",
+    "test_missing_prompt_raises_prompt_not_found",
+    "test_file_without_front_matter_is_rejected",
+    "test_empty_description_is_rejected",
+    "test_name_must_match_filename",
+    "test_second_get_call_does_no_io",
+    "test_shipped_prompt_declares_tool_name_and_typed_schema",
+    "test_registry_has_no_inotify_or_watchdog_dependency",
+    "test_registry_does_not_call_os_environ_inline",
+    "test_shipped_orchestrator_prompt_loads_on_boot",
+    "test_orchestrator_prompt_mentions_real_tools_and_no_banned_literals",
+    "test_server_exposes_orchestrator_and_driver_prompts",
+    "test_server_instructions_are_set_with_required_substrings",
+    "test_set_prompt_registry_round_trip",
+    "test_get_prompt_registry_raises_when_not_initialised",
+    # Issue #43 / multi-dir scan + ADR-4 validator
+    "test_prompt_registry_scan_accepts_multiple_sources",
+    "test_tool_spec_with_tier_1_loads_with_operator_confirmed",
+    "test_tool_spec_with_tier_2_loads_with_hitl_token",
+    "test_tool_spec_invalid_tier_raises_prompt_not_found",
+    "test_tool_spec_tier_1_requires_operator_confirmed_cross_validator",
+    "test_tool_spec_tier_2_requires_hitl_token_cross_validator",
+    "test_tool_spec_readme_has_no_tier_and_is_scanned",
+    "test_from_settings_reads_tool_specs_dir",
+    "test_from_settings_missing_tool_specs_dir_is_nonfatal",
+    "test_orchestrator_prompt_body_names_all_three_tiers",
+    "test_orchestrator_prompt_body_names_clearance_and_hitl_protocols",
+    "test_every_tool_spec_declares_tier",
+    "test_tool_spec_metadata_exposes_tier_and_prerequisites",
+    "test_tool_spec_validator_enforces_uses_operator_confirmed_equals_for_tier_1",
+]
