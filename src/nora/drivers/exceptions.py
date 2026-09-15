@@ -162,6 +162,64 @@ class UncataloguedToolError(DriverError):
         self.reason = reason
 
 
+class DuplicateDeviceError(DriverError):
+    """Raised when `MutableInventory.register` collides on an existing `device_id`.
+
+    `MutableInventory` wrapper (issue #42 / change
+    `2026-09-15-register-device-mcp`): preserves `Inventory.frozen=True`
+    while allowing ad-hoc `register_device` inserts. The wrapper rejects
+    duplicate ids at insertion time so the operator gets a typed error
+    instead of a silent overwrite. Carries the offending id verbatim.
+    """
+
+
+class DeviceUnreachable(DriverError):
+    """Raised when the SNMP agent's port is closed or no response is received.
+
+    Issue #42 / change `2026-09-15-register-device-mcp`: the
+    `register_device` validate path distinguishes wire-level failures
+    (`OSError` / `TimeoutError`) from auth-rejected ones
+    (`InvalidCommunity`) so the orchestrator can show a typed error per
+    failure mode. Carries the offending host string verbatim via the
+    `.host` attribute (the message is the same string, by convention).
+    """
+
+    def __init__(self, host: str) -> None:
+        super().__init__(host)
+        self.host = host
+
+
+class InvalidCommunity(DriverError):
+    """Raised when the agent rejects the supplied community string.
+
+    Issue #42 / change `2026-09-15-register-device-mcp`: the
+    `register_device` validate path maps `puresnmp.exc.SnmpError` to
+    this typed error so the orchestrator sees a distinct error code
+    (auth-rejected, not unreachable). Carries the offending community
+    string verbatim via the `.community` attribute (the operator typed
+    it; the tool boundary sanitises before serialisation).
+    """
+
+    def __init__(self, community: str) -> None:
+        super().__init__(community)
+        self.community = community
+
+
+class InvalidHostError(DriverError):
+    """Raised when the supplied host string fails the IPv4-literal contract.
+
+    Issue #42 / change `2026-09-15-register-device-mcp`: the
+    `register_device` Pydantic boundary validates the host BEFORE any
+    wire frame so a malformed value (e.g. `not-an-ip`) raises a typed
+    error without sending any traffic. Carries the offending host
+    string verbatim via the `.host` attribute.
+    """
+
+    def __init__(self, host: str) -> None:
+        super().__init__(host)
+        self.host = host
+
+
 __all__ = [
     "DriverError",
     "RefusesWriteError",
@@ -175,4 +233,10 @@ __all__ = [
     "AutonomousMutationRejected",
     "MaintenanceWindowViolation",
     "UncataloguedToolError",
+    # Issue #42 / `2026-09-15-register-device-mcp` — typed errors for
+    # the `register_device` tool surface.
+    "DuplicateDeviceError",
+    "DeviceUnreachable",
+    "InvalidCommunity",
+    "InvalidHostError",
 ]

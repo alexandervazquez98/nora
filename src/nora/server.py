@@ -1,9 +1,16 @@
 """NORA FastMCP server — thin split.
 
 Boots a FastMCP instance named "nora" over stdio and exposes exactly
-five `@mcp.tool` registrations and two `@mcp.prompt` registrations:
+twelve `@mcp.tool` registrations and two `@mcp.prompt` registrations:
 
 * `snmp_get_pmp450i_radio_metrics`         — PMP 450i SNMP driver.
+* `snmp_get_ap_summary`                    — PMP 450i AP summary.
+* `snmp_get_frame_utilization`             — PMP 450i frame utilization.
+* `snmp_get_sm_table`                      — PMP 450i SM baseline.
+* `snmp_get_sm_detailed_diagnostics`       — PMP 450i SM diagnostics.
+* `snmp_run_spectrum_analysis`             — PMP 450i spectrum sweep.
+* `snmp_migrate_radio_frequency`           — PMP 450i HITL-gated migration.
+* `register_device`                        — ad-hoc IP registration (issue #42).
 * `search_intervention_history`           — read-only intervention memory.
 * `get_device_lifecycle_summary`          — read-only intervention memory.
 * `correlate_sector_interference`         — read-only intervention memory.
@@ -491,6 +498,54 @@ def save_intervention_record(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Ad-hoc device registration — issue #42 / `2026-09-15-register-device-mcp`.
+#
+# Closes the IPv4-literal resolution gap: when the operator hands the
+# orchestrator an IP absent from `data/devices.yaml`, the orchestrator
+# calls `register_device(host, community, validate=True)` instead of
+# asking for a `device_id`. The tool body is a thin wrapper over
+# `_register_device_impl` — that helper handles the validation wire
+# frame, the typed error mapping, and the `MutableInventory` insertion.
+#
+# `validate=True` (default) issues a cheap `sysDescr` GET against OID
+# `1.3.6.1.2.1.1.1.0` BEFORE inserting; failure raises a typed
+# exception and inserts nothing. `validate=False` skips the wire frame
+# and inserts immediately (operator-supplied credentials only — no
+# out-of-band reachability check).
+#
+# Community credentials are wrapped in `SecretStr` so
+# `model_dump(mode="json")` masks the literal to `"**********"` at the
+# wire boundary — Zero-Leakage contract (§1 of the orchestrator prompt).
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool
+def register_device(host: str, community: str, validate: bool = True) -> dict[str, Any]:
+    """Ad-hoc-register a PMP 450i radio. `validate=True` issues a cheap
+    sysDescr GET (`1.3.6.1.2.1.1.1.0`) before insertion. Returns a typed
+    `DeviceRecord` with `community` masked to `"**********"`. Typed error
+    on any failure path; inserts NOTHING.
+
+    Issue #42 / change `2026-09-15-register-device-mcp`. The validation
+    contract (RFC 1213 sysDescr GET) is referenced from §4 Step 4 of
+    `src/nora/prompts/netops_orchestrator.md` so the orchestrator knows
+    that an unreachable radio fails closed.
+    """
+    from nora.drivers.snmp_pmp450i.register_device import (
+        _register_device_impl,
+    )
+
+    record = _register_device_impl(
+        driver=get_driver(),
+        host=host,
+        community=community,
+        validate=validate,
+        sanitizer=_sanitizer,
+    )
+    return record.model_dump(mode="json")
+
+
+# ---------------------------------------------------------------------------
 # Prompt registrations — `@mcp.prompt` thin wrappers over `PromptRegistry`.
 # ---------------------------------------------------------------------------
 
@@ -629,7 +684,13 @@ _ALLOWED_UNCATALOGUED_TOOLS: frozenset[str] = frozenset(
         "get_device_lifecycle_summary",
         "correlate_sector_interference",
         "save_intervention_record",
-        "snmp_get_pmp450i_radio_metrics",
+        # Issue #42 / `2026-09-15-register-device-mcp`: both
+        # `register_device` and `snmp_get_pmp450i_radio_metrics` were
+        # retired from this allow-list once their catalog envelope
+        # entries landed in the re-signed baselines (Tasks 6 + 7).
+        # The four remaining entries are intervention-memory operators
+        # that consume the on-disk filesystem, not SNMP — they will
+        # never carry an OID catalog entry.
     }
 )
 
@@ -721,6 +782,7 @@ __all__ = [
     "get_device_lifecycle_summary",
     "correlate_sector_interference",
     "save_intervention_record",
+    "register_device",
     "netops_orchestrator",
     "snmp_pmp450i",
     "register_tool_log_middleware",

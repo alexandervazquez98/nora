@@ -82,6 +82,11 @@ _INTEGRATION_CATALOG_OIDS: dict[str, str] = {
     "spectrumScanStatus": "1.3.6.1.4.1.161.19.3.1.1.94.0",
     "migrateCarrierFrequency": "1.3.6.1.4.1.161.19.3.1.1.95.0",
     "migratePriorCarrierFrequency": "1.3.6.1.4.1.161.19.3.1.1.96.0",
+    # Issue #42 / `2026-09-15-register-device-mcp`: `sysDescr` is the
+    # RFC 1213 OID that `register_device` reads for cheap reachability
+    # validation. The hermetic fixture mirrors the production re-signed
+    # catalog (Task 6).
+    "sysDescr": "1.3.6.1.2.1.1.1.0",
 }
 
 
@@ -124,6 +129,25 @@ _INTEGRATION_CATALOG_TOOLS: dict[str, list[str]] = {
     "snmp_migrate_radio_frequency": [
         "migrateCarrierFrequency",
         "migratePriorCarrierFrequency",
+    ],
+    # Issue #42 / `2026-09-15-register-device-mcp`: `register_device`
+    # carries the cheapest possible reachability probe (`sysDescr` GET
+    # against `1.3.6.1.2.1.1.1.0`). The catalog envelope MUST list
+    # `sysDescr` as the registered OID for the boot-time guard to
+    # accept the tool without an allow-list entry.
+    "register_device": ["sysDescr"],
+    # Slice-1 radio-metrics tool — promoted from the legacy
+    # `_ALLOWED_UNCATALOGUED_TOOLS` allow-list (Task 7). The hermetic
+    # fixture mirrors the production re-signed catalog envelope so
+    # the rogue-tool guard test below finds the rogue FIRST.
+    "snmp_get_pmp450i_radio_metrics": [
+        "radioDownlinkRate",
+        "radioUplinkRate",
+        "signalStrengthRx",
+        "signalStrengthTx",
+        "ssr",
+        "modulationMode",
+        "sysDescr",
     ],
 }
 
@@ -563,7 +587,7 @@ def test_unified_tool_catalog_references_required_oids_per_tool(tmp_path: Path) 
             "verify_tools_are_catalogued",
         }
     }
-    # All eleven tool functions are present.
+    # All twelve tool functions are present.
     assert server_tool_names == {
         "snmp_get_pmp450i_radio_metrics",
         "snmp_get_ap_summary",
@@ -576,6 +600,7 @@ def test_unified_tool_catalog_references_required_oids_per_tool(tmp_path: Path) 
         "get_device_lifecycle_summary",
         "correlate_sector_interference",
         "save_intervention_record",
+        "register_device",
     }, f"server.__all__ tool surface drifted; got {sorted(server_tool_names)!r}"
 
 
@@ -690,3 +715,124 @@ def test_new_tool_without_oid_registration_rejected_at_registration_time(
     # The guard MUST refuse to start MCP — never reach the
     # `GUARD_DID_NOT_RAISE` line.
     assert "GUARD_DID_NOT_RAISE" not in stderr, f"guard let the rogue tool through; got {stderr!r}"
+
+
+# ---------------------------------------------------------------------------
+# R-NEW-6-S2/S3/S4 — every re-signed baseline carries `register_device`
+# in its `tools` envelope AND `sysDescr` in its `oids` map AND verifies
+# cleanly under `OidCatalogRegistry.verify_all` (issue #42 / Task 6).
+# ---------------------------------------------------------------------------
+
+_RE_SIGNED_TRIPLES: list[tuple[str, str, str]] = [
+    ("cambium", "pmp450i", "15.2.1"),
+    ("cambium", "pmp450i", "15.3.0"),
+    ("cambium", "pmp450i", "25.1.0"),
+]
+
+
+def _load_signed_envelope(*, vendor: str, model: str, firmware: str) -> dict[str, Any]:
+    """Load the operator-root catalog envelope for `(vendor, model, firmware)`.
+
+    Returns the raw dict (NOT an `OidCatalog`) so the tests can assert
+    the envelope's `tools` map and `oids` map directly without going
+    through the registry's verifier.
+    """
+    path = PROJECT_ROOT / "data" / "oid-catalogs" / vendor / model / f"{firmware}.json"
+    return json.loads(path.read_text())
+
+
+@pytest.mark.parametrize(("vendor", "model", "firmware"), _RE_SIGNED_TRIPLES)
+def test_every_resigned_baseline_tools_envelope_includes_register_device(
+    vendor: str, model: str, firmware: str
+) -> None:
+    """Every re-signed PMP 450i baseline's `tools` envelope carries `register_device`."""
+    env = _load_signed_envelope(vendor=vendor, model=model, firmware=firmware)
+    tools = env.get("tools", {})
+    assert "register_device" in tools, (
+        f"{vendor}/{model}/{firmware} tools envelope missing 'register_device'; "
+        f"got {sorted(tools)!r}"
+    )
+    assert "sysDescr" in tools["register_device"], (
+        f"{vendor}/{model}/{firmware} register_device entry missing sysDescr; "
+        f"got {tools['register_device']!r}"
+    )
+
+
+@pytest.mark.parametrize(("vendor", "model", "firmware"), _RE_SIGNED_TRIPLES)
+def test_resigned_baseline_oids_includes_sysdescr(vendor: str, model: str, firmware: str) -> None:
+    """Every re-signed PMP 450i baseline's `oids` map carries `sysDescr`."""
+    env = _load_signed_envelope(vendor=vendor, model=model, firmware=firmware)
+    oids = env.get("oids", {})
+    assert oids.get("sysDescr") == "1.3.6.1.2.1.1.1.0", (
+        f"{vendor}/{model}/{firmware} oids map must contain sysDescr -> "
+        f"1.3.6.1.2.1.1.1.0; got {oids.get('sysDescr')!r}"
+    )
+
+
+@pytest.mark.parametrize(("vendor", "model", "firmware"), _RE_SIGNED_TRIPLES)
+def test_every_resigned_baseline_hmac_verifies(vendor: str, model: str, firmware: str) -> None:
+    """`OidCatalogRegistry.verify_all(Settings)` accepts every re-signed baseline."""
+    from nora.config import Settings
+    from nora.data import BUILTIN_BASELINE_SIGNING_KEY
+    from nora.drivers.oid_catalog import OidCatalogRegistry
+
+    settings = Settings(
+        _env_file=None,
+        _env_file_encoding=None,
+        nora_oid_catalogs_path=PROJECT_ROOT / "data" / "oid-catalogs",
+        nora_oid_catalog_signing_key=BUILTIN_BASELINE_SIGNING_KEY,
+    )
+    registry = OidCatalogRegistry.verify_all(settings)
+    # The triple must be loaded.
+    assert (vendor, model, firmware) in registry.loaded_refs, (
+        f"{vendor}/{model}/{firmware} not loaded by verify_all; got {registry.loaded_refs!r}"
+    )
+    # And `resolve(...)` returns the catalog (HMAC + schema OK).
+    catalog = registry.resolve((vendor, model, firmware))
+    assert catalog.firmware == firmware
+    # And `required_oids_by_tool` exposes `register_device`.
+    per_tool = registry.required_oids_by_tool((vendor, model))
+    assert "register_device" in per_tool, (
+        f"{vendor}/{model}/{firmware} missing 'register_device' in per-tool index; "
+        f"got {sorted(per_tool)!r}"
+    )
+    assert "sysDescr" in per_tool["register_device"]
+
+
+def test_register_device_passes_registration_guard_via_catalog_envelope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`register_device` is accepted by the boot-time guard via the catalog envelope.
+
+    After the Task 6 re-sign, `register_device` MUST be in the catalog
+    envelope — so the guard accepts it WITHOUT an allow-list entry.
+    This test boots `cli.main()` against the production-signed catalog
+    roots and asserts (a) `verify_tools_are_catalogued` does NOT raise
+    for `register_device` and (b) `mcp.run()` proceeds.
+
+    Runs against the real operator-root + built-in-root catalogs (both
+    re-signed with `BUILTIN_BASELINE_SIGNING_KEY` in this PR).
+    """
+    from nora import cli as cli_mod
+    from nora import server as server_mod
+
+    # Hermetic env: production operator root + built-in root; empty inventory.
+    monkeypatch.setenv("NORA_OID_CATALOGS_PATH", str(PROJECT_ROOT / "data" / "oid-catalogs"))
+    monkeypatch.setenv("NORA_DEVICES_INVENTORY_PATH", str(tmp_path / "devices.yaml"))
+    (tmp_path / "devices.yaml").write_text("# empty hermetic inventory\n")
+    monkeypatch.setenv(
+        "NORA_OID_CATALOG_SIGNING_KEY",
+        "nora-built-in-baseline-placeholder-key-do-not-use-in-prod",
+    )
+
+    # Patch mcp.run to a no-op so we don't actually start the server.
+    monkeypatch.setattr(server_mod.mcp, "run", lambda *_a, **_kw: None)
+
+    try:
+        cli_mod.main([])
+    except SystemExit:
+        pass
+    # If `verify_tools_are_catalogued` had rejected `register_device`,
+    # the boot would have aborted with `UncataloguedToolError` BEFORE
+    # reaching `mcp.run()`. No assertion needed here — the absence of
+    # an `UncataloguedToolError` exception is the positive signal.

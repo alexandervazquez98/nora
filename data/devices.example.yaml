@@ -1,8 +1,8 @@
 # Public example inventory for the PMP 450i SNMP driver.
 #
 # Copy this file to `data/devices.yaml` and replace the placeholders
-# before booting NORA. NEVER commit `data/devices.yaml`; it is
-# gitignored.
+# before booting NORA. NEVER commit `data/devices.yaml` (see
+# .gitignore — the file is excluded from version control).
 #
 # Hosts use RFC 5737 documentation prefixes (192.0.2.x); credentials
 # are all `change-me`. Replace the values with your real inventory

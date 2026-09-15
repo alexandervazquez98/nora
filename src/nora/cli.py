@@ -35,6 +35,7 @@ os.environ.setdefault("FASTMCP_SHOW_SERVER_BANNER", "false")
 
 from nora.config import Settings  # noqa: E402
 from nora.drivers.inventory import Inventory  # noqa: E402
+from nora.drivers.mutable_inventory import MutableInventory  # noqa: E402
 from nora.drivers.oid_catalog import OidCatalogRegistry  # noqa: E402
 from nora.drivers.registry import set_driver  # noqa: E402
 from nora.drivers.snmp_pmp450i import Pmp450iDriver  # noqa: E402
@@ -235,7 +236,19 @@ def main(argv: Sequence[str] | None = None) -> None:
     set_prompt_registry(prompt_registry)
     catalog_registry = OidCatalogRegistry.verify_all(settings)
     inventory = Inventory.from_yaml(settings.nora_devices_inventory_path)
-    set_driver(Pmp450iDriver(inventory=inventory, catalog_registry=catalog_registry))
+    # PR #42 / `2026-09-15-register-device-mcp`: the `register_device`
+    # MCP tool mutates the inventory at runtime (`DeviceResolver.build`
+    # → `MutableInventory.register`). The wrapper preserves the
+    # frozen `Inventory` invariant while exposing the seam; the
+    # driver layer routes its eight `self._inventory.get(...)` call
+    # sites through the wrapper transparently (Task 3).
+    mutable_inventory = MutableInventory(base=inventory)
+    set_driver(
+        Pmp450iDriver(
+            inventory=mutable_inventory,
+            catalog_registry=catalog_registry,
+        )
+    )
     # PR 5 (slice 5): refuse any `@mcp.tool` whose name is not in
     # `OidCatalogRegistry.REQUIRED_OIDS_BY_TOOL[(vendor, model)]`. The
     # guard runs BEFORE `mcp.run()` so a rogue registration aborts the

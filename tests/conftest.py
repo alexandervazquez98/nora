@@ -65,6 +65,11 @@ _SAMPLE_CATALOG_PAYLOAD: dict[str, str] = {
     # PR 4 — slice 4 RF-migration additions.
     "migrateCarrierFrequency": "1.3.6.1.4.1.161.19.3.1.1.95.0",
     "migratePriorCarrierFrequency": "1.3.6.1.4.1.161.19.3.1.1.96.0",
+    # Issue #42 / `2026-09-15-register-device-mcp`: `sysDescr` is the
+    # RFC 1213 OID that `register_device` reads for cheap reachability
+    # validation. Adding it here keeps the hermetic `sample_catalog`
+    # fixture aligned with the re-signed production catalogs (Task 6).
+    "sysDescr": "1.3.6.1.2.1.1.1.0",
 }
 
 # Deterministic key for HMAC verification in tests. NOT for production.

@@ -114,6 +114,26 @@ TOOLS_V1: dict[str, list[str]] = {
         "migrateCarrierFrequency",
         "migratePriorCarrierFrequency",
     ],
+    # Issue #42 / `2026-09-15-register-device-mcp`: `register_device`
+    # carries the cheapest possible reachability probe (`sysDescr` GET
+    # against `1.3.6.1.2.1.1.1.0`). The envelope entry retires the
+    # legacy `_ALLOWED_UNCATALOGUED_TOOLS` allow-list entry in the
+    # same PR (Task 7).
+    "register_device": ["sysDescr"],
+    # Slice-1 radio-metrics tool — promoted from the legacy
+    # `_ALLOWED_UNCATALOGUED_TOOLS` allow-list. Same OID-set as the
+    # legacy driver path: `report_firmware` reads `sysDescr` and the
+    # other five radio-metrics OIDs. Re-signing the catalog with this
+    # envelope retires the explicit allow-list entry in `server.py:626`.
+    "snmp_get_pmp450i_radio_metrics": [
+        "radioDownlinkRate",
+        "radioUplinkRate",
+        "signalStrengthRx",
+        "signalStrengthTx",
+        "ssr",
+        "modulationMode",
+        "sysDescr",
+    ],
 }
 
 

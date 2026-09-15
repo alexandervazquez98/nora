@@ -46,6 +46,14 @@ You have access to NORA MCP tools. Follow this operational sequence:
 4. Step 4: Radio Metrics Telemetry:
    - For typed RF metrics on provisioned inventory devices:
      snmp_get_pmp450i_radio_metrics(device_id="<device_id>")
+   - **Ad-hoc IPv4 Fallback (issue #42):** When `device_id` looks like an
+     IPv4 literal AND `Inventory.get(device_id)` raises `DeviceNotFoundError`,
+     call `register_device(host="<ipv4>", community="<operator-provided>")`
+     instead of asking for a `device_id`. The tool validates reachability via
+     a cheap `sysDescr` GET (`1.3.6.1.2.1.1.1.0`); on failure it raises a
+     typed error and inserts nothing. Do NOT ask the operator for the
+     community string — accept whatever they typed. Do NOT echo the
+     community string back in your reply (Zero-Leakage contract).
 5. Step 5: Persist a New Intervention Record:
    - After completing a diagnostic or remediation step, atomically persist the outcome:
      save_intervention_record(payload={...})
