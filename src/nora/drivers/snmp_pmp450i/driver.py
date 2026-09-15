@@ -31,7 +31,8 @@ from nora.drivers.exceptions import (
     NetworkUnreachableError,
     SnmpTimeoutError,
 )
-from nora.drivers.inventory import Device, Inventory
+from nora.drivers.inventory import Device
+from nora.drivers.mutable_inventory import _InventoryLike
 from nora.drivers.oid_catalog import REQUIRED_OIDS, OidCatalog, OidCatalogRegistry
 from nora.drivers.snmp_pmp450i.client import SnmpClient
 from nora.drivers.snmp_pmp450i.report import RadioMetricsReport
@@ -77,10 +78,17 @@ class Pmp450iDriver:
     def __init__(
         self,
         *,
-        inventory: Inventory,
+        inventory: _InventoryLike,
         catalog_registry: OidCatalogRegistry,
         client_factory: Callable[[Device], SnmpClient] = default_client_factory,
     ) -> None:
+        # `_InventoryLike` is the seam (issue #42 / Task 3): both the
+        # frozen `Inventory` (back-compat for the 8 read sites) AND
+        # `MutableInventory` (Task 3's runtime-mutable seam for
+        # `register_device`) satisfy the Protocol. The eight
+        # `self._inventory.get(...)` call sites route through whichever
+        # facade the boot sequence wired in; for production it is
+        # `MutableInventory(base=Inventory.from_yaml(...))`.
         self._inventory = inventory
         self._catalog_registry = catalog_registry
         self._client_factory = client_factory
