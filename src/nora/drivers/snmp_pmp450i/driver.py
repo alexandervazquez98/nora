@@ -349,23 +349,32 @@ class Pmp450iSnmpDriver(Pmp450iDriver):
         device_id: str,
         *,
         settings: Any = None,
+        operator_confirmed: bool = False,
     ) -> Any:
         """Return a typed ``SpectrumAnalysis`` for ``device_id``.
 
         Slice 4 implementation: delegates to ``spectrum.fetch_spectrum``
-        which checks ``Settings.nora_maintenance_window_*`` BEFORE
-        emitting any wire frame, resolves the catalog, opens a
+        which checks the Tier-1 operator-clearance gate FIRST, then
+        the maintenance-window check, resolves the catalog, opens a
         client, walks the three noise-floor OIDs, and folds the
-        response into a typed Pydantic model. Calls outside the
-        configured window raise :class:`MaintenanceWindowViolation`.
+        response into a typed Pydantic model.
 
         Per `pmp450i-radio-tools/spec.md` sub-cluster 3 requirement
         "snmp_run_spectrum_analysis — Ranked Clean Frequencies +
-        Maintenance Window".
+        Maintenance Window" and the issue #43 ADDED requirement
+        "Tier-1 Operator Clearance Gate" — ``operator_confirmed``
+        defaults to ``False`` (fail-closed). Tier-1 tools may be
+        actively disruptive, so the server-side gate enforces
+        explicit operator clearance before any wire frame.
         """
         from nora.drivers.snmp_pmp450i.spectrum import fetch_spectrum
 
-        return fetch_spectrum(driver=self, device_id=device_id, settings=settings)
+        return fetch_spectrum(
+            driver=self,
+            device_id=device_id,
+            settings=settings,
+            operator_confirmed=operator_confirmed,
+        )
 
     def fetch_migrate(
         self,

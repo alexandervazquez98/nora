@@ -298,7 +298,9 @@ def snmp_get_sm_detailed_diagnostics(device_id: str, luid: str) -> dict[str, Any
 
 
 @mcp.tool
-def snmp_run_spectrum_analysis(device_id: str) -> dict[str, Any]:
+def snmp_run_spectrum_analysis(
+    device_id: str, operator_confirmed: bool = False
+) -> dict[str, Any]:
     """Read a typed spectrum sweep for the named PMP 450i device.
 
     Returns a :class:`SpectrumAnalysis` carrying
@@ -311,12 +313,23 @@ def snmp_run_spectrum_analysis(device_id: str) -> dict[str, Any]:
     Maintenance Window": calls outside the configured maintenance
     window raise :class:`MaintenanceWindowViolation` and emit zero
     wire frames.
+
+    Per issue #43 ADDED requirement "Tier-1 Operator Clearance Gate":
+    ``operator_confirmed`` defaults to ``False`` (fail-closed). The
+    server-side gate raises :class:`Tier1ClearanceRequired` BEFORE any
+    wire frame when ``operator_confirmed`` is False (or absent). The
+    LLM orchestrator MUST request operator clearance before invoking.
     """
     from nora.drivers.snmp_pmp450i.spectrum import fetch_spectrum
 
     driver = get_driver()
     settings = get_runtime_state()
-    analysis = fetch_spectrum(driver=driver, device_id=device_id, settings=settings)
+    analysis = fetch_spectrum(
+        driver=driver,
+        device_id=device_id,
+        settings=settings,
+        operator_confirmed=operator_confirmed,
+    )
     return analysis.model_dump(mode="json")
 
 

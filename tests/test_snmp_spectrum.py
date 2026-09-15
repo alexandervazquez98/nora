@@ -198,7 +198,9 @@ def test_spectrum_returns_ranked_clean_frequencies(tmp_path: Path) -> None:
     driver = _build_driver(inventory=inv, registry=registry, canned=canned)
     settings = _settings_with_window(0)  # no window enforced
 
-    analysis = driver.fetch_spectrum("ap-7400-01", settings=settings)
+    analysis = driver.fetch_spectrum(
+        "ap-7400-01", settings=settings, operator_confirmed=True
+    )
 
     assert isinstance(analysis, SpectrumAnalysis)
     dumped = analysis.model_dump(mode="json")
@@ -265,6 +267,7 @@ def test_spectrum_respects_maintenance_window(tmp_path: Path) -> None:
             driver=driver,
             device_id="ap-7400-01",
             settings=settings_with_past_window,
+            operator_confirmed=True,
         )
 
     # Zero SNMP frames emitted.
@@ -309,7 +312,9 @@ def test_spectrum_inside_window_proceeds(tmp_path: Path) -> None:
         nora_maintenance_window_start_minutes_ago=10,
     )
 
-    analysis = driver.fetch_spectrum("ap-7400-01", settings=settings)
+    analysis = driver.fetch_spectrum(
+        "ap-7400-01", settings=settings, operator_confirmed=True
+    )
     assert isinstance(analysis, SpectrumAnalysis)
     # Wire frames landed — at minimum the three noise-floor OIDs.
     assert len(canned.get_calls) >= 3, (
@@ -381,8 +386,201 @@ def test_spectrum_falls_back_to_driver_runtime_settings(
     )
 
     # No explicit settings — the helper pulls from ``driver._runtime_settings``.
-    analysis = fetch_spectrum(driver=driver, device_id="ap-7400-01")
+    analysis = fetch_spectrum(
+        driver=driver, device_id="ap-7400-01", operator_confirmed=True
+    )
     assert analysis.ranked_clean_frequencies != []
+
+
+# ---------------------------------------------------------------------------
+# Issue #43 / `2026-09-15-3tier-tool-governance` — Tier-1 operator
+# clearance gate. Per `pmp450i-radio-tools/spec.md` ADDED requirement
+# "snmp_run_spectrum_analysis Operator Clearance Gate":
+#
+# * `operator_confirmed=False` (the default, including the
+#   absent-parameter case) raises a typed
+#   `Tier1ClearanceRequired` BEFORE any SNMP GET is emitted.
+# * `operator_confirmed=True` proceeds inside the maintenance
+#   window.
+# * The gate fires BEFORE the window check (highest-priority invariant).
+# ---------------------------------------------------------------------------
+
+
+def test_spectrum_operator_confirmed_false_raises_before_any_get(
+    tmp_path: Path,
+) -> None:
+    """``operator_confirmed=False`` raises ``Tier1ClearanceRequired`` BEFORE any GET.
+
+    Per `pmp450i-radio-tools/spec.md` ADDED scenario "operator_confirmed=False
+    raises BEFORE any SNMP GET" — zero wire frames are sent and the
+    maintenance-window check is NOT evaluated.
+    """
+    from nora.drivers.exceptions import Tier1ClearanceRequired
+    from nora.drivers.snmp_pmp450i.spectrum import fetch_spectrum
+
+    inv = _build_inventory(tmp_path)
+    registry = _build_catalog(firmware="15.2.1", include_spectrum_oids=True)
+    spec_oids = _spectrum_oids()
+    canned = _FakeSnmpClient(
+        {
+            spec_oids["spectrumNoiseFloorA"]: -90,
+            spec_oids["spectrumNoiseFloorB"]: -95,
+            spec_oids["spectrumNoiseFloorC"]: -85,
+        }
+    )
+    driver = _build_driver(inventory=inv, registry=registry, canned=canned)
+    settings = _settings_with_window(0)  # no window enforced
+
+    with pytest.raises(Tier1ClearanceRequired):
+        fetch_spectrum(
+            driver=driver,
+            device_id="ap-7400-01",
+            settings=settings,
+            operator_confirmed=False,
+        )
+
+    # Zero wire frames emitted — the gate fires FIRST.
+    assert canned.get_calls == [], (
+        f"spectrum MUST NOT emit wire frames when operator_confirmed=False; "
+        f"got {canned.get_calls!r}"
+    )
+
+
+def test_spectrum_operator_confirmed_true_proceeds_inside_window(
+    tmp_path: Path,
+) -> None:
+    """``operator_confirmed=True`` proceeds inside the maintenance window."""
+    from nora.drivers.snmp_pmp450i.spectrum import SpectrumAnalysis, fetch_spectrum
+
+    inv = _build_inventory(tmp_path)
+    registry = _build_catalog(firmware="15.2.1", include_spectrum_oids=True)
+    spec_oids = _spectrum_oids()
+    canned = _FakeSnmpClient(
+        {
+            spec_oids["spectrumNoiseFloorA"]: -90,
+            spec_oids["spectrumNoiseFloorB"]: -95,
+            spec_oids["spectrumNoiseFloorC"]: -85,
+        }
+    )
+    driver = _build_driver(inventory=inv, registry=registry, canned=canned)
+
+    # Inside the window: window starts 10 min ago, lasts 60 min → "now" sits inside.
+    settings_inside = Settings(
+        _env_file=None,
+        _env_file_encoding=None,
+        nora_maintenance_window_minutes=60,
+        nora_maintenance_window_start_minutes_ago=10,
+    )
+
+    analysis = fetch_spectrum(
+        driver=driver,
+        device_id="ap-7400-01",
+        settings=settings_inside,
+        operator_confirmed=True,
+    )
+    assert isinstance(analysis, SpectrumAnalysis)
+    assert len(canned.get_calls) >= 3
+
+
+def test_spectrum_operator_confirmed_absent_defaults_false_and_raises(
+    tmp_path: Path,
+) -> None:
+    """The absent-parameter case resolves to ``False`` and raises.
+
+    Per `pmp450i-radio-tools/spec.md` ADDED scenario "absent parameter
+    defaults to False and raises".
+    """
+    from nora.drivers.exceptions import Tier1ClearanceRequired
+    from nora.drivers.snmp_pmp450i.spectrum import fetch_spectrum
+
+    inv = _build_inventory(tmp_path)
+    registry = _build_catalog(firmware="15.2.1", include_spectrum_oids=True)
+    spec_oids = _spectrum_oids()
+    canned = _FakeSnmpClient(
+        {
+            spec_oids["spectrumNoiseFloorA"]: -90,
+            spec_oids["spectrumNoiseFloorB"]: -95,
+            spec_oids["spectrumNoiseFloorC"]: -85,
+        }
+    )
+    driver = _build_driver(inventory=inv, registry=registry, canned=canned)
+    settings = _settings_with_window(0)
+
+    # No `operator_confirmed` kwarg → default applies → raises.
+    with pytest.raises(Tier1ClearanceRequired):
+        fetch_spectrum(
+            driver=driver,
+            device_id="ap-7400-01",
+            settings=settings,
+        )
+
+    assert canned.get_calls == [], (
+        f"spectrum MUST NOT emit wire frames when operator_confirmed is absent (default False); "
+        f"got {canned.get_calls!r}"
+    )
+
+
+def test_spectrum_operator_confirmed_true_outside_window_still_refuses(
+    tmp_path: Path,
+) -> None:
+    """``operator_confirmed=True`` OUTSIDE the window still refuses (no regression).
+
+    Per `pmp450i-radio-tools/spec.md` ADDED scenario "operator_confirmed=True
+    OUTSIDE the window still refuses" — the operator-clearance gate
+    passes, the existing ``MaintenanceWindowViolation`` invariant still
+    fires.
+    """
+    from nora.drivers.exceptions import MaintenanceWindowViolation
+    from nora.drivers.snmp_pmp450i.spectrum import fetch_spectrum
+
+    inv = _build_inventory(tmp_path)
+    registry = _build_catalog(firmware="15.2.1", include_spectrum_oids=True)
+    spec_oids = _spectrum_oids()
+    canned = _FakeSnmpClient(
+        {
+            spec_oids["spectrumNoiseFloorA"]: -90,
+            spec_oids["spectrumNoiseFloorB"]: -95,
+            spec_oids["spectrumNoiseFloorC"]: -85,
+        }
+    )
+    driver = _build_driver(inventory=inv, registry=registry, canned=canned)
+
+    settings_past_window = Settings(
+        _env_file=None,
+        _env_file_encoding=None,
+        nora_maintenance_window_minutes=60,
+        nora_maintenance_window_start_minutes_ago=120,
+    )
+
+    with pytest.raises(MaintenanceWindowViolation):
+        fetch_spectrum(
+            driver=driver,
+            device_id="ap-7400-01",
+            settings=settings_past_window,
+            operator_confirmed=True,
+        )
+
+    assert canned.get_calls == [], (
+        f"spectrum MUST NOT emit wire frames outside the maintenance window; "
+        f"got {canned.get_calls!r}"
+    )
+
+
+def test_tier1_clearance_required_inherits_driver_error() -> None:
+    """``Tier1ClearanceRequired`` is a ``DriverError`` subclass.
+
+    Per `secure-configuration` scenario "Tier1ClearanceRequired
+    inherits DriverError".
+    """
+    from nora.drivers.exceptions import DriverError, Tier1ClearanceRequired
+
+    exc = Tier1ClearanceRequired(
+        tool="snmp_run_spectrum_analysis",
+        message="operator clearance required",
+    )
+    assert isinstance(exc, DriverError)
+    assert exc.tool == "snmp_run_spectrum_analysis"
+    assert exc.message == "operator clearance required"
 
 
 __all__ = [
@@ -392,4 +590,10 @@ __all__ = [
     "test_spectrum_missing_catalog_oid_raises_lookup_error",
     "test_spectrum_coerce_int_tolerates_none_and_bad_strings",
     "test_spectrum_falls_back_to_driver_runtime_settings",
+    # Issue #43 / Tier-1 gate
+    "test_spectrum_operator_confirmed_false_raises_before_any_get",
+    "test_spectrum_operator_confirmed_true_proceeds_inside_window",
+    "test_spectrum_operator_confirmed_absent_defaults_false_and_raises",
+    "test_spectrum_operator_confirmed_true_outside_window_still_refuses",
+    "test_tier1_clearance_required_inherits_driver_error",
 ]

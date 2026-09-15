@@ -173,6 +173,29 @@ class DuplicateDeviceError(DriverError):
     """
 
 
+class Tier1ClearanceRequired(DriverError):
+    """Raised when a Tier-1 tool is invoked without ``operator_confirmed=True``.
+
+    Per `openspec/changes/2026-09-15-3tier-tool-governance/specs/pmp450i-radio-tools/spec.md`
+    ADDED requirement "Tier-1 Clearance Gate": the
+    ``snmp_run_spectrum_analysis`` MCP tool refuses any call that
+    arrives without ``operator_confirmed=True`` (default ``False``,
+    including the absent-parameter case). The exception carries the
+    offending tool name and a clear message so the LLM orchestrator
+    can recover by re-invoking with operator clearance.
+
+    Mirrors the :class:`MaintenanceWindowViolation` pattern: the gate
+    fires BEFORE any wire frame is emitted, and inherits from
+    :class:`DriverError` so ``except DriverError`` catches the entire
+    surface.
+    """
+
+    def __init__(self, *, tool: str, message: str) -> None:
+        super().__init__(f"{tool}: {message}")
+        self.tool = tool
+        self.message = message
+
+
 class DeviceUnreachable(DriverError):
     """Raised when the SNMP agent's port is closed or no response is received.
 
@@ -236,6 +259,7 @@ __all__ = [
     # Issue #42 / `2026-09-15-register-device-mcp` — typed errors for
     # the `register_device` tool surface.
     "DuplicateDeviceError",
+    "Tier1ClearanceRequired",
     "DeviceUnreachable",
     "InvalidCommunity",
     "InvalidHostError",
