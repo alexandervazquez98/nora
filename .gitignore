@@ -37,6 +37,15 @@ id_*
 *.sqlite3
 *.db
 
+# Operator-supplied device inventory (contains SNMP credentials).
+# Issue #42 / `2026-09-15-register-device-mcp`: this MUST land in
+# the same PR that introduces `register_device` so the existing
+# public template (`data/devices.example.yaml`) is the only tracked
+# file under `data/`.
+data/devices.yaml
+data/devices-*.yaml
+!data/devices.example.yaml
+
 # macOS
 .DS_Store
 .AppleDouble
