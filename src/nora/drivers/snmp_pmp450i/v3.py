@@ -10,6 +10,8 @@ HMAC / encryption routines aren't available.
 from __future__ import annotations
 
 import asyncio
+import inspect
+from datetime import timedelta
 from typing import Any
 
 from puresnmp import Auth as _Auth
@@ -91,19 +93,28 @@ class V3Client:
     # ------------------------------------------------------------------
 
     def get_oid(self, oid: str) -> str | int:
-        """SNMPv3 GET; returns native Python scalar."""
+        """SNMPv3 GET; returns native Python scalar.
+
+        `puresnmp.PyWrapper.get` surfaces `OCTET STRING` as native
+        Python `bytes` and `TimeTicks` as `datetime.timedelta`. We
+        normalize both to the `str | int` Protocol contract here; the
+        underlying wire types stay visible only inside this method.
+        """
         result = self._call_async("get", oid)
-        if not isinstance(result, (str, int)):
-            raise NetworkUnreachableError(
-                f"{self._device.host}:{self._device.port}: "
-                f"unexpected scalar type {type(result).__name__}"
-            )
-        return result
+        return self._normalize_scalar(result)
 
     def walk(self, base_oid: str) -> list[tuple[str, str | int]]:
-        """SNMPv3 WALK under `base_oid`. Read-only by definition."""
+        """SNMPv3 WALK under `base_oid`. Read-only by definition.
+
+        `puresnmp.PyWrapper.walk` is an `async def` generator function
+        that returns an `AsyncGenerator[PyVarBind, None]`, NOT a
+        coroutine. `_call_async` drains it; we then normalize each
+        value through the same `_normalize_scalar` helper so the
+        Protocol contract `list[tuple[str, str | int]]` holds for
+        every wire type.
+        """
         result = self._call_async("walk", base_oid)
-        return [(str(o), value) for o, value in result]
+        return [(str(o), self._normalize_scalar(value)) for o, value in result]
 
     def close(self) -> None:
         """No-op — `puresnmp.Client` is stateless."""
@@ -113,10 +124,51 @@ class V3Client:
     # internals
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _normalize_scalar(value: Any) -> str | int:
+        """Normalize puresnmp wire types to the `str | int` Protocol contract.
+
+        - `bytes` (UTF-8, e.g. OCTET STRING `sysDescr`) -> decoded + stripped `str`
+        - `bytes` (non-UTF-8, e.g. MAC or raw serial)    -> `.hex()` `str` fallback
+        - `datetime.timedelta` (TimeTicks `sysUpTime`)   -> `int(total_seconds())`
+        - `str` / `int` (already-native)                 -> passthrough
+        - anything else                                  -> raises `NetworkUnreachableError`
+        """
+        if isinstance(value, bytes):
+            try:
+                return value.decode("utf-8").strip()
+            except UnicodeDecodeError:
+                return value.hex()
+        if isinstance(value, timedelta):
+            return int(value.total_seconds())
+        if isinstance(value, (str, int)):
+            return value
+        raise NetworkUnreachableError(f"unexpected scalar type {type(value).__name__}")
+
     def _call_async(self, method_name: str, *args: Any) -> Any:
+        # `puresnmp.PyWrapper` returns a coroutine for `get`/`getnext`/
+        # `multiget`/`bulkget`/`table` but an `async_generator` for
+        # `walk`/`multiwalk`/`bulkwalk`. `asyncio.run` rejects async
+        # generators with `ValueError`, so we dispatch by introspection
+        # and drain the generator inside a short-lived event loop.
         coro = getattr(self._client, method_name)(*args)
+        run_target: Any
+        if inspect.iscoroutine(coro):
+            run_target = coro
+        elif inspect.isasyncgen(coro):
+
+            async def _drain() -> list[Any]:
+                return [item async for item in coro]
+
+            run_target = _drain()
+        else:
+            raise NetworkUnreachableError(
+                f"{self._device.host}:{self._device.port}: "
+                f"unexpected return type from {method_name}: "
+                f"{type(coro).__name__}"
+            )
         try:
-            result: Any = asyncio.run(coro)
+            result: Any = asyncio.run(run_target)
             return result
         except (TimeoutError, asyncio.TimeoutError) as exc:
             # `socket.timeout` is a subclass of `TimeoutError` on
