@@ -202,7 +202,8 @@ def test_python_dash_m_nora_emits_deprecation_warning(tmp_path: Path) -> None:
         "correlate_sector_interference",
         "save_intervention_record",
         "register_device",
+        "hitl_mint_token",
     }
     assert tool_names == expected, (
-        f"`python -m nora` must expose the same 12 tools as nora-mcp; got {tool_names}"
+        f"`python -m nora` must expose the same 13 tools as nora-mcp; got {tool_names}"
     )

@@ -1,7 +1,7 @@
 """NORA FastMCP server — thin split.
 
 Boots a FastMCP instance named "nora" over stdio and exposes exactly
-twelve `@mcp.tool` registrations and two `@mcp.prompt` registrations:
+thirteen `@mcp.tool` registrations and two `@mcp.prompt` registrations:
 
 * `snmp_get_pmp450i_radio_metrics`         — PMP 450i SNMP driver.
 * `snmp_get_ap_summary`                    — PMP 450i AP summary.
@@ -15,6 +15,7 @@ twelve `@mcp.tool` registrations and two `@mcp.prompt` registrations:
 * `get_device_lifecycle_summary`          — read-only intervention memory.
 * `correlate_sector_interference`         — read-only intervention memory.
 * `save_intervention_record`              — writer (issue #12 / new sibling package).
+* `hitl_mint_token`                       — admin HITL token issuance (WU-4).
 * `netops_orchestrator` (prompt)          — Lead NOC orchestrator system prompt.
 * `snmp_pmp450i` (prompt)                  — PMP 450i driver system prompt.
 
@@ -557,6 +558,62 @@ def register_device(host: str, community: str, validate: bool = True) -> dict[st
 
 
 # ---------------------------------------------------------------------------
+# HITL admin token issuance — WU-4 / PR #44 follow-up plan.
+#
+# Mirrors the `nora hitl mint --operator-id … --ttl-seconds …` CLI without
+# requiring shell access on the backend host; NOC operators without
+# terminal access can mint verification tokens from chat.
+#
+# Wired through `Settings.nora_hitl_signing_key` (lazy fail-closed — a
+# missing / empty key raises `AutonomousMutationRejected` to the MCP
+# caller). The wire response is `HitlApprovalToken.model_dump(mode="json")`
+# — a dict carrying `token`, `operator_id`, `issued_at`, `expires_at`,
+# `signature`. Default ON (`Settings.nora_hitl_admin_enabled = True`);
+# deploys that want CLI-only minting set
+# `NORA_HITL_ADMIN_ENABLED=false`.
+#
+# Imports are scoped to the tool body so the cold-import cost stays
+# zero when no caller invokes `hitl_mint_token` (same idiom as
+# `snmp_migrate_radio_frequency`).
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool
+def hitl_mint_token(
+    operator_id: str,
+    ttl_seconds: int = 900,
+) -> dict[str, Any]:
+    """Mint a HMAC-signed HITL approval token (WU-4 / PR #44).
+
+    Same semantics as the `nora hitl mint --operator-id … --ttl-seconds …`
+    CLI: a typed token is produced via `nora.hitl.tokens.mint_token`
+    using the boot-time `Settings.nora_hitl_signing_key`. The wire
+    response is `mint_token(...).model_dump(mode="json")` — a dict
+    carrying `token`, `operator_id`, `issued_at`, `expires_at`,
+    `signature`.
+
+    Default ON (`Settings.nora_hitl_admin_enabled = True`); deploys
+    that want CLI-only minting set `NORA_HITL_ADMIN_ENABLED=false`.
+
+    Raises:
+        AutonomousMutationRejected: missing or empty
+            `nora_hitl_signing_key`. The literal message is the
+            contract seam (mirrors `verify_approval_token`).
+    """
+    from nora.hitl.tokens import mint_token
+
+    settings = get_runtime_state()
+    signing_key = settings.nora_hitl_signing_key
+    effective_ttl = ttl_seconds if ttl_seconds is not None else settings.nora_hitl_token_ttl_seconds
+    token = mint_token(
+        operator_id,
+        ttl_seconds=effective_ttl,
+        signing_key=signing_key,
+    )
+    return token.model_dump(mode="json")
+
+
+# ---------------------------------------------------------------------------
 # Prompt registrations — `@mcp.prompt` thin wrappers over `PromptRegistry`.
 # ---------------------------------------------------------------------------
 
@@ -696,6 +753,15 @@ _ALLOWED_UNCATALOGUED_TOOLS: frozenset[str] = frozenset(
         "get_device_lifecycle_summary",
         "correlate_sector_interference",
         "save_intervention_record",
+        # WU-4 / PR #44 follow-up plan: the HITL admin tool is NOT an
+        # SNMP-backed operator (no OID catalog will ever cover it —
+        # it consumes `Settings.nora_hitl_signing_key`, not the
+        # PMP 450i OID catalog). Allow-list entry keeps the
+        # boot-time tool-registration guard green until a follow-up
+        # change re-examines whether the tool warrants catalog
+        # coverage. See the deferred-tier-classification note near
+        # `_EXPECTED_TOOL_TIERS` for the related follow-up.
+        "hitl_mint_token",
         # Issue #42 / `2026-09-15-register-device-mcp`: both
         # `register_device` and `snmp_get_pmp450i_radio_metrics` were
         # retired from this allow-list once their catalog envelope
@@ -789,6 +855,13 @@ def verify_tools_are_catalogued(
 
 # Tool name -> expected tier. Mirrors the verbatim table in
 # `openspec/changes/2026-09-15-3tier-tool-governance/specs/tool-service-impact-tiers/spec.md`.
+#
+# NOTE: `hitl_mint_token` (WU-4 / PR #44) is intentionally NOT
+# in _EXPECTED_TOOL_TIERS for this PR. A future change must:
+# (a) classify it as Tier 2 (it issues HMAC-signed tokens that
+# grant mutation authority),
+# (b) add a docs/tool_specs/hitl_mint_token.md file against
+# the ADR-4 frozen schema.
 _EXPECTED_TOOL_TIERS: dict[str, int] = {
     # Tier 0 — Passive Telemetry (8)
     "snmp_get_ap_summary": 0,
@@ -873,6 +946,10 @@ __all__ = [
     "correlate_sector_interference",
     "save_intervention_record",
     "register_device",
+    # WU-4 / PR #44 follow-up plan: HITL admin token issuance over MCP.
+    # Tier classification deferred — see the NOTE above
+    # `_EXPECTED_TOOL_TIERS` for the follow-up contract.
+    "hitl_mint_token",
     "netops_orchestrator",
     "snmp_pmp450i",
     "register_tool_log_middleware",

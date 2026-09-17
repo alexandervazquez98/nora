@@ -26,10 +26,10 @@ PRIVATE_IPV4 = re.compile(
 # --- Requirement: Pydantic Settings Is the Only Configuration Source --------
 
 
-def test_settings_has_seven_user_fields() -> None:
-    """After the thin split, `Settings.model_fields` has exactly 14 entries.
+def test_settings_has_eight_user_fields() -> None:
+    """After the thin split, `Settings.model_fields` has exactly 15 entries.
 
-    Thirteen user-settable fields plus the computed `loaded_from` = 14 total.
+    Fourteen user-settable fields plus the computed `loaded_from` = 15 total.
     The nine former LLM/journal fields MUST be gone.
 
     PR 4 (slice 4) extends the set with four HITL/maintenance-window
@@ -39,12 +39,16 @@ def test_settings_has_seven_user_fields() -> None:
 
     Issue #43 (`2026-09-15-3tier-tool-governance`) extends the set with
     two more: ``nora_hitl_signing_key``, ``nora_tool_specs_dir``.
+
+    WU-4 / PR #44 follow-up extends the set with one more:
+    ``nora_hitl_admin_enabled`` (gate for the `hitl_mint_token` MCP admin
+    tool, default True per user decision 2026-09-17).
     """
     from nora.config import Settings
 
     fields = Settings.model_fields
-    assert len(fields) == 14, (
-        f"Expected 14 model fields (13 user + loaded_from); got {len(fields)}: {sorted(fields)}"
+    assert len(fields) == 15, (
+        f"Expected 15 model fields (14 user + loaded_from); got {len(fields)}: {sorted(fields)}"
     )
 
     forbidden = {

@@ -206,12 +206,11 @@ def _boot_server(
 # ---------------------------------------------------------------------------
 
 
-def test_subprocess_responds_to_tools_list_with_nine_tools(tmp_path: Path) -> None:
-    """A real `python -m nora` boot exposes the eleven-tool surface in `tools/list`.
+def test_subprocess_responds_to_tools_list_with_thirteen_tools(tmp_path: Path) -> None:
+    """A real `python -m nora` boot exposes the thirteen-tool surface in `tools/list`.
 
-    PR 4 (slice 4 commits 2 + 3) added ``snmp_run_spectrum_analysis``
-    AND ``snmp_migrate_radio_frequency``; the expected set is
-    therefore 11 tools post-merge.
+    WU-4 / PR #44 follow-up plan added ``hitl_mint_token``; the
+    expected set is therefore 13 tools post-merge.
     """
     env_file = tmp_path / ".env"
     env_file.write_text("NORA_OID_CATALOG_SIGNING_KEY=change-me\n")
@@ -239,8 +238,8 @@ def test_subprocess_responds_to_tools_list_with_nine_tools(tmp_path: Path) -> No
 
     assert parsed_reply is not None, f"No `tools/list` reply found in stdout:\n{proc.stdout}"
 
-    # The reply's `result.tools` array MUST list exactly the twelve thin tools
-    # (11 pre-`register_device` + `register_device` from issue #42).
+    # The reply's `result.tools` array MUST list exactly the thirteen thin tools
+    # (12 pre-WU-4 + ``hitl_mint_token`` from WU-4 / PR #44).
     tools = parsed_reply["result"].get("tools", [])
     names = {t.get("name") for t in tools}
     expected = {
@@ -256,8 +255,9 @@ def test_subprocess_responds_to_tools_list_with_nine_tools(tmp_path: Path) -> No
         "correlate_sector_interference",
         "save_intervention_record",
         "register_device",
+        "hitl_mint_token",
     }
-    assert names == expected, f"Expected exactly the 12 thin tools; got {names}"
+    assert names == expected, f"Expected exactly the 13 thin tools; got {names}"
 
 
 def test_subprocess_emits_structured_startup_log_on_stderr(tmp_path: Path) -> None:

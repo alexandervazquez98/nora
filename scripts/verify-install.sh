@@ -478,14 +478,15 @@ check_functional() {
                 if [ "${name}" = "nora" ]; then init_ok=1; fi
                 ;;
             2)
-                # tools/list → exactly the eleven canonical tool names.
+                # tools/list → exactly the twelve canonical tool names.
                 # Order matches FastMCP's registration order in server.py
                 # (NOT alphabetical). The PRs that added slices 2/3/4
                 # appended to the registration list, so the radio-metrics
                 # + intervention lifecycle set from PRs #26 + #25 leads,
                 # followed by the unified NetOps radio surface from
-                # slices 2/3/4 (PRs #27-#29).
-                expected="snmp_get_pmp450i_radio_metrics snmp_get_ap_summary snmp_get_frame_utilization snmp_get_sm_table snmp_get_sm_detailed_diagnostics snmp_run_spectrum_analysis snmp_migrate_radio_frequency search_intervention_history get_device_lifecycle_summary correlate_sector_interference save_intervention_record"
+                # slices 2/3/4 (PRs #27-#29). WU-4 / PR #44 appended
+                # the admin HITL token issuer `hitl_mint_token` last.
+                expected="snmp_get_pmp450i_radio_metrics snmp_get_ap_summary snmp_get_frame_utilization snmp_get_sm_table snmp_get_sm_detailed_diagnostics snmp_run_spectrum_analysis snmp_migrate_radio_frequency search_intervention_history get_device_lifecycle_summary correlate_sector_interference save_intervention_record hitl_mint_token"
                 actual="$(json_get "${line}" '" ".join(t.get("name", "") for t in data.get("result", {}).get("tools", []))' 2>/dev/null || echo "")"
                 if [ "${actual}" = "${expected}" ]; then tools_ok=1; fi
                 ;;
@@ -499,7 +500,7 @@ check_functional() {
     done < "${tmp_out}"
 
     if [ "${init_ok}" = "1" ] && [ "${tools_ok}" = "1" ] && [ "${prompts_ok}" = "1" ]; then
-        record_check "functional.jsonrpc" "ok" "tools=11 prompts=2 serverInfo.name=nora"
+        record_check "functional.jsonrpc" "ok" "tools=12 prompts=2 serverInfo.name=nora"
         return 0
     fi
     record_check "functional.jsonrpc" "fail" "init=${init_ok} tools=${tools_ok} prompts=${prompts_ok}"

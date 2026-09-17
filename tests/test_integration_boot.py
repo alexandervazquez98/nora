@@ -164,12 +164,11 @@ def _boot_env(tmp_path: Path) -> dict[str, str]:
     }
 
 
-def test_subprocess_nora_mcp_exposes_nine_tools(tmp_path: Path) -> None:
-    """Boot the `nora-mcp` console script and assert the 11-tool surface.
+def test_subprocess_nora_mcp_exposes_thirteen_tools(tmp_path: Path) -> None:
+    """Boot the `nora-mcp` console script and assert the 13-tool surface.
 
-    PR 4 (slice 4 commits 2 + 3) added ``snmp_run_spectrum_analysis``
-    AND ``snmp_migrate_radio_frequency``; the expected set is
-    therefore 11 tools post-merge.
+    WU-4 / PR #44 follow-up plan added ``hitl_mint_token``; the
+    expected set is therefore 13 tools post-merge.
     """
     # The `nora-mcp` console script lives in `.venv/bin/`. uv installs it
     # from the `[project.scripts]` entry in `pyproject.toml`.
@@ -196,16 +195,17 @@ def test_subprocess_nora_mcp_exposes_nine_tools(tmp_path: Path) -> None:
         "correlate_sector_interference",
         "save_intervention_record",
         "register_device",
+        "hitl_mint_token",
     ]
     assert tool_names == expected, (
-        f"`nora-mcp` must expose exactly the 12 thin tools in order; got {tool_names!r}"
+        f"`nora-mcp` must expose exactly the 13 thin tools in order; got {tool_names!r}"
     )
     # The boot log line is on stderr.
     assert "nora-mcp boot complete" in stderr, f"Expected startup log on stderr; got: {stderr!r}"
 
 
 def test_subprocess_python_dash_m_nora_exposes_same_tools(tmp_path: Path) -> None:
-    """Boot `python -m nora` and assert the SAME 12-tool surface as nora-mcp."""
+    """Boot `python -m nora` and assert the SAME 13-tool surface as nora-mcp."""
     py = _venv_python()
 
     tool_names, stderr = _drive_tools_list(
@@ -227,9 +227,10 @@ def test_subprocess_python_dash_m_nora_exposes_same_tools(tmp_path: Path) -> Non
         "correlate_sector_interference",
         "save_intervention_record",
         "register_device",
+        "hitl_mint_token",
     ]
     assert tool_names == expected, (
-        f"`python -m nora` must expose exactly the 12 thin tools in order; got {tool_names!r}"
+        f"`python -m nora` must expose exactly the 13 thin tools in order; got {tool_names!r}"
     )
     # DeprecationWarning is emitted on stderr.
     assert "DeprecationWarning" in stderr, (
@@ -239,7 +240,7 @@ def test_subprocess_python_dash_m_nora_exposes_same_tools(tmp_path: Path) -> Non
 
 
 def test_subprocess_both_entry_points_expose_identical_tool_lists(tmp_path: Path) -> None:
-    """`nora-mcp` and `python -m nora` expose the twelve-tool surface in the SAME order."""
+    """`nora-mcp` and `python -m nora` expose the thirteen-tool surface in the SAME order."""
     py = _venv_python()
     nora_mcp = PROJECT_ROOT / ".venv" / "bin" / "nora-mcp"
     if not nora_mcp.exists():
