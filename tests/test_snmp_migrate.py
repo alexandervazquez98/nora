@@ -772,6 +772,354 @@ def test_migrate_emits_intervention_record_on_completion(
 
 
 # ---------------------------------------------------------------------------
+# WU-3 follow-up — dry-run fallback when client lacks apply_oid.
+#
+# Production ``V2CClient`` (read-only ``SnmpClient`` Protocol contract)
+# does NOT define ``apply_oid``. The unit suite passes because the
+# ``_FakeSnmpClient`` defines it. Running against real hardware
+# raises ``AttributeError`` AFTER the HITL gate clears. Per
+# ``odd/tasks/pr44-followups.md`` WU-3: when the client lacks
+# ``apply_oid``, ``fetch_migrate`` returns a typed dry-run result
+# carrying the would-be SET pair, instead of crashing. We do NOT
+# add ``apply_oid`` to ``V2CClient`` (write mutations stay out of
+# scope).
+# ---------------------------------------------------------------------------
+
+
+class _V2CShapeStub:
+    """V2CClient-shaped stub: ``get_oid`` + ``walk`` + ``close``. NO ``apply_oid``.
+
+    Mirrors the production read-only ``SnmpClient`` Protocol — exactly
+    the surface that ``V2CClient`` exposes. WU-3 dry-run fallback is
+    gated on this stub LACKING ``apply_oid``.
+    """
+
+    def __init__(
+        self,
+        *,
+        values: dict[str, str | int] | None = None,
+        walk_results: dict[str, list[tuple[str, str | int]]] | None = None,
+    ) -> None:
+        self._values = dict(values or {})
+        self._walk_results: dict[str, list[tuple[str, str | int]]] = walk_results or {}
+        self.get_calls: list[str] = []
+        self.walk_calls: list[str] = []
+        self.close_calls: int = 0
+
+    def get_oid(self, oid: str) -> str | int:
+        self.get_calls.append(oid)
+        if oid not in self._values:
+            raise KeyError(oid)
+        return self._values[oid]
+
+    def walk(self, base_oid: str) -> list[tuple[str, str | int]]:
+        self.walk_calls.append(base_oid)
+        return list(self._walk_results.get(base_oid, []))
+
+    def close(self) -> None:
+        self.close_calls += 1
+
+    # NOTE: NO ``apply_oid`` — this is the contract seam. The dry-run
+    # fallback path is gated on its absence.
+
+
+def _build_driver_with_stub(
+    *,
+    inventory: Inventory,
+    registry: OidCatalogRegistry,
+    stub: _V2CShapeStub,
+    settings: Settings | None = None,
+) -> Any:
+    """Wire a driver whose ``client_factory`` returns a V2C-shaped stub (no apply_oid)."""
+    from nora.drivers.snmp_pmp450i import Pmp450iSnmpDriver
+
+    driver = Pmp450iSnmpDriver(
+        inventory=inventory,
+        catalog_registry=registry,
+        client_factory=lambda d: stub,
+    )
+    if settings is not None:
+        driver._runtime_settings = settings
+    return driver
+
+
+# ---------------------------------------------------------------------------
+# WU-3 Named test #1 — emulation_dry_run_when_client_lacks_apply_oid
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_migrate_emulation_dry_run_when_client_lacks_apply_oid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """V2C-shaped client (no ``apply_oid``) → typed dry-run result with ``would_set`` pair.
+
+    Per ``odd/tasks/pr44-followups.md`` WU-3: when the SNMP client
+    lacks ``apply_oid``, ``fetch_migrate`` returns a typed dry-run
+    result carrying the would-be SET pair, instead of crashing
+    with ``AttributeError``. The dry-run path does NOT change the
+    per-SM migration loop; it only short-circuits the AP
+    carrier-change step.
+    """
+    from nora.drivers.snmp_pmp450i import migrate as migrate_mod
+
+    inv = _build_inventory(tmp_path)
+    registry = _build_catalog(firmware="15.2.1")
+    target_freq_mhz = 5800.0
+    migration_freq_oid = "1.3.6.1.4.1.161.19.3.1.4.1.38.0"
+
+    stub = _V2CShapeStub(
+        values={
+            # ``prior_carrier`` capture path — populate so ``get_oid`` returns the value.
+            migration_freq_oid: 5750.0,
+        },
+        walk_results={
+            "1.3.6.1.4.1.161.19.3.1.4.1": _sm_subtree_rows(
+                online_luids=["001", "002"],
+                degraded_luids=["003"],
+                pre_existing_luids=["004"],
+            ),
+        },
+    )
+    settings = _settings_with_rollback_timeout(60)
+    driver = _build_driver_with_stub(inventory=inv, registry=registry, stub=stub, settings=settings)
+
+    monkeypatch.setattr(
+        "nora.drivers.snmp_pmp450i.subscribers.search_intervention_history",
+        lambda *args, **kwargs: [],
+    )
+    # The dry-run path does NOT arm a watchdog / poll reachability, but
+    # stub them defensively so the test cannot accidentally depend on
+    # them being called.
+    monkeypatch.setattr(migrate_mod, "_start_rollback_watchdog", lambda **kw: None)
+    monkeypatch.setattr(migrate_mod, "_cancel_rollback_watchdog", lambda *a, **kw: None)
+    monkeypatch.setattr(migrate_mod, "save_intervention_record", lambda *a, **kw: {"status": "OK"})
+
+    valid_token = _mint_valid_token()
+    result = migrate_mod.fetch_migrate(
+        driver=driver,
+        device_id="ap-7400-01",
+        approval_token=valid_token,
+        target_frequency_mhz=target_freq_mhz,
+        settings=settings,
+    )
+
+    # Dry-run typed result.
+    assert result["dry_run"] is True, (
+        f"V2C-shaped client MUST produce a dry-run result; got {result!r}"
+    )
+    # The single AP-side SET the tool WOULD have emitted — serialised
+    # as a JSON array (Pydantic tuple→list).
+    assert result["would_set"] == [[migration_freq_oid, target_freq_mhz]], (
+        f"would_set MUST carry the carrier-frequency SET pair; got {result['would_set']!r}"
+    )
+    # No SET verb exists on the V2C-shaped stub — compile-time seam.
+    assert not hasattr(stub, "apply_oid"), (
+        "V2C-shaped stub MUST NOT define apply_oid — that is the contract seam"
+    )
+    # No rollback (no SET means no rollback window).
+    assert result["rolled_back"] is False
+    assert result["reason"] is None
+    # Per-SM migration counts preserved.
+    assert result["online_active_migrated"] == 2
+    assert result["active_degraded_migrated"] == 1
+    assert result["pre_existing_offline_excluded"] == 1
+    # Device id is the inventory host.
+    assert result["device_id"] == "192.0.2.10"
+    # Target frequency echoed back.
+    assert result["target_frequency_mhz"] == target_freq_mhz
+
+
+# ---------------------------------------------------------------------------
+# WU-3 Named test #2 — emulation_skips_watchdog_on_dry_run
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_migrate_emulation_skips_watchdog_on_dry_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Dry-run does NOT arm a rollback watchdog — nothing was SET.
+
+    Per ``odd/tasks/pr44-followups.md`` WU-3: the dry-run path emits
+    no SET frame, so there is no rollback window to manage. The
+    ``_start_rollback_watchdog`` helper MUST NOT be called.
+    """
+    from nora.drivers.snmp_pmp450i import migrate as migrate_mod
+
+    inv = _build_inventory(tmp_path)
+    registry = _build_catalog(firmware="15.2.1")
+
+    stub = _V2CShapeStub(
+        values={"1.3.6.1.4.1.161.19.3.1.4.1.38.0": 5750.0},
+        walk_results={
+            "1.3.6.1.4.1.161.19.3.1.4.1": _sm_subtree_rows(
+                online_luids=["001"],
+                degraded_luids=[],
+                pre_existing_luids=[],
+            ),
+        },
+    )
+    settings = _settings_with_rollback_timeout(60)
+    driver = _build_driver_with_stub(inventory=inv, registry=registry, stub=stub, settings=settings)
+
+    monkeypatch.setattr(
+        "nora.drivers.snmp_pmp450i.subscribers.search_intervention_history",
+        lambda *args, **kwargs: [],
+    )
+    monkeypatch.setattr(migrate_mod, "save_intervention_record", lambda *a, **kw: {"status": "OK"})
+
+    # Spy on ``_start_rollback_watchdog`` so we can assert it was NEVER called.
+    watchdog_calls: list[dict[str, Any]] = []
+
+    def fake_start_watchdog(*, timeout_seconds: int, on_loss_of_management: Any) -> None:
+        watchdog_calls.append({"timeout_seconds": timeout_seconds})
+
+    monkeypatch.setattr(migrate_mod, "_start_rollback_watchdog", fake_start_watchdog)
+    monkeypatch.setattr(migrate_mod, "_cancel_rollback_watchdog", lambda *a, **kw: None)
+
+    valid_token = _mint_valid_token()
+    result = migrate_mod.fetch_migrate(
+        driver=driver,
+        device_id="ap-7400-01",
+        approval_token=valid_token,
+        target_frequency_mhz=5800.0,
+        settings=settings,
+    )
+
+    # Dry-run; no watchdog armed.
+    assert result["dry_run"] is True
+    assert watchdog_calls == [], (
+        f"Dry-run path MUST NOT arm a rollback watchdog; got {watchdog_calls!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# WU-3 Named test #3 — emulation_does_not_call_apply_oid_unavailable
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_migrate_emulation_does_not_call_apply_oid_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Dry-run does NOT call ``apply_oid`` — the gate is a ``hasattr`` check.
+
+    Per ``odd/tasks/pr44-followups.md`` WU-3: the tool MUST
+    short-circuit before any ``apply_oid`` call when the client
+    lacks the method. The compile-time ``hasattr(client,
+    'apply_oid')`` check is the contract seam — no
+    ``AttributeError`` at runtime.
+    """
+    from nora.drivers.snmp_pmp450i import migrate as migrate_mod
+
+    inv = _build_inventory(tmp_path)
+    registry = _build_catalog(firmware="15.2.1")
+
+    stub = _V2CShapeStub(
+        values={"1.3.6.1.4.1.161.19.3.1.4.1.38.0": 5750.0},
+        walk_results={
+            "1.3.6.1.4.1.161.19.3.1.4.1": _sm_subtree_rows(
+                online_luids=["001"],
+                degraded_luids=[],
+                pre_existing_luids=[],
+            ),
+        },
+    )
+    settings = _settings_with_rollback_timeout(60)
+    driver = _build_driver_with_stub(inventory=inv, registry=registry, stub=stub, settings=settings)
+
+    monkeypatch.setattr(
+        "nora.drivers.snmp_pmp450i.subscribers.search_intervention_history",
+        lambda *args, **kwargs: [],
+    )
+    monkeypatch.setattr(migrate_mod, "_start_rollback_watchdog", lambda **kw: None)
+    monkeypatch.setattr(migrate_mod, "_cancel_rollback_watchdog", lambda *a, **kw: None)
+    monkeypatch.setattr(migrate_mod, "save_intervention_record", lambda *a, **kw: {"status": "OK"})
+
+    # Compile-time seam: ``hasattr`` must be the gate.
+    assert not hasattr(stub, "apply_oid"), "V2C-shaped stub MUST lack apply_oid — the dry-run gate"
+
+    valid_token = _mint_valid_token()
+    # If the gate is missing, this call raises ``AttributeError``. A
+    # clean return is the assertion.
+    result = migrate_mod.fetch_migrate(
+        driver=driver,
+        device_id="ap-7400-01",
+        approval_token=valid_token,
+        target_frequency_mhz=5800.0,
+        settings=settings,
+    )
+    assert result["dry_run"] is True
+
+
+# ---------------------------------------------------------------------------
+# WU-3 Named test #4 — real_set_still_works_via_apply_oid (regression guard)
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_migrate_real_set_still_works_via_apply_oid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression guard: ``_FakeSnmpClient`` with ``apply_oid`` keeps the real-SET path.
+
+    Per ``odd/tasks/pr44-followups.md`` WU-3: the dry-run fallback
+    MUST NOT regress the existing real-SET path. A test fake that
+    defines ``apply_oid`` continues to flow through the unchanged
+    wire path; the result carries ``dry_run=False, would_set=[]``.
+    """
+    from nora.drivers.snmp_pmp450i import migrate as migrate_mod
+
+    inv = _build_inventory(tmp_path)
+    registry = _build_catalog(firmware="15.2.1")
+    target_freq_mhz = 5800.0
+    migration_freq_oid = "1.3.6.1.4.1.161.19.3.1.4.1.38.0"
+
+    canned = _FakeSnmpClient(
+        values={},
+        walk_results={
+            "1.3.6.1.4.1.161.19.3.1.4.1": _sm_subtree_rows(
+                online_luids=["001"],
+                degraded_luids=["002"],
+                pre_existing_luids=["003"],
+            ),
+        },
+    )
+    settings = _settings_with_rollback_timeout(60)
+    driver = _build_driver(inventory=inv, registry=registry, canned=canned, settings=settings)
+
+    monkeypatch.setattr(
+        "nora.drivers.snmp_pmp450i.subscribers.search_intervention_history",
+        lambda *args, **kwargs: [],
+    )
+    monkeypatch.setattr(migrate_mod, "_start_rollback_watchdog", lambda **kw: None)
+    monkeypatch.setattr(migrate_mod, "_cancel_rollback_watchdog", lambda *a, **kw: None)
+    monkeypatch.setattr(migrate_mod, "_wait_for_management_reachability", lambda **kw: True)
+    monkeypatch.setattr(migrate_mod, "save_intervention_record", lambda *a, **kw: {"status": "OK"})
+
+    valid_token = _mint_valid_token()
+    result = migrate_mod.fetch_migrate(
+        driver=driver,
+        device_id="ap-7400-01",
+        approval_token=valid_token,
+        target_frequency_mhz=target_freq_mhz,
+        settings=settings,
+    )
+
+    # Real SET path: NOT a dry-run; ``would_set`` is empty.
+    assert result["dry_run"] is False, (
+        f"apply_oid-bearing client MUST NOT enter dry-run; got {result!r}"
+    )
+    assert result["would_set"] == [], (
+        f"Real-SET path MUST NOT populate would_set; got {result['would_set']!r}"
+    )
+    # Existing behaviour preserved: exactly one SET frame was emitted.
+    assert len(canned._set_calls) == 1, (
+        f"Real-SET path MUST emit exactly 1 SET frame; got {canned._set_calls!r}"
+    )
+    assert canned._set_calls[0] == f"{migration_freq_oid}={target_freq_mhz}", (
+        f"Real-SET path MUST emit the carrier-frequency SET; got {canned._set_calls[0]!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Defensive coverage — exercise the public helpers directly so the
 # per-module coverage targets (``migrate.py`` >= 90%) are met without
 # weakening the production code.
@@ -833,6 +1181,10 @@ __all__ = [
     "test_migrate_rolls_back_within_timeout_on_loss_of_management",
     "test_migrate_autonomous_call_raises_autonomous_mutation_rejected",
     "test_migrate_emits_intervention_record_on_completion",
+    "test_fetch_migrate_emulation_dry_run_when_client_lacks_apply_oid",
+    "test_fetch_migrate_emulation_skips_watchdog_on_dry_run",
+    "test_fetch_migrate_emulation_does_not_call_apply_oid_unavailable",
+    "test_fetch_migrate_real_set_still_works_via_apply_oid",
     "test_migrate_subscriber_default_logs_and_returns_ok",
     "test_rollback_watchdog_start_and_cancel_round_trip",
 ]

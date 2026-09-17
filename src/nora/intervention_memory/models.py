@@ -34,11 +34,19 @@ Stage = Literal[
 ]
 
 # Status literals — must match `specs/intervention-memory/spec.md` R1.
+# `DRY_RUN` was added in WU-3 of the PR #44 follow-up plan
+# (`odd/tasks/pr44-followups.md`): `snmp_migrate_radio_frequency`
+# emits a `POST_MIGRATION / DRY_RUN` record when the runtime client
+# lacks `apply_oid` (read-only Protocol contract is deliberate; the
+# migration tool returns a typed dry-run result instead of crashing).
+# Future readers branching on `status` should treat `DRY_RUN` as
+# informational-only — no SET frames were emitted, no rollback needed.
 Status = Literal[
     "COMPLETED",
     "ABORTED",
     "ACTION_REQUIRED",
     "PENDING_VERIFICATION",
+    "DRY_RUN",
 ]
 
 
