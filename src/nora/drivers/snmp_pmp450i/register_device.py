@@ -28,6 +28,7 @@ satisfies the :class:`SnmpClient` Protocol (``get_oid`` / ``walk`` /
 from __future__ import annotations
 
 import ipaddress
+import logging
 from typing import Any, Callable
 
 import puresnmp.exc
@@ -43,6 +44,8 @@ from nora.drivers.inventory import Device, SnmpVersion
 from nora.drivers.mutable_inventory import MutableInventory
 from nora.drivers.resolver import DeviceResolver, SnmpCredentials
 from nora.drivers.snmp_pmp450i.client import SnmpClient
+
+logger = logging.getLogger(__name__)
 
 # RFC 1213 sysDescr — the agent's human-readable identification string.
 # Same OID `Pmp450iSnmpDriver.report_firmware` reads; the validate
@@ -137,6 +140,11 @@ def _validate_sysdescr(client: SnmpClient) -> str:
     * ``OSError`` / ``TimeoutError`` -> ``DeviceUnreachable(host)``
     * ``puresnmp.exc.SnmpError``     -> ``InvalidCommunity(community)`` (auth rejected)
     * Other                          -> propagates (unexpected — wired caller maps)
+
+    Returns the raw sysDescr body verbatim. WU-1 / PR-44 follow-up:
+    callers also reuse the body to attempt a best-effort semver parse
+    via :func:`_parse_firmware_from_sysdescr` — the raw string is the
+    cheapest source of truth for the agent's advertised firmware.
     """
     try:
         raw = client.get_oid(_SYSDESCR_OID)
@@ -150,6 +158,28 @@ def _validate_sysdescr(client: SnmpClient) -> str:
         # wire response when the community is wrong IS a SnmpError.
         raise InvalidCommunity("<unknown>") from exc
     return str(raw)
+
+
+def _parse_firmware_from_sysdescr(raw: str) -> str | None:
+    """Return the semver string parsed from `raw`, or ``None`` on failure.
+
+    WU-1 / PR-44 follow-up: thin wrapper over
+    :func:`nora.drivers.snmp_pmp450i.driver._parse_sysdescr_version`
+    that converts the ``ValueError`` raised on missing / malformed
+    semver tokens into a ``None`` return — we deliberately do NOT
+    raise :class:`MalformedSysdescrError` (the user rejected
+    fail-closed on register; the operator is unblocked and
+    ``report_firmware`` converges the firmware on the next Tier-0
+    read). The dependency direction is preserved: this module
+    imports the parser from ``driver.py``; the parser has no
+    back-reference to ``register_device``.
+    """
+    from nora.drivers.snmp_pmp450i.driver import _parse_sysdescr_version
+
+    try:
+        return str(_parse_sysdescr_version(raw))
+    except ValueError:
+        return None
 
 
 def _register_device_impl(
@@ -222,6 +252,8 @@ def _register_device_impl(
     del sanitizer  # reserved for future telemetry hooks
 
     device = _build_device(host, community)
+    parsed_firmware: str | None = None
+    raw_sysdescr: str | None = None
 
     if validate:
         if client_factory is None:
@@ -234,7 +266,7 @@ def _register_device_impl(
         client = client_factory(device)
         try:
             try:
-                _validate_sysdescr(client)
+                raw_sysdescr = _validate_sysdescr(client)
             except DeviceUnreachable:
                 # Re-raise with the actual host the operator typed.
                 raise DeviceUnreachable(host) from None
@@ -245,6 +277,30 @@ def _register_device_impl(
                 client.close()
             except Exception:  # pragma: no cover - close is best-effort
                 pass
+
+        # WU-1 / PR-44 follow-up — best-effort firmware parse. The
+        # probe already proved the agent is reachable AND the
+        # community is accepted; a parse failure here means the
+        # sysDescr string carries no semver token. We log a single
+        # WARNING and keep `(adhoc)` so the operator is unblocked.
+        # We deliberately do NOT raise — fail-closed was rejected
+        # on 2026-09-17 (ODD plan `pr44-followups.md`, confirmed
+        # decisions #1).
+        if raw_sysdescr is not None:
+            parsed_firmware = _parse_firmware_from_sysdescr(raw_sysdescr)
+            if parsed_firmware is None:
+                logger.warning(
+                    "register_device: sysDescr unparseable for host=%s; firmware kept as (adhoc)",
+                    host,
+                )
+            else:
+                # Rebind the firmware on the SAME device object before
+                # insertion. `Device` is Pydantic-frozen, so we
+                # reconstruct via ``model_copy`` and keep the same
+                # `device_id` / credentials. Downstream
+                # `OidCatalogRegistry.resolve(("cambium", "pmp450i",
+                # parsed))` will succeed for the parsed triple.
+                device = device.model_copy(update={"firmware": parsed_firmware})
 
     # Resolve the mutable inventory from the driver when not supplied.
     if mutable_inventory is None:

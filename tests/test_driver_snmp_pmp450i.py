@@ -21,7 +21,7 @@ from nora.drivers.exceptions import (
     NetworkUnreachableError,
     SnmpTimeoutError,
 )
-from nora.drivers.inventory import Inventory
+from nora.drivers.inventory import Device, Inventory
 from nora.drivers.oid_catalog import OidCatalog, OidCatalogRegistry
 from nora.drivers.snmp_pmp450i import (
     RadioMetricsReport,
@@ -321,6 +321,75 @@ def test_fetch_radio_metrics_calls_set_focus_first(tmp_path: Path) -> None:  # n
 
 
 # ---------------------------------------------------------------------------
+# WU-1 / R1 — `report_firmware` converges `(adhoc)` → parsed semver.
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# WU-1 / R1 — `report_firmware` converges `(adhoc)` → parsed semver.
+# ---------------------------------------------------------------------------
+
+
+def test_report_firmware_converges_adhoc_to_parsed_semver(tmp_path: Path) -> None:
+    """`report_firmware` on a `(adhoc)` device rebinds the overlay firmware.
+
+    WU-1 / PR-44 follow-up: after `register_device` (which inserts
+    with `(adhoc)`), a later Tier-0 `report_firmware` call observes
+    the parsed semver from the agent's sysDescr AND converges the
+    overlay entry so subsequent `OidCatalogRegistry.resolve(...)`
+    lookups succeed. Asserts:
+
+    * the return value of `report_firmware` is the typed `Version`.
+    * the overlay `Device.firmware` is rebinded post-call.
+    * the `MutableInventory` write seam (`update_firmware`) is the
+      mechanism — not a private bypass.
+    """
+    from packaging.version import Version
+
+    from nora.drivers.mutable_inventory import MutableInventory
+    from nora.drivers.snmp_pmp450i.driver import Pmp450iSnmpDriver
+
+    base = _build_inventory(tmp_path)
+    wrapper = MutableInventory(base=base)
+
+    # Register an ad-hoc `(adhoc)` device — emulates the
+    # `register_device` MCP tool's insert path.
+    adhoc_device_id = "adhoc-192-0-2-99-aabbcc"
+    wrapper.register(
+        Device(  # type: ignore[call-arg]
+            device_id=adhoc_device_id,
+            vendor="cambium",
+            model="pmp450i",
+            firmware="(adhoc)",
+            host="192.0.2.99",
+            snmp_version="v2c",
+            community="change-me",
+        )
+    )
+    assert wrapper.get(adhoc_device_id).firmware == "(adhoc)"
+
+    # `report_firmware` reads sysDescr; we stub the wire layer.
+    fake_client = mock.MagicMock(spec=SnmpClient)
+    fake_client.get_oid.return_value = "PMP 450i AP, 16.1.0"
+    factory = mock.MagicMock(return_value=fake_client)
+    driver = Pmp450iSnmpDriver(
+        inventory=wrapper,
+        catalog_registry=_build_catalog(),
+        client_factory=factory,
+    )
+
+    parsed = driver.report_firmware(adhoc_device_id)
+
+    assert isinstance(parsed, Version)
+    assert parsed == Version("16.1.0")
+    # The overlay was updated — Tier-0 converged the firmware.
+    assert wrapper.get(adhoc_device_id).firmware == "16.1.0"
+    # Sanity: `MutableInventory.update_firmware` is the seam; the
+    # driver MUST NOT have shadowed or replaced the Device object.
+    assert wrapper.get(adhoc_device_id).host == "192.0.2.99"
+
+
+# ---------------------------------------------------------------------------
 # RadioMetricsReport.fold — typed contract
 # ---------------------------------------------------------------------------
 
@@ -342,3 +411,67 @@ def test_fold_maps_oid_values_to_typed_fields(tmp_path: Path) -> None:
     assert report.rx_signal_dbm == -58
     assert report.ssr == 75
     assert report.modulation == "256QAM"
+
+
+# ---------------------------------------------------------------------------
+# WU-1 / TRIANGULATE — convergence gate + frozen-inventory back-compat.
+# ---------------------------------------------------------------------------
+
+
+def test_report_firmware_does_not_touch_non_adhoc_firmware(tmp_path: Path) -> None:
+    """Convergence only fires when `device.firmware == "(adhoc)"`.
+
+    Back-compat guard: a YAML-loaded device (firmware already a real
+    semver) MUST NOT be overwritten by `report_firmware` — the YAML is
+    the boot-time source of truth and is authoritative. The parse
+    result is still returned as a typed `Version`.
+    """
+    from packaging.version import Version
+
+    from nora.drivers.snmp_pmp450i.driver import Pmp450iSnmpDriver
+
+    inv = _build_inventory(tmp_path)  # ap-7400-01 has firmware='15.2.1'
+    fake_client = mock.MagicMock(spec=SnmpClient)
+    fake_client.get_oid.return_value = "PMP 450i AP, 16.1.0"
+    factory = mock.MagicMock(return_value=fake_client)
+    driver = Pmp450iSnmpDriver(
+        inventory=inv,
+        catalog_registry=_build_catalog(),
+        client_factory=factory,
+    )
+
+    parsed = driver.report_firmware("ap-7400-01")
+
+    assert parsed == Version("16.1.0")
+    # Inventory is byte-identical — convergence did NOT fire.
+    assert inv.get("ap-7400-01").firmware == "15.2.1"
+
+
+def test_report_firmware_works_against_frozen_inventory(tmp_path: Path) -> None:
+    """A frozen `Inventory` (no `update_firmware`) is left untouched.
+
+    Back-compat guard: `report_firmware` was the original Tier-0 read
+    method and pre-dates `MutableInventory`. The convergence branch
+    is gated on `hasattr(inventory, "update_firmware")` so the
+    legacy surface keeps working unchanged.
+    """
+    from packaging.version import Version
+
+    from nora.drivers.snmp_pmp450i.driver import Pmp450iSnmpDriver
+
+    inv = _build_inventory(tmp_path)  # plain frozen `Inventory`
+    assert not hasattr(inv, "update_firmware")  # invariant for the gate
+    fake_client = mock.MagicMock(spec=SnmpClient)
+    fake_client.get_oid.return_value = "Cambium PMP 450i 15.2.1"
+    factory = mock.MagicMock(return_value=fake_client)
+    driver = Pmp450iSnmpDriver(
+        inventory=inv,
+        catalog_registry=_build_catalog(),
+        client_factory=factory,
+    )
+
+    parsed = driver.report_firmware("ap-7400-01")
+
+    assert parsed == Version("15.2.1")
+    # Frozen inventory is byte-identical.
+    assert inv.get("ap-7400-01").firmware == "15.2.1"

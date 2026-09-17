@@ -255,6 +255,14 @@ class Pmp450iSnmpDriver(Pmp450iDriver):
            the same call frame).
         2. Open a client and GET ``sysDescr`` (``1.3.6.1.2.1.1.1.0``).
         3. Parse the first semver-shaped token into ``Version``.
+        4. WU-1 / PR-44 follow-up — when the inventory is a
+           :class:`MutableInventory` AND the resolved device's firmware
+           is still the ``(adhoc)`` sentinel, converge the overlay
+           entry to the parsed semver via
+           :meth:`MutableInventory.update_firmware`. Tier-0 read-side
+           callers MUST always succeed; the convergence attempt is
+           best-effort and any exception is swallowed (the call still
+           returns the typed ``Version``).
 
         Wire failures keep the existing typed-error mapping from
         ``_call_async`` (``SnmpTimeoutError`` / ``NetworkUnreachableError``).
@@ -268,7 +276,27 @@ class Pmp450iSnmpDriver(Pmp450iDriver):
                 client.close()
             except Exception:  # pragma: no cover - close is best-effort
                 pass
-        return _parse_sysdescr_version(str(raw_value))
+        parsed = _parse_sysdescr_version(str(raw_value))
+
+        # WU-1 / PR-44 follow-up — converge `(adhoc)` → parsed semver
+        # so subsequent `OidCatalogRegistry.resolve(...)` lookups
+        # succeed against the converged triple. Best-effort: a failed
+        # write seam MUST NOT break the read-side return value of
+        # `report_firmware`. We guard with ``hasattr`` so the
+        # `Inventory` (frozen, no `update_firmware`) keeps working
+        # unchanged — the convergence only fires when the inventory is
+        # the mutable wrapper.
+        if device.firmware == "(adhoc)" and hasattr(self._inventory, "update_firmware"):
+            try:
+                self._inventory.update_firmware(device_id, str(parsed))
+            except Exception:  # pragma: no cover - best-effort write seam
+                # Tier-0 must always return the parsed `Version`; the
+                # operator can re-run `report_firmware` if the overlay
+                # update failed for any reason. Logging is left to the
+                # write-seam implementation so we do not double-emit.
+                pass
+
+        return parsed
 
     # -- slice 2 ----------------------------------------------------------
 

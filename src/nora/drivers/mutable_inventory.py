@@ -122,6 +122,44 @@ class MutableInventory(_InventoryLike):
                 raise DeviceNotFoundError(device_id)
             del self._overlay[device_id]
 
+    def update_firmware(self, device_id: str, firmware: str) -> None:
+        """Update the firmware string on an overlay-registered device.
+
+        WU-1 / PR-44 follow-up: a guarded write seam that lets
+        ``Pmp450iSnmpDriver.report_firmware`` converge an ``(adhoc)``
+        placeholder to the parsed semver after the device was inserted
+        by ``register_device``. The base inventory stays immutable —
+        the YAML-loaded ``Device.firmware`` is signed at boot and is
+        authoritative; an operator must edit ``data/devices.yaml`` and
+        restart to change it.
+
+        Behaviour:
+
+        * Guarded by :attr:`_lock` (same semantics as :meth:`register` /
+          :meth:`unregister`).
+        * ``device_id`` must be in :attr:`_overlay`; otherwise
+          :class:`nora.drivers.exceptions.DeviceNotFoundError` is raised
+          verbatim — base-inventory ids are intentionally rejected so
+          the contract mirrors ``unregister``.
+        * The ``Device`` Pydantic model is ``frozen=True``; we
+          re-construct via ``model_copy(update={"firmware": firmware})``
+          so the public surface is identical.
+
+        Parameters
+        ----------
+        device_id
+            The runtime-registered device whose firmware to rebind.
+        firmware
+            The new firmware string (semver-shaped, e.g. ``"16.1.0"``).
+            Not validated here — the caller is responsible for
+            supplying a value ``OidCatalogRegistry.resolve`` accepts.
+        """
+        with self._lock:
+            current = self._overlay.get(device_id)
+            if current is None:
+                raise DeviceNotFoundError(device_id)
+            self._overlay[device_id] = current.model_copy(update={"firmware": firmware})
+
     # ------------------------------------------------------------------
     # Escape hatch — tests + cli boot path need it.
     # ------------------------------------------------------------------

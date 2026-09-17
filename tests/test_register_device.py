@@ -301,6 +301,153 @@ def test_register_device_routes_through_wrapper() -> None:
 
 
 # ---------------------------------------------------------------------------
+# WU-1 / R1 — `validate=True` populates `firmware` from parsed sysDescr.
+# ---------------------------------------------------------------------------
+
+
+def test_register_device_validate_true_populates_firmware_from_sysdescr() -> None:
+    """`validate=True` with a parseable sysDescr rebinds `firmware` to the semver.
+
+    WU-1 / PR-44 follow-up: `DeviceResolver.build` hard-codes
+    `firmware="(adhoc)"`, so downstream catalog lookups fail. The fix
+    parses the raw sysDescr body via ``_parse_sysdescr_version`` and
+    rebinds the overlay's firmware before insertion. Asserts:
+
+    * `DeviceRecord.firmware` is the parsed semver string, NOT `(adhoc)`.
+    * The `OidCatalogRegistry.resolve` for the parsed triple succeeds
+      against a stub registry (round-trip — closes the
+      ``CatalogNotFoundError`` gap from PR #44).
+    * `MutableInventory.get(device_id).firmware` matches.
+    """
+    canned = _FakeSnmpClient(
+        {
+            "1.3.6.1.2.1.1.1.0": "PMP 450i AP, 15.2.1",
+        }
+    )
+
+    wrapper = MutableInventory(base=Inventory(devices={}))
+    record = _invoke(validate=True, canned=canned, mutable_inventory=wrapper)
+
+    # Parsed semver, not the literal `(adhoc)` sentinel.
+    assert record.firmware == "15.2.1"
+    assert record.firmware != "(adhoc)"
+    assert record.validated is True
+    # The overlay carries the parsed firmware too.
+    stored = wrapper.get(record.device_id)
+    assert isinstance(stored, Device)
+    assert stored.firmware == "15.2.1"
+    # Round-trip — OidCatalogRegistry.resolve on the parsed triple
+    # succeeds against a registry that was built ONLY for "15.2.1".
+    from pathlib import Path
+
+    from nora.drivers.oid_catalog import OidCatalog, OidCatalogRegistry
+
+    catalog = OidCatalog(
+        vendor="cambium",
+        model="pmp450i",
+        firmware="15.2.1",
+        oids={"radioDownlinkRate": "1.3.6.1.4.1.161.19.3.1.4.1.36.0"},
+    )
+    registry = OidCatalogRegistry(
+        _catalogs_path=Path("."),
+        _catalogs={("cambium", "pmp450i", "15.2.1"): catalog},
+    )
+    resolved = registry.resolve(("cambium", "pmp450i", stored.firmware))
+    assert resolved.firmware == stored.firmware
+
+
+# ---------------------------------------------------------------------------
+# WU-1 / R2 — `validate=True` keeps `(adhoc)` when sysDescr is unparseable.
+# ---------------------------------------------------------------------------
+
+
+def test_register_device_validate_true_keeps_adhoc_when_sysdescr_unparseable() -> None:
+    """A sysDescr with no semver token leaves `firmware='(adhoc)'` and DOES NOT raise.
+
+    WU-1 / PR-44 follow-up: the parse-failure branch is degraded, not
+    fail-closed. The operator is unblocked — `validated=True` plus
+    `firmware='(adhoc)'` is a valid DeviceRecord; downstream catalog
+    lookups will fail until `report_firmware` converges the firmware
+    on the next Tier-0 read.
+    """
+    canned = _FakeSnmpClient(
+        {
+            "1.3.6.1.2.1.1.1.0": "canopy baseline garbage no semver here",
+        }
+    )
+
+    wrapper = MutableInventory(base=Inventory(devices={}))
+    record = _invoke(validate=True, canned=canned, mutable_inventory=wrapper)
+
+    # No exception — the helper degraded to `(adhoc)` silently.
+    assert record.firmware == "(adhoc)"
+    assert record.validated is True
+    # The overlay still holds the device.
+    assert record.device_id in wrapper.device_ids
+    stored = wrapper.get(record.device_id)
+    assert isinstance(stored, Device)
+    assert stored.firmware == "(adhoc)"
+
+
+# ---------------------------------------------------------------------------
+# WU-1 / R3 — `validate=False` keeps `(adhoc)` — no probe attempted.
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# WU-1 / TRIANGULATE — parse failure MUST emit a single WARNING via the
+# module logger (no silent swallow) and never raise.
+# ---------------------------------------------------------------------------
+
+
+def test_register_device_validate_true_logs_warning_on_parse_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Unparseable sysDescr logs a WARNING on the module logger and still returns.
+
+    The user explicitly rejected silent swallow (negative constraint).
+    The `register_device` module is `nora.drivers.snmp_pmp450i.register_device`;
+    the WARNING line MUST mention the literal host so an operator reading
+    server stderr can correlate the degraded insert to the wire probe.
+    """
+    import logging
+
+    canned = _FakeSnmpClient(
+        {
+            "1.3.6.1.2.1.1.1.0": "garbage no semver",
+        }
+    )
+
+    with caplog.at_level(logging.WARNING, logger="nora.drivers.snmp_pmp450i.register_device"):
+        record = _invoke(validate=True, canned=canned)
+
+    assert record.firmware == "(adhoc)"
+    assert record.validated is True
+    assert any(
+        "unparseable" in rec.message and rec.levelno == logging.WARNING for rec in caplog.records
+    ), f"expected WARNING with 'unparseable'; got {[r.message for r in caplog.records]}"
+    # The literal host surfaces in the WARNING so the operator can
+    # correlate the degraded insert to the wire probe.
+    assert any("192.0.2.10" in rec.message for rec in caplog.records)
+
+
+def test_register_device_validate_false_keeps_adhoc_no_probe() -> None:
+    """`validate=False` skips the sysDescr probe; `firmware` stays `(adhoc)`.
+
+    WU-1 / PR-44 follow-up: the firmware-rebind only fires on the
+    `validate=True` branch. `validate=False` leaves the helper byte-
+    identical to today (zero wire frames, `(adhoc)` sentinel).
+    """
+    canned = _FakeSnmpClient()
+
+    record = _invoke(validate=False, canned=canned)
+
+    assert canned.get_calls == []
+    assert record.firmware == "(adhoc)"
+    assert record.validated is False
+
+
+# ---------------------------------------------------------------------------
 # R-NEW-1-S2 — `tools/list` over stdio returns the `register_device` schema.
 # ---------------------------------------------------------------------------
 

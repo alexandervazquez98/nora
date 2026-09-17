@@ -36,6 +36,18 @@ def _empty_seed() -> Inventory:
     return Inventory(devices={})
 
 
+def _tmp_path_for_base() -> Path:
+    """Return a fresh `tmp_path`-like directory for the base-inventory test.
+
+    `tmp_path` is a pytest fixture; this helper lets the
+    `update_firmware_on_base_inventory_device_id_raises` test build a
+    writable YAML without leaking the fixture into a free function.
+    """
+    import tempfile
+
+    return Path(tempfile.mkdtemp(prefix="mutinv-base-"))
+
+
 def _sample_device(device_id: str = "adhoc-192-0-2-10-abcdef") -> Device:
     """A frozen `Device` shaped like a `DeviceResolver.build(...)` output."""
     return Device(
@@ -176,6 +188,79 @@ def test_get_delegates_to_base_inventory_for_yaml_loaded_entry(tmp_path: Path) -
     assert base.device_ids == ["ap-7400-01"]
     # And the wrapper surfaces the same id list.
     assert wrapper.device_ids == ["ap-7400-01"]
+
+
+# ---------------------------------------------------------------------------
+# WU-1 / R1 — `update_firmware` rebinds firmware on an overlay device.
+# ---------------------------------------------------------------------------
+
+
+def test_update_firmware_on_overlay_device_rebinds_firmware() -> None:
+    """`update_firmware(device_id, firmware)` updates the overlay entry.
+
+    WU-1 / PR-44 follow-up: a guarded write seam so `report_firmware`
+    can converge `(adhoc)` → parsed semver after the device is already
+    in the overlay. Asserts the post-condition is observable via
+    `wrapper.get(...)` and the entry remains the same identity (same
+    `device_id`).
+    """
+    from nora.drivers.mutable_inventory import MutableInventory
+
+    wrapper = MutableInventory(base=_empty_seed())
+    dev = _sample_device("ap-7400-01")
+    wrapper.register(dev)
+
+    wrapper.update_firmware("ap-7400-01", "16.1.0")
+
+    refreshed = wrapper.get("ap-7400-01")
+    assert isinstance(refreshed, Device)
+    assert refreshed.firmware == "16.1.0"
+    # The overlay identity is preserved (same device_id, same host).
+    assert refreshed.device_id == "ap-7400-01"
+    assert refreshed.host == "192.0.2.10"
+    # The other fields are unchanged.
+    assert refreshed.vendor == "cambium"
+    assert refreshed.model == "pmp450i"
+    assert refreshed.snmp_version == "v2c"
+
+
+# ---------------------------------------------------------------------------
+# WU-1 / R2 — `update_firmware` on a base-inventory device_id raises.
+# ---------------------------------------------------------------------------
+
+
+def test_update_firmware_on_base_inventory_device_id_raises() -> None:
+    """`update_firmware` on a YAML-loaded device_id raises `DeviceNotFoundError`.
+
+    WU-1 / PR-44 follow-up: the write seam is overlay-only. YAML-
+    loaded devices are immutable (the back-compat invariant; an
+    operator must edit `data/devices.yaml` and restart to mutate them).
+    """
+    from nora.drivers.mutable_inventory import MutableInventory
+
+    path = _write_inventory(
+        _tmp_path_for_base() / "devices.yaml",
+        [
+            {
+                "device_id": "ap-7400-01",
+                "vendor": "cambium",
+                "model": "pmp450i",
+                "firmware": "15.2.1",
+                "host": "192.0.2.10",
+                "snmp_version": "v2c",
+                "community": "change-me",
+            }
+        ],
+    )
+    base = Inventory.from_yaml(path)
+    wrapper = MutableInventory(base=base)
+
+    with pytest.raises(DeviceNotFoundError) as exc_info:
+        wrapper.update_firmware("ap-7400-01", "16.1.0")
+
+    assert "ap-7400-01" in str(exc_info.value)
+    # Base entry is unchanged (the wrapper never touched it).
+    assert wrapper.get("ap-7400-01").firmware == "15.2.1"
 
 
 # ---------------------------------------------------------------------------
