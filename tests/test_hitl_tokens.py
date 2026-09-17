@@ -408,24 +408,20 @@ def test_verify_uses_hmac_compare_digest_for_timing_attack_resistance() -> None:
     import ast
     from pathlib import Path
 
-    src_path = (
-        Path(__file__).resolve().parent.parent / "src" / "nora" / "hitl" / "tokens.py"
-    )
+    src_path = Path(__file__).resolve().parent.parent / "src" / "nora" / "hitl" / "tokens.py"
     tree = ast.parse(src_path.read_text())
 
     verify_fn = next(
-        node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
-        and node.name == "verify_approval_token"
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "verify_approval_token"
     )
     has_compare_digest = False
     has_equality_on_signature = False
     for sub in ast.walk(verify_fn):
         if isinstance(sub, ast.Call):
             func = sub.func
-            if (
-                isinstance(func, ast.Attribute)
-                and func.attr == "compare_digest"
-            ):
+            if isinstance(func, ast.Attribute) and func.attr == "compare_digest":
                 has_compare_digest = True
         # Catch bare `signature == <something>` comparisons inside the verifier
         if isinstance(sub, ast.Compare):

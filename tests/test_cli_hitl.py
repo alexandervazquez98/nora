@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -39,9 +38,8 @@ def test_nora_main_module_dispatches_on_argv1() -> None:
     `nora mcp` → MCP boot. `nora hitl mint ...` → mint sub-command.
     Unknown sub-command → help + exit 2.
     """
-    from pathlib import Path as _P
-
     import ast
+    from pathlib import Path as _P
 
     src = (_P(__file__).resolve().parent.parent / "src" / "nora" / "__main__.py").read_text()
     tree = ast.parse(src)
@@ -149,8 +147,8 @@ def test_nora_hitl_mint_emits_signed_token_json(
     """
     from pydantic import SecretStr
 
-    from nora.config import Settings
     from nora import __main__ as main_mod
+    from nora.config import Settings
 
     # Hermetic env: empty signing key would fail-closed; provide one.
     settings = Settings(

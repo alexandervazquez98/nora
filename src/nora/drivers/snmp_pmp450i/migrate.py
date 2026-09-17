@@ -244,11 +244,7 @@ def fetch_migrate(
     """
     # 1. HITL gate — fires FIRST. The signing key is sourced from
     # `Settings.nora_hitl_signing_key`; lazy fail-closed if empty.
-    signing_key = (
-        getattr(settings, "nora_hitl_signing_key", None)
-        if settings is not None
-        else None
-    )
+    signing_key = getattr(settings, "nora_hitl_signing_key", None) if settings is not None else None
     verify_approval_token(approval_token, signing_key=signing_key)
 
     # 2. Resolve device + catalog.

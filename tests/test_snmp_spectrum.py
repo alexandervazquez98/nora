@@ -198,9 +198,7 @@ def test_spectrum_returns_ranked_clean_frequencies(tmp_path: Path) -> None:
     driver = _build_driver(inventory=inv, registry=registry, canned=canned)
     settings = _settings_with_window(0)  # no window enforced
 
-    analysis = driver.fetch_spectrum(
-        "ap-7400-01", settings=settings, operator_confirmed=True
-    )
+    analysis = driver.fetch_spectrum("ap-7400-01", settings=settings, operator_confirmed=True)
 
     assert isinstance(analysis, SpectrumAnalysis)
     dumped = analysis.model_dump(mode="json")
@@ -312,9 +310,7 @@ def test_spectrum_inside_window_proceeds(tmp_path: Path) -> None:
         nora_maintenance_window_start_minutes_ago=10,
     )
 
-    analysis = driver.fetch_spectrum(
-        "ap-7400-01", settings=settings, operator_confirmed=True
-    )
+    analysis = driver.fetch_spectrum("ap-7400-01", settings=settings, operator_confirmed=True)
     assert isinstance(analysis, SpectrumAnalysis)
     # Wire frames landed — at minimum the three noise-floor OIDs.
     assert len(canned.get_calls) >= 3, (
@@ -386,9 +382,7 @@ def test_spectrum_falls_back_to_driver_runtime_settings(
     )
 
     # No explicit settings — the helper pulls from ``driver._runtime_settings``.
-    analysis = fetch_spectrum(
-        driver=driver, device_id="ap-7400-01", operator_confirmed=True
-    )
+    analysis = fetch_spectrum(driver=driver, device_id="ap-7400-01", operator_confirmed=True)
     assert analysis.ranked_clean_frequencies != []
 
 
