@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import ipaddress
 from datetime import timedelta
 from typing import Any
 
@@ -131,6 +132,7 @@ class V3Client:
         - `bytes` (UTF-8, e.g. OCTET STRING `sysDescr`) -> decoded + stripped `str`
         - `bytes` (non-UTF-8, e.g. MAC or raw serial)    -> `.hex()` `str` fallback
         - `datetime.timedelta` (TimeTicks `sysUpTime`)   -> `int(total_seconds())`
+        - `ipaddress.IPv4Address` / `IPv6Address`        -> `str(value)` (e.g. '192.0.2.1')
         - `str` / `int` (already-native)                 -> passthrough
         - anything else                                  -> raises `NetworkUnreachableError`
         """
@@ -141,6 +143,8 @@ class V3Client:
                 return value.hex()
         if isinstance(value, timedelta):
             return int(value.total_seconds())
+        if isinstance(value, (ipaddress.IPv4Address, ipaddress.IPv6Address)):
+            return str(value)
         if isinstance(value, (str, int)):
             return value
         raise NetworkUnreachableError(f"unexpected scalar type {type(value).__name__}")

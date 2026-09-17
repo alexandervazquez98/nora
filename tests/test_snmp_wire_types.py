@@ -16,6 +16,7 @@ exercise the client's normalization/drain code, not puresnmp itself.
 from __future__ import annotations
 
 from datetime import timedelta
+from ipaddress import IPv4Address, IPv6Address
 from typing import Any, AsyncIterator
 
 import pytest
@@ -149,6 +150,39 @@ def test_v2c_get_oid_timedelta_returns_int_seconds(
     assert isinstance(result, int)
 
 
+def test_v2c_get_oid_ipv4_address_returns_str(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """IpAddress comes back as `ipaddress.IPv4Address`; client returns `str`.
+
+    Reproduces walks over tables with `IpAddress` syntax (e.g. subscriber
+    table). Without this, downstream tools like `snmp_get_sm_table` raise
+    `NetworkUnreachableError: unexpected scalar type IPv4Address` — the
+    gap surfaced by sandbox validation against a real `snmpsim` agent.
+    """
+    _patch_pywrapper_get(monkeypatch, IPv4Address("192.0.2.10"))
+    client = V2CClient(_v2c_device())
+    result = client.get_oid("1.3.6.1.2.1.4.1.0")
+    assert result == "192.0.2.10"
+    assert isinstance(result, str)
+
+
+def test_v2c_get_oid_ipv6_address_returns_str(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Defensive coverage for IPv6 — same normalization path as IPv4.
+
+    No `IpAddress` SNMP syntax emits IPv6 today (the SMI `IpAddress` is
+    IPv4-only), but future MIBs may surface IPv6 scalars through the
+    same `_normalize_scalar` helper.
+    """
+    _patch_pywrapper_get(monkeypatch, IPv6Address("2001:db8::1"))
+    client = V2CClient(_v2c_device())
+    result = client.get_oid("1.3.6.1.2.1.55.1.1.1.0")
+    assert result == "2001:db8::1"
+    assert isinstance(result, str)
+
+
 def test_v2c_get_oid_int_passthrough(monkeypatch: pytest.MonkeyPatch) -> None:
     """int values pass through unchanged (regression guard)."""
     _patch_pywrapper_get(monkeypatch, 54000000)
@@ -228,6 +262,30 @@ def test_v2c_walk_normalizes_bytes_values(
     ]
 
 
+def test_v2c_walk_normalizes_ipv4_address_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """walk values that come back as IPv4Address are stringified.
+
+    Sandbox validation found this missing — table walks over
+    `snmp_get_sm_table` returned `IPv4Address` instances and tripped
+    the unknown-type path.
+    """
+    _patch_pywrapper_walk(
+        monkeypatch,
+        [
+            ("1.3.6.1.4.1.161.19.3.1.7.1.1", IPv4Address("10.100.0.1")),
+            ("1.3.6.1.4.1.161.19.3.1.7.1.2", IPv4Address("10.100.0.2")),
+        ],
+    )
+    client = V2CClient(_v2c_device())
+    result = client.walk("1.3.6.1.4.1.161.19.3.1.7")
+    assert result == [
+        ("1.3.6.1.4.1.161.19.3.1.7.1.1", "10.100.0.1"),
+        ("1.3.6.1.4.1.161.19.3.1.7.1.2", "10.100.0.2"),
+    ]
+
+
 # ===========================================================================
 # V3Client — mirror of V2C wire-type tests
 # ===========================================================================
@@ -255,6 +313,22 @@ def test_v3_get_oid_timedelta_returns_int_seconds(
     _patch_pywrapper_get(monkeypatch, timedelta(seconds=93784))
     client = V3Client(_v3_device())
     assert client.get_oid("1.3.6.1.2.1.1.3.0") == 93784
+
+
+def test_v3_get_oid_ipv4_address_returns_str(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_pywrapper_get(monkeypatch, IPv4Address("192.0.2.10"))
+    client = V3Client(_v3_device())
+    assert client.get_oid("1.3.6.1.2.1.4.1.0") == "192.0.2.10"
+
+
+def test_v3_get_oid_ipv6_address_returns_str(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_pywrapper_get(monkeypatch, IPv6Address("2001:db8::1"))
+    client = V3Client(_v3_device())
+    assert client.get_oid("1.3.6.1.2.1.55.1.1.1.0") == "2001:db8::1"
 
 
 def test_v3_get_oid_int_passthrough(
@@ -317,3 +391,17 @@ def test_v3_walk_normalizes_timedelta_values(
     client = V3Client(_v3_device())
     result = client.walk("1.3.6.1.2.1.1.3")
     assert result == [("1.3.6.1.2.1.1.3.0", 12345)]
+
+
+def test_v3_walk_normalizes_ipv4_address_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_pywrapper_walk(
+        monkeypatch,
+        [
+            ("1.3.6.1.4.1.161.19.3.1.7.1.1", IPv4Address("10.100.0.1")),
+        ],
+    )
+    client = V3Client(_v3_device())
+    result = client.walk("1.3.6.1.4.1.161.19.3.1.7")
+    assert result == [("1.3.6.1.4.1.161.19.3.1.7.1.1", "10.100.0.1")]
