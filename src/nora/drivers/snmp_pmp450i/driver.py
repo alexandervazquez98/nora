@@ -31,7 +31,8 @@ from nora.drivers.exceptions import (
     NetworkUnreachableError,
     SnmpTimeoutError,
 )
-from nora.drivers.inventory import Device, Inventory
+from nora.drivers.inventory import Device
+from nora.drivers.mutable_inventory import _InventoryLike
 from nora.drivers.oid_catalog import REQUIRED_OIDS, OidCatalog, OidCatalogRegistry
 from nora.drivers.snmp_pmp450i.client import SnmpClient
 from nora.drivers.snmp_pmp450i.report import RadioMetricsReport
@@ -77,13 +78,47 @@ class Pmp450iDriver:
     def __init__(
         self,
         *,
-        inventory: Inventory,
+        inventory: _InventoryLike,
         catalog_registry: OidCatalogRegistry,
         client_factory: Callable[[Device], SnmpClient] = default_client_factory,
     ) -> None:
+        # `_InventoryLike` is the seam (issue #42 / Task 3): both the
+        # frozen `Inventory` (back-compat for the 8 read sites) AND
+        # `MutableInventory` (Task 3's runtime-mutable seam for
+        # `register_device`) satisfy the Protocol. The eight
+        # `self._inventory.get(...)` call sites route through whichever
+        # facade the boot sequence wired in; for production it is
+        # `MutableInventory(base=Inventory.from_yaml(...))`.
         self._inventory = inventory
         self._catalog_registry = catalog_registry
         self._client_factory = client_factory
+
+    # ------------------------------------------------------------------
+    # Runtime mutation — `register_device` MCP tool seam (issue #42).
+    # ------------------------------------------------------------------
+
+    def register(self, device: Device) -> None:
+        """Insert ``device`` into the runtime inventory.
+
+        Issue #42 / change `2026-09-15-register-device-mcp`: the
+        `register_device` MCP tool needs a single facade to mutate the
+        inventory. The driver exposes ``register(device)`` here so the
+        tool body in ``server.py`` calls ``driver.register(...)``
+        without reaching into the private ``_inventory`` attribute.
+
+        On a frozen `Inventory` (back-compat path) the call raises
+        `AttributeError` because ``Inventory`` is Pydantic-frozen —
+        ``cli.main()`` always wires a `MutableInventory` in production
+        so this surface is the boot contract.
+        """
+        self._inventory.register(device)  # type: ignore[attr-defined]
+
+    def unregister(self, device_id: str) -> None:
+        """Remove ``device_id`` from the runtime inventory.
+
+        Counterpart to :meth:`register` — same wiring story.
+        """
+        self._inventory.unregister(device_id)  # type: ignore[attr-defined]
 
     def fetch_radio_metrics(self, device_id: str) -> RadioMetricsReport:
         """Fetch + fold a typed `RadioMetricsReport` for `device_id`.
@@ -220,6 +255,14 @@ class Pmp450iSnmpDriver(Pmp450iDriver):
            the same call frame).
         2. Open a client and GET ``sysDescr`` (``1.3.6.1.2.1.1.1.0``).
         3. Parse the first semver-shaped token into ``Version``.
+        4. WU-1 / PR-44 follow-up — when the inventory is a
+           :class:`MutableInventory` AND the resolved device's firmware
+           is still the ``(adhoc)`` sentinel, converge the overlay
+           entry to the parsed semver via
+           :meth:`MutableInventory.update_firmware`. Tier-0 read-side
+           callers MUST always succeed; the convergence attempt is
+           best-effort and any exception is swallowed (the call still
+           returns the typed ``Version``).
 
         Wire failures keep the existing typed-error mapping from
         ``_call_async`` (``SnmpTimeoutError`` / ``NetworkUnreachableError``).
@@ -233,7 +276,27 @@ class Pmp450iSnmpDriver(Pmp450iDriver):
                 client.close()
             except Exception:  # pragma: no cover - close is best-effort
                 pass
-        return _parse_sysdescr_version(str(raw_value))
+        parsed = _parse_sysdescr_version(str(raw_value))
+
+        # WU-1 / PR-44 follow-up — converge `(adhoc)` → parsed semver
+        # so subsequent `OidCatalogRegistry.resolve(...)` lookups
+        # succeed against the converged triple. Best-effort: a failed
+        # write seam MUST NOT break the read-side return value of
+        # `report_firmware`. We guard with ``hasattr`` so the
+        # `Inventory` (frozen, no `update_firmware`) keeps working
+        # unchanged — the convergence only fires when the inventory is
+        # the mutable wrapper.
+        if device.firmware == "(adhoc)" and hasattr(self._inventory, "update_firmware"):
+            try:
+                self._inventory.update_firmware(device_id, str(parsed))
+            except Exception:  # pragma: no cover - best-effort write seam
+                # Tier-0 must always return the parsed `Version`; the
+                # operator can re-run `report_firmware` if the overlay
+                # update failed for any reason. Logging is left to the
+                # write-seam implementation so we do not double-emit.
+                pass
+
+        return parsed
 
     # -- slice 2 ----------------------------------------------------------
 
@@ -314,23 +377,32 @@ class Pmp450iSnmpDriver(Pmp450iDriver):
         device_id: str,
         *,
         settings: Any = None,
+        operator_confirmed: bool = False,
     ) -> Any:
         """Return a typed ``SpectrumAnalysis`` for ``device_id``.
 
         Slice 4 implementation: delegates to ``spectrum.fetch_spectrum``
-        which checks ``Settings.nora_maintenance_window_*`` BEFORE
-        emitting any wire frame, resolves the catalog, opens a
+        which checks the Tier-1 operator-clearance gate FIRST, then
+        the maintenance-window check, resolves the catalog, opens a
         client, walks the three noise-floor OIDs, and folds the
-        response into a typed Pydantic model. Calls outside the
-        configured window raise :class:`MaintenanceWindowViolation`.
+        response into a typed Pydantic model.
 
         Per `pmp450i-radio-tools/spec.md` sub-cluster 3 requirement
         "snmp_run_spectrum_analysis — Ranked Clean Frequencies +
-        Maintenance Window".
+        Maintenance Window" and the issue #43 ADDED requirement
+        "Tier-1 Operator Clearance Gate" — ``operator_confirmed``
+        defaults to ``False`` (fail-closed). Tier-1 tools may be
+        actively disruptive, so the server-side gate enforces
+        explicit operator clearance before any wire frame.
         """
         from nora.drivers.snmp_pmp450i.spectrum import fetch_spectrum
 
-        return fetch_spectrum(driver=self, device_id=device_id, settings=settings)
+        return fetch_spectrum(
+            driver=self,
+            device_id=device_id,
+            settings=settings,
+            operator_confirmed=operator_confirmed,
+        )
 
     def fetch_migrate(
         self,

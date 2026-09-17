@@ -25,6 +25,13 @@ sub-cluster 3:
 4. On successful reachability check within the timeout the tool
    cancels the watchdog and emits the intervention record with
    ``rolled_back: false``.
+5. WU-3 (PR #44 follow-ups): when the SNMP client lacks
+   ``apply_oid`` — e.g. the production ``V2CClient`` whose
+   read-only ``SnmpClient`` Protocol is deliberate — the tool
+   short-circuits before any wire frame and returns a typed
+   dry-run result (``dry_run=True, would_set=[...]``) so operators
+   see what WOULD have happened, instead of raising
+   ``AttributeError``. Write mutations stay out of scope.
 
 The helper also writes one intervention record per completion
 (success OR rollback) through
@@ -92,6 +99,19 @@ class MigrationResult(BaseModel):
     * ``active_degraded_migrated`` — count of ACTIVE_DEGRADED migrations.
     * ``target_frequency_mhz`` — the requested carrier frequency.
     * ``device_id`` — the inventory device the migration ran against.
+    * ``dry_run`` — ``True`` when the tool did NOT perform any write
+      SET frame. Defaults to ``False`` (real migration).
+    * ``would_set`` — the SET pairs ``(oid, value)`` the tool WOULD
+      have emitted in dry-run mode. Empty on real migrations. The
+      value type is ``str | int | float``; carrier-frequency SETs
+      carry a ``float`` MHz value.
+
+    The ``dry_run`` / ``would_set`` contract seam (WU-3, PR #44
+    follow-ups): when the SNMP client lacks ``apply_oid`` — e.g. the
+    production ``V2CClient`` whose read-only ``SnmpClient`` Protocol
+    is deliberate — the tool short-circuits before any wire frame
+    and returns this typed dry-run result so operators see what
+    WOULD have happened, instead of raising ``AttributeError``.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -103,6 +123,8 @@ class MigrationResult(BaseModel):
     active_degraded_migrated: int = 0
     target_frequency_mhz: float
     device_id: str
+    dry_run: bool = False
+    would_set: list[tuple[str, str | int | float]] = []
 
 
 # ---------------------------------------------------------------------------
@@ -227,7 +249,8 @@ def fetch_migrate(
             invalid tokens BEFORE any wire frame.
         target_frequency_mhz: Requested carrier frequency in MHz.
         settings: Optional :class:`Settings` instance (carries
-            ``nora_hitl_rollback_timeout_seconds``).
+            ``nora_hitl_rollback_timeout_seconds`` and
+            ``nora_hitl_signing_key``).
 
     Returns:
         A dict matching the :class:`MigrationResult` schema. On
@@ -241,8 +264,10 @@ def fetch_migrate(
         CatalogNotFoundError: no catalog for the device's
             ``(vendor, model, firmware)`` triple.
     """
-    # 1. HITL gate — fires FIRST.
-    verify_approval_token(approval_token)
+    # 1. HITL gate — fires FIRST. The signing key is sourced from
+    # `Settings.nora_hitl_signing_key`; lazy fail-closed if empty.
+    signing_key = getattr(settings, "nora_hitl_signing_key", None) if settings is not None else None
+    verify_approval_token(approval_token, signing_key=signing_key)
 
     # 2. Resolve device + catalog.
     device = driver._inventory.get(device_id)  # noqa: SLF001 — internal API
@@ -306,54 +331,92 @@ def fetch_migrate(
             )
             active_count += 1
 
-        # 9. AP carrier change LAST.
-        client.apply_oid(migration_oids["migrateCarrierFrequency"], target_frequency_mhz)
+        # 9. AP carrier change — gated on client having apply_oid
+        # (dry-run fallback otherwise). See WU-3 in
+        # odd/tasks/pr44-followups.md. The production ``V2CClient``
+        # read-only ``SnmpClient`` Protocol contract is deliberate;
+        # write mutations stay out of scope, so when the client lacks
+        # ``apply_oid`` we short-circuit and return a typed dry-run
+        # result carrying the would-be SET pair.
+        if hasattr(client, "apply_oid"):
+            # 9a. Real-SET path: emit the AP carrier-change SET.
+            client.apply_oid(migration_oids["migrateCarrierFrequency"], target_frequency_mhz)
 
-        # 10. Arm the rollback watchdog.
-        rollback_state: dict[str, Any] = {"rolled_back": False, "reason": None}
-        rollback_signal: dict[str, bool] = {"fired": False}
+            # 10. Arm the rollback watchdog.
+            rollback_state: dict[str, Any] = {"rolled_back": False, "reason": None}
+            rollback_signal: dict[str, bool] = {"fired": False}
 
-        def _on_loss_of_management() -> None:
-            rollback_state["rolled_back"] = True
-            rollback_state["reason"] = "loss_of_management"
-            # Revert the SET frame to the prior carrier.
-            try:
-                revert_client = driver._client_factory(device)
+            def _on_loss_of_management() -> None:
+                rollback_state["rolled_back"] = True
+                rollback_state["reason"] = "loss_of_management"
+                # Revert the SET frame to the prior carrier.
                 try:
-                    revert_client.apply_oid(
-                        migration_oids["migratePriorCarrierFrequency"],
-                        prior_carrier,
-                    )
-                finally:
+                    revert_client = driver._client_factory(device)
                     try:
-                        revert_client.close()
-                    except Exception:  # pragma: no cover
-                        pass
-            except Exception:
-                logger.exception("migrate: rollback SET failed for device=%s", device_id)
-            rollback_signal["fired"] = True
+                        revert_client.apply_oid(
+                            migration_oids["migratePriorCarrierFrequency"],
+                            prior_carrier,
+                        )
+                    finally:
+                        try:
+                            revert_client.close()
+                        except Exception:  # pragma: no cover
+                            pass
+                except Exception:
+                    logger.exception("migrate: rollback SET failed for device=%s", device_id)
+                rollback_signal["fired"] = True
 
-        timer = _start_rollback_watchdog(
-            timeout_seconds=rollback_timeout_seconds,
-            on_loss_of_management=_on_loss_of_management,
+            timer = _start_rollback_watchdog(
+                timeout_seconds=rollback_timeout_seconds,
+                on_loss_of_management=_on_loss_of_management,
+            )
+
+            # 11. Poll management reachability.
+            management_reachable = _wait_for_management_reachability(
+                driver=driver,
+                device=device,
+                catalog=catalog,
+                rollback_timeout_seconds=rollback_timeout_seconds,
+                rollback_signal=rollback_signal,
+            )
+
+            # 12. Cancel the watchdog.
+            _cancel_rollback_watchdog(timer)
+
+            rolled_back = rollback_state["rolled_back"] or not management_reachable
+            reason = rollback_state["reason"] if rolled_back else None
+            dry_run = False
+            would_set: list[tuple[str, str | int | float]] = []
+        else:
+            # 9b. Dry-run fallback (WU-3): the production ``V2CClient``
+            # Protocol contract is read-only. The tool returns a typed
+            # dry-run result carrying the would-be SET pair so operators
+            # see what WOULD have happened, instead of crashing with
+            # ``AttributeError``. No SET frames were emitted; no
+            # rollback window is needed; no reachability of a fresh
+            # carrier to check.
+            would_set = [(migration_oids["migrateCarrierFrequency"], target_frequency_mhz)]
+            logger.info(
+                "migrate: client lacks apply_oid; emulating SET %s=%s on device=%s",
+                migration_oids["migrateCarrierFrequency"],
+                target_frequency_mhz,
+                device_id,
+            )
+            rolled_back = False
+            reason = None
+            dry_run = True
+
+        # 13. Emit exactly one ``save_intervention_record`` per completion.
+        # On the dry-run path the status is ``"DRY_RUN"`` and the
+        # ``record_name`` carries a ``[DRY-RUN]`` prefix so the audit
+        # trail is unambiguous.
+        record_status = "DRY_RUN" if dry_run else ("ABORTED" if rolled_back else "COMPLETED")
+        record_name_prefix = "[DRY-RUN] " if dry_run else ""
+        findings_and_dictamen = (
+            f"dry_run={dry_run}; would_set={would_set!r}; no SET frames emitted"
+            if dry_run
+            else f"rolled_back={rolled_back}; reason={reason or 'n/a'}"
         )
-
-        # 11. Poll management reachability.
-        management_reachable = _wait_for_management_reachability(
-            driver=driver,
-            device=device,
-            catalog=catalog,
-            rollback_timeout_seconds=rollback_timeout_seconds,
-            rollback_signal=rollback_signal,
-        )
-
-        # 12. Cancel the watchdog + emit the intervention record.
-        _cancel_rollback_watchdog(timer)
-
-        rolled_back = rollback_state["rolled_back"] or not management_reachable
-        reason = rollback_state["reason"] if rolled_back else None
-
-        # Emit exactly one ``save_intervention_record`` per completion.
         try:
             if settings is None:
                 raise RuntimeError("migrate.fetch_migrate requires an explicit Settings instance")
@@ -366,12 +429,13 @@ def fetch_migrate(
                     "ticket_number": "MIGRATE-7400",
                     "target_ip": str(getattr(device, "host", device_id)),
                     "stage": "POST_MIGRATION",
-                    "record_name": (f"RF migration of {device_id} to {target_frequency_mhz} MHz"),
-                    "status": "ABORTED" if rolled_back else "COMPLETED",
-                    "agent_name": "nora-mcp",
-                    "findings_and_dictamen": (
-                        f"rolled_back={rolled_back}; reason={reason or 'n/a'}"
+                    "record_name": (
+                        f"{record_name_prefix}RF migration of {device_id} "
+                        f"to {target_frequency_mhz} MHz"
                     ),
+                    "status": record_status,
+                    "agent_name": "nora-mcp",
+                    "findings_and_dictamen": findings_and_dictamen,
                     "created_at": _utc_now_iso(),
                     "network_equipment": {
                         "target_ip": str(getattr(device, "host", device_id)),
@@ -379,6 +443,8 @@ def fetch_migrate(
                     },
                     "rolled_back": rolled_back,
                     "reason": reason,
+                    "dry_run": dry_run,
+                    "would_set": [list(item) for item in would_set],
                 },
             )
         except Exception:  # pragma: no cover - writer has its own status codes
@@ -392,6 +458,8 @@ def fetch_migrate(
             active_degraded_migrated=active_count,
             target_frequency_mhz=target_frequency_mhz,
             device_id=str(getattr(device, "host", device_id)),
+            dry_run=dry_run,
+            would_set=would_set,
         ).model_dump(mode="json")
     finally:
         try:

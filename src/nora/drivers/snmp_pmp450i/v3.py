@@ -35,7 +35,14 @@ _DEFAULT_USER: str = "nora"
 
 
 class V3Client:
-    """SNMPv3 client (auth + priv) wrapping `puresnmp.PyWrapper`."""
+    """SNMPv3 client (auth + priv) wrapping `puresnmp.PyWrapper`.
+
+    The ``timeout`` (seconds) and ``retries`` keyword arguments
+    propagate to the underlying ``puresnmp.Client`` via its
+    documented ``configure(**kwargs)`` method, so they apply to
+    every wire-level UDP send. Without this call, the client would
+    silently use puresnmp's defaults (``timeout=6``, ``retries=10``).
+    """
 
     def __init__(
         self,
@@ -61,12 +68,22 @@ class V3Client:
         auth = _Auth(auth_value.encode("utf-8"), auth_protocol.lower())
         priv = _Priv(priv_value.encode("utf-8"), priv_protocol.lower())
 
+        # `puresnmp.Client` takes positional args; `timeout`/`retries`
+        # are NOT constructor kwargs (verified against puresnmp's API),
+        # so we apply them via the documented `configure()` method
+        # immediately after construction. `PyWrapper` exposes the raw
+        # client as `.client`; `configure(**kwargs)` permanently
+        # replaces the underlying `ClientConfig`.
         self._client: Any = PyWrapper(
             _RawClient(
                 device.host,
                 V3(user, auth, priv),
                 device.port,
             )
+        )
+        self._client.client.configure(
+            timeout=self._timeout,
+            retries=self._retries,
         )
 
     # ------------------------------------------------------------------

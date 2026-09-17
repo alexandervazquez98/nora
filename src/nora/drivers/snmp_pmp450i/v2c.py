@@ -27,7 +27,14 @@ from .client import SnmpClient
 
 
 class V2CClient:
-    """SNMPv2c client wrapping `puresnmp.PyWrapper` (synchronous facade)."""
+    """SNMPv2c client wrapping `puresnmp.PyWrapper` (synchronous facade).
+
+    The ``timeout`` (seconds) and ``retries`` keyword arguments
+    propagate to the underlying ``puresnmp.Client`` via its
+    documented ``configure(**kwargs)`` method, so they apply to
+    every wire-level UDP send. Without this call, the client would
+    silently use puresnmp's defaults (``timeout=6``, ``retries=10``).
+    """
 
     def __init__(
         self,
@@ -44,14 +51,22 @@ class V2CClient:
         self._timeout = timeout
         self._retries = retries
         community_value = device.community.get_secret_value()
-        # `puresnmp.Client` takes positional args; `timeout` is honoured
-        # by the underlying asyncio.wait_for in `_call_async`.
+        # `puresnmp.Client` takes positional args; `timeout`/`retries`
+        # are NOT constructor kwargs (verified against puresnmp's API),
+        # so we apply them via the documented `configure()` method
+        # immediately after construction. `PyWrapper` exposes the raw
+        # client as `.client`; `configure(**kwargs)` permanently
+        # replaces the underlying `ClientConfig`.
         self._client: Any = PyWrapper(
             _RawClient(
                 device.host,
                 V2C(community_value),
                 device.port,
             )
+        )
+        self._client.client.configure(
+            timeout=self._timeout,
+            retries=self._retries,
         )
 
     # ------------------------------------------------------------------

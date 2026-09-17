@@ -112,28 +112,41 @@ Each tool invocation MUST emit one structured log line on stderr with tool name,
 
 ### Requirement: R-NEW-1 — Four `@mcp.tool` Registrations
 
-The server SHALL register exactly eleven `@mcp.tool`-decorated functions on the global `mcp = FastMCP("nora")`: one driver + three intervention memory + `save_intervention_record` + six radio-link tools (`snmp_get_ap_summary`, `snmp_get_frame_utilization`, `snmp_get_sm_table`, `snmp_get_sm_detailed_diagnostics`, `snmp_run_spectrum_analysis`, `snmp_migrate_radio_frequency`). All eleven names SHALL be re-exported in `__all__`. (Previously: exactly five registrations.)
+The server SHALL register exactly twelve `@mcp.tool`-decorated functions on the global `mcp = FastMCP("nora")`: one driver + three intervention memory + `save_intervention_record` + six radio-link tools (`snmp_get_ap_summary`, `snmp_get_frame_utilization`, `snmp_get_sm_table`, `snmp_get_sm_detailed_diagnostics`, `snmp_run_spectrum_analysis`, `snmp_migrate_radio_frequency`) + `register_device(host: str, community: str, validate: bool = True) -> DeviceRecord`. All twelve names SHALL be re-exported in `__all__`. (Previously: exactly eleven registrations.)
 
-#### Scenario: server module exports the eleven tool names
+#### Scenario: server module exports the twelve tool names
 
-- GIVEN `src/nora/server.py` imports the driver + three intervention callables + the writer + six radio-link callables
-- WHEN the eleven names are imported from `nora.server`
-- THEN the imports succeed AND all eleven names appear in `nora.server.__all__`
+- GIVEN `src/nora/server.py` imports the driver + three intervention callables + the writer + six radio-link callables + the `register_device` wrapper
+- WHEN the twelve names are imported from `nora.server`
+- THEN the imports succeed AND all twelve names appear in `nora.server.__all__`
 
-#### Scenario: `tools/list` over stdio returns eleven tools in the registered order
+#### Scenario: `tools/list` over stdio returns twelve tools in the registered order
 
 - GIVEN the server booted via `mcp.run()` over stdio
 - WHEN a client calls `tools/list`
-- THEN the response contains the eleven tool names AND their `inputSchema` matches each registered signature
+- THEN the response contains the twelve tool names AND their `inputSchema` matches each registered signature AND `register_device`'s schema declares `host: str`, `community: str`, `validate: bool` (default `true`)
+
 ### Requirement: R-NEW-2 — Sanitizer Bound at Tool Boundary
 
-Every free-text field in the eleven tool responses SHALL pass through `Sanitizer.sanitize(...)` before serialisation. Structured top-level fields SHALL bypass. (Previously: four tools; now eleven.)
+Every free-text field in the twelve tool responses SHALL pass through `Sanitizer.sanitize(...)` before serialisation. Structured top-level fields SHALL bypass. The `register_device` payload's `community` field SHALL be masked at the Pydantic boundary via `SecretStr` (rendered as `"**********"` in `model_dump(mode="json")`). (Previously: eleven tools; now twelve.)
 
 #### Scenario: free-text fields in the radio-link tools are sanitized
 
 - GIVEN a tool response whose free-text field contains the literal `192.0.2.10`
 - WHEN the response is serialised
 - THEN the literal is replaced by a synthetic alias AND typed scalars (`carrier_frequency_mhz`, `result["rolled_back"]`) are byte-identical
+
+#### Scenario: free-text fields in `register_device` error messages are sanitized
+
+- GIVEN a `DeviceUnreachable` error whose message contains the literal `192.0.2.10`
+- WHEN the tool serialises the response
+- THEN the literal is replaced by a synthetic alias AND typed `DeviceRecord` fields (`device_id`, `host`) are byte-identical
+
+#### Scenario: credential masking on `register_device` success payload
+
+- GIVEN a successful `register_device("192.0.2.10", "MEXI2-BB-RW")` call
+- WHEN `device.model_dump(mode="json")` runs
+- THEN the `community` field renders as `"**********"` AND the literal `MEXI2-BB-RW` does NOT appear
 
 ### Requirement: R-NEW-3 — Hard Read-Only Contract (AST Guard)
 
@@ -237,9 +250,9 @@ The `instructions` string SHALL advertise that `snmp_migrate_radio_frequency` re
 - THEN it mentions `snmp_migrate_radio_frequency` AND names the `AutonomousMutationRejected` contract
 
 
-### Requirement: R-NEW-6 — Tool-Registration Guard (Uncatalogued Tools Rejected)
+### Requirement: R-NEW-6 — Tool-Registration Guard (Catalog Re-Signed)
 
-`src/nora/cli.py` SHALL run a registration guard that walks every function registered against the global `mcp` instance. The guard MUST raise a typed `UncataloguedToolError` if the tool name is absent from `OidCatalogRegistry.REQUIRED_OIDS` for every catalogued `(vendor, model, firmware)` triple. The guard runs ONCE at boot; the rejection MUST abort before `mcp.run(show_banner=False)`. (Issue #24 — ADR #17 Test 10 hardening; the proposal deliberately hardens the original "no se ofrece al LLM" wording into fail-fast registration-time rejection.)
+`src/nora/cli.py` SHALL run a registration guard that walks every function registered against the global `mcp` instance. The guard MUST raise a typed `UncataloguedToolError` if the tool name is absent from `OidCatalogRegistry.REQUIRED_OIDS` for every catalogued `(vendor, model, firmware)` triple. The guard runs ONCE at boot; the rejection MUST abort before `mcp.run(show_banner=False)`. After the PMP 450i catalog re-sign, every re-signed baseline (`15.2.1`, `15.3.0`, `25.1.0`) carries `"register_device": ["sysDescr"]` in its `tools` envelope AND `sysDescr: "1.3.6.1.2.1.1.1.0"` in its `oids` map; each `hmac_sha256` SHALL pass `OidCatalogRegistry.verify_all`. The `_ALLOWED_UNCATALOGUED_TOOLS` allow-list at `src/nora/server.py:626` SHALL no longer contain `snmp_get_pmp450i_radio_metrics` (its envelope is added to all three baselines by the same re-sign); the remaining four entries are unchanged. (Previously: `register_device` uncatalogued; `snmp_get_pmp450i_radio_metrics` was a fifth allow-list entry.)
 
 #### Scenario: an uncatalogued `@mcp.tool` is rejected at boot
 
@@ -247,12 +260,29 @@ The `instructions` string SHALL advertise that `snmp_migrate_radio_frequency` re
 - WHEN `cli.main()` runs the registration guard
 - THEN `UncataloguedToolError` is raised naming `(tool_name, reason="no OID catalog entry")` AND `mcp.run()` is never invoked
 
-#### Scenario: every catalogued tool passes the guard
+#### Scenario: every re-signed PMP 450i baseline HMAC verifies
 
-- GIVEN the eleven tool names are all present in the catalog envelope's `"tools"` map
-- WHEN the registration guard runs
-- THEN it returns success AND `mcp.run(show_banner=False)` proceeds
+- GIVEN the three catalog files at `data/oid-catalogs/cambium/pmp450i/{15.2.1,15.3.0,25.1.0}.json` after `scripts/sign_catalog.py` re-sign (parametrized across the three versions)
+- WHEN `OidCatalogRegistry.verify_all()` runs at boot
+- THEN all three HMACs verify AND no `CatalogSignatureError` is raised AND `mcp.run(show_banner=False)` proceeds
 
+#### Scenario: every re-signed baseline's tools envelope includes register_device and sysDescr OID
+
+- GIVEN the three re-signed catalog files (parametrized across the three versions)
+- WHEN `OidCatalogRegistry` loads `(cambium, pmp450i, <version>)`
+- THEN the `tools` map contains `"register_device": ["sysDescr"]` AND the `oids` map contains `"sysDescr": "1.3.6.1.2.1.1.1.0"`
+
+#### Scenario: `register_device` passes the registration guard via its catalog envelope
+
+- GIVEN `register_device` is `@mcp.tool`-decorated AND present in all three re-signed catalogs
+- WHEN `cli.main()` runs the registration guard
+- THEN `register_device` is accepted without an allow-list entry AND `mcp.run(show_banner=False)` proceeds
+
+#### Scenario: `snmp_get_pmp450i_radio_metrics` no longer requires the allow-list
+
+- GIVEN the three re-signed catalogs now carry `snmp_get_pmp450i_radio_metrics` in the `tools` envelope
+- WHEN `_ALLOWED_UNCATALOGUED_TOOLS` is inspected at `src/nora/server.py:626`
+- THEN `"snmp_get_pmp450i_radio_metrics"` is NOT in the frozenset AND the four remaining entries are unchanged
 ### Requirement: Systemd Loads Transport Env File
 
 `scripts/install.sh` SHALL write `/etc/nora/nora-mcp.env` at mode `0640` owned by `nora:nora`, populated from `.env.mcp.example` with default `NORA_MCP_TRANSPORT=stdio`. `scripts/nora-mcp.service` SHALL contain a second `EnvironmentFile=/etc/nora/nora-mcp.env` directive alongside the existing `EnvironmentFile=/etc/nora/nora.env` at line 26. Env-only changes SHALL take effect on the next `systemctl restart nora-mcp` without `daemon-reload`; unit-file changes SHALL require `daemon-reload`.
@@ -268,6 +298,119 @@ The `instructions` string SHALL advertise that `snmp_migrate_radio_frequency` re
 - GIVEN the `nora-mcp.service` unit is active
 - WHEN an operator edits `/etc/nora/nora-mcp.env` to `NORA_MCP_TRANSPORT=http` AND runs `sudo systemctl restart nora-mcp`
 - THEN the new transport is applied AND `daemon-reload` was NOT required for the env-only change
+### Requirement: R-NEW-7 — `nora hitl mint` Sub-Command
+
+`src/nora/__main__.py` SHALL dispatch on `argv[1]`: `mcp` → existing
+`cli.main()` boot; `hitl` → new
+`nora hitl mint --operator-id <id> --ttl-seconds <n>` CLI handler that
+emits a signed `HitlApprovalToken` JSON payload on stdout. Unknown
+sub-commands print help to stderr AND exit non-zero. `nora hitl mint`
+exits non-zero on missing/invalid arguments (`--operator-id` required,
+`--ttl-seconds` optional, default
+`Settings.nora_hitl_token_ttl_seconds`).
+
+#### Scenario: `nora` with no args still boots MCP (back-compat pinned)
+
+- GIVEN the operator runs `nora` (or `python -m nora`) without a
+  sub-command
+- WHEN the process starts
+- THEN `mcp.run(show_banner=False)` is invoked AND the twelve-tool
+  surface is reachable via JSON-RPC (deprecation-alias tests
+  `test_main_alias.py` and `test_integration_boot.py:323` stay green)
+
+#### Scenario: `nora hitl mint` emits a signed token
+
+- GIVEN `Settings.nora_hitl_signing_key` is a non-empty `SecretStr` AND
+  `Settings.nora_tool_specs_dir` is configured AND the operator runs
+  `nora hitl mint --operator-id alice --ttl-seconds 900`
+- WHEN the sub-command handler runs
+- THEN stdout carries one JSON line containing `operator_id`,
+  `issued_at`, `expires_at`, `token`, AND `signature` (non-empty)
+  AND exit code is `0`
+
+#### Scenario: `nora hitl mint` rejects invalid args
+
+- GIVEN the operator runs `nora hitl mint` without `--operator-id`
+- WHEN the sub-command handler runs
+- THEN exit code is non-zero AND stderr names the missing argument
+  AND no token is emitted
+
+#### Scenario: `nora` with unknown sub-command exits non-zero with help
+
+- GIVEN the operator runs `nora bogus`
+- WHEN the dispatcher parses argv
+- THEN exit code is non-zero AND stderr lists the valid sub-commands
+  AND `mcp.run()` is never invoked
+
+### Requirement: R-NEW-8 — Spectrum Tool Wire Shape Gains `operator_confirmed`
+
+The `snmp_run_spectrum_analysis` `@mcp.tool` registration SHALL
+declare `operator_confirmed: bool = False` in its FastMCP wire
+schema. The runtime gate (raise `Tier1ClearanceRequired` on False) is
+owned by `pmp450i-radio-tools`; this capability owns only the wire-
+shape contract.
+
+#### Scenario: tools/list declares operator_confirmed
+
+- GIVEN the server booted via `mcp.run()` over stdio
+- WHEN a client calls `tools/list` and inspects the
+  `snmp_run_spectrum_analysis` entry
+- THEN `inputSchema.properties.operator_confirmed.type == "boolean"`
+  AND the default is `false`
+
+### Requirement: R-NEW-9 — Boot Wires Multi-Dir Prompt Registry
+
+`cli.main()` SHALL call `PromptRegistry.from_settings(settings)` after
+`Settings()` is loaded AND before `mcp.run(show_banner=False)`. The
+`from_settings` implementation reads `Settings.nora_tool_specs_dir`
+and scans both `src/nora/prompts/` and `docs/tool_specs/`. Boot SHALL
+NOT abort solely because the tool-spec dir is absent (see
+`prompt-registry` R8).
+
+#### Scenario: cli.main wires PromptRegistry.from_settings
+
+- GIVEN `cli.main()` source
+- WHEN it is scanned for `from_settings`
+- THEN at least one `PromptRegistry.from_settings(settings)` call is
+  present AND it precedes `mcp.run(show_banner=False)`
+
+#### Scenario: registration guard still passes for all twelve tools
+
+- GIVEN the boot path runs the existing R-NEW-6 registration guard
+- WHEN the guard inspects the twelve `@mcp.tool` registrations
+- THEN `UncataloguedToolError` is NOT raised AND `mcp.run()` proceeds
+  (no regression from R-NEW-6)
+
+### Requirement: R-NEW-10 — `nora-mcp` Alias Untouched
+
+The existing `nora-mcp = "nora.cli:main"` console-script entry SHALL
+remain unchanged. New functionality is exposed ONLY through the
+`nora` dispatcher (Approach A from proposal §"Prompt composition
+approach"). A separate `nora-hitl` console script is **rejected**
+(OPEN QUESTION 3 — design must explicitly reject it with rationale).
+
+#### Scenario: nora-mcp entry point is preserved
+
+- GIVEN `pyproject.toml`'s `[project.scripts]` table
+- WHEN the table is parsed
+- THEN `nora = "nora.__main__:main"` AND `nora-mcp =
+  "nora.cli:main"` are present AND no `nora-hitl` entry exists
+
+## Open Questions (deferred to design)
+
+- **Q1** — composition mechanism (inline marker vs runtime lookup).
+  Owned by `prompt-registry`.
+- **Q3** — `__main__.py` refactor and `nora-hitl` exposure. Default
+  NO; design owns.
+- **Q4** — tool-spec front-matter schema. Owned by `prompt-registry`.
+
+## Cross-References
+
+`tool-service-impact-tiers` (CLI shape driver), `hitl-approval-tokens`
+(`nora hitl mint` output contract), `pmp450i-radio-tools`
+(`operator_confirmed` wire field declared here, gate enforced there),
+`prompt-registry` (multi-dir scan wired at boot),
+`secure-configuration` (two new settings read at boot).
 ## Cross-References
 
 Depends on `intervention-memory` capability (read-only consumer). The three new `@mcp.tool` registrations (`search_intervention_history`, `get_device_lifecycle_summary`, `correlate_sector_interference`) delegate to pure functions in `nora.intervention_memory.tools`; the dependency direction is one-way (`nora-mcp-server` → `intervention-memory`, never the reverse). Sanitizer contract inherited from `intervention-memory` R9 / `session-journal` R6. Auto-trace recording inherited from `session-journal` R2 — no middleware change was required for this delta.

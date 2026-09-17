@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from nora.drivers.exceptions import MaintenanceWindowViolation
+from nora.drivers.exceptions import MaintenanceWindowViolation, Tier1ClearanceRequired
 
 if TYPE_CHECKING:
     from nora.config import Settings
@@ -166,18 +166,37 @@ def fetch_spectrum(
     driver: Any,
     device_id: str,
     settings: "Settings | None" = None,
+    operator_confirmed: bool = False,
 ) -> SpectrumAnalysis:
     """Read the spectrum sweep via ``Pmp450iSnmpDriver``.
 
-    Maintenance-window check FIRST: the helper raises
-    :class:`MaintenanceWindowViolation` if ``now`` falls outside the
-    configured window (and emits zero wire frames). The catalog
+    Tier-1 operator-clearance gate FIRST: the helper raises
+    :class:`Tier1ClearanceRequired` if ``operator_confirmed`` is False
+    (the default, including the absent-parameter case) BEFORE any wire
+    frame is emitted. The maintenance-window check follows on success
+    (a confirmed clearance does NOT bypass the window). The catalog
     resolution and the noise-floor sweep follow on success.
+
+    Per `pmp450i-radio-tools/spec.md` ADDED requirement "Tier-1
+    Operator Clearance Gate" and "snmp_run_spectrum_analysis Operator
+    Clearance Gate": Tier-1 tools may be actively disruptive, so the
+    server-side gate enforces explicit operator clearance.
 
     The ranked clean-frequencies list is sorted by ascending noise
     floor (lowest noise = cleanest first) and capped to
     :data:`DEFAULT_TOP_N` entries.
     """
+    # 1. Tier-1 gate FIRST — fires before any wire frame and before the
+    # maintenance-window check (highest-priority invariant).
+    if not operator_confirmed:
+        raise Tier1ClearanceRequired(
+            tool="snmp_run_spectrum_analysis",
+            message=(
+                "Tier-1 spectrum sweep requires operator_confirmed=True; "
+                "default False (and absent-parameter) refuses the call"
+            ),
+        )
+
     device = driver._inventory.get(device_id)  # noqa: SLF001 — internal API
     now = datetime.now(timezone.utc)
 

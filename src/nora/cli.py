@@ -35,6 +35,7 @@ os.environ.setdefault("FASTMCP_SHOW_SERVER_BANNER", "false")
 
 from nora.config import Settings  # noqa: E402
 from nora.drivers.inventory import Inventory  # noqa: E402
+from nora.drivers.mutable_inventory import MutableInventory  # noqa: E402
 from nora.drivers.oid_catalog import OidCatalogRegistry  # noqa: E402
 from nora.drivers.registry import set_driver  # noqa: E402
 from nora.drivers.snmp_pmp450i import Pmp450iDriver  # noqa: E402
@@ -46,6 +47,7 @@ from nora.server import (  # noqa: E402
     set_prompt_registry,
     set_runtime_state,
     verify_tools_are_catalogued,
+    verify_tools_have_tier_classification,
 )
 
 logger = logging.getLogger("nora.cli")
@@ -235,7 +237,19 @@ def main(argv: Sequence[str] | None = None) -> None:
     set_prompt_registry(prompt_registry)
     catalog_registry = OidCatalogRegistry.verify_all(settings)
     inventory = Inventory.from_yaml(settings.nora_devices_inventory_path)
-    set_driver(Pmp450iDriver(inventory=inventory, catalog_registry=catalog_registry))
+    # PR #42 / `2026-09-15-register-device-mcp`: the `register_device`
+    # MCP tool mutates the inventory at runtime (`DeviceResolver.build`
+    # → `MutableInventory.register`). The wrapper preserves the
+    # frozen `Inventory` invariant while exposing the seam; the
+    # driver layer routes its eight `self._inventory.get(...)` call
+    # sites through the wrapper transparently (Task 3).
+    mutable_inventory = MutableInventory(base=inventory)
+    set_driver(
+        Pmp450iDriver(
+            inventory=mutable_inventory,
+            catalog_registry=catalog_registry,
+        )
+    )
     # PR 5 (slice 5): refuse any `@mcp.tool` whose name is not in
     # `OidCatalogRegistry.REQUIRED_OIDS_BY_TOOL[(vendor, model)]`. The
     # guard runs BEFORE `mcp.run()` so a rogue registration aborts the
@@ -243,6 +257,12 @@ def main(argv: Sequence[str] | None = None) -> None:
     # `UncataloguedToolError` carries the offending tool name so the
     # operator can see which registration needs to be signed.
     verify_tools_are_catalogued(catalog_registry)
+    # Issue #43 / `2026-09-15-3tier-tool-governance`: refuse any
+    # `@mcp.tool` whose tier does NOT match the canonical 3-tier
+    # taxonomy. Runs AFTER `from_settings` (so the tool-spec dir was
+    # scanned) and BEFORE `mcp.run()` (so an unclassified tool never
+    # reaches the LLM).
+    verify_tools_have_tier_classification(prompt_registry)
     register_tool_log_middleware()
     logger.info(
         "nora-mcp boot complete: catalogs=%s devices=%s transport=%s host=%s port=%s",

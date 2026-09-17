@@ -250,3 +250,88 @@ FUSE both give POSIX consistency; rsync gives eventual consistency.
 | `correlate_sector_interference` returns zero conflicts for a tower you know has carriers | OpenChat POST_MIGRATION records are missing `carrier_frequency_mhz`     | Re-run OpenChat's `deploy_v7_intervention_memory.py` against the production `webui.db` so the new shape overwrites old records. |
 | systemd unit fails with `status=203/EXEC`                                             | The venv path in `ExecStart=` is wrong                                     | `ls -l /opt/nora/.venv/bin/nora-mcp`; if missing, re-run `uv sync`.                                 |
 | `DeprecationWarning: python -m nora is deprecated`                                    | Something invoked the legacy alias                                         | Use `nora-mcp` instead. The alias is kept only for backward compatibility.                            |
+
+## Tier-1 operator-clearance gate (issue #43)
+
+`snmp_run_spectrum_analysis` now requires `operator_confirmed=True` on the
+wire. The default is `False` (fail-closed); the server-side gate raises
+`Tier1ClearanceRequired` BEFORE any SNMP GET is emitted when the flag
+is False or absent. The Tier-1 protocol precedes the maintenance-window
+check (highest-priority invariant) — a confirmed clearance does NOT
+bypass the window check.
+
+| Tool tier | Wire contract | Failure mode |
+|-----------|---------------|--------------|
+| Tier 0    | No special clearance. Direct execution. | Standard typed errors. |
+| Tier 1    | `operator_confirmed: bool = False` (the default). | `Tier1ClearanceRequired` raised BEFORE any wire frame when False / absent. |
+| Tier 2    | `approval_token: str` carrying an HMAC-SHA256-signed `HitlApprovalToken`. | `AutonomousMutationRejected` raised with literal message `autonomous device mutation rejected: HITL approval token required`. |
+
+## HITL signing-key management (`NORA_HITL_SIGNING_KEY`)
+
+`Settings.nora_hitl_signing_key: SecretStr` is the HMAC-SHA256 signing key
+for HITL approval tokens (`nora hitl mint`). Mirrors the catalog signing
+key management above (same `SecretStr` storage, same generation script).
+
+**Rotation is DEFERRED to Phase-3 (issue #43 out-of-scope note).** Until
+Phase-3 lands, rotation is operator-managed:
+
+1. Generate a fresh key with `.venv/bin/python scripts/generate_signing_key.py`.
+2. Update `/etc/nora/nora.env` (or your secret manager) with the new value.
+3. Restart NORA: `sudo systemctl restart nora-mcp`.
+
+Restarting invalidates every in-flight token because the new HMAC key
+will not match the signature previously produced. This is acceptable
+for Phase-2 because operator sessions are typically short and a token
+re-mint takes one CLI invocation (`nora hitl mint`). Phase-3 will
+introduce a multi-key rotation story that supports overlapping validity
+windows.
+
+### Hard-break legacy stub tokens
+
+The previous stub token format (`stub-<operator-id>-<unix>` JSON, no
+`signature` field) is **invalidated at deploy time**. There is no
+dual-verify window — every stub token raises
+`AutonomousMutationRejected` with the literal message
+`autonomous device mutation rejected: HITL approval token required`.
+
+The previous kill switch (`NORA_HITL_TOKEN_TTL_SECONDS=0`) remains
+effective as an operational backout: setting the env var to `0`
+rejects every token (legitimate or stub) at `verify_approval_token`
+time.
+
+### `nora hitl mint` — operator-facing CLI
+
+```bash
+NORA_HITL_SIGNING_KEY=<key> nora hitl mint --operator-id alice --ttl-seconds 900
+# {"token": "hitl-alice-...", "operator_id": "alice", "issued_at": "...",
+#  "expires_at": "...", "signature": "<hmac_sha256_hex>"}
+```
+
+The signed token is printed as a single JSON line on stdout. Pipe it
+into the migration tool's `approval_token` parameter, or store it in a
+secret manager for programmatic use. Exit code 0 on success; 2 on
+missing `--operator-id` or empty `NORA_HITL_SIGNING_KEY`.
+
+## 3-tier tool governance taxonomy (issue #43)
+
+Every NORA MCP tool is classified into one of three Service-Impact
+Tiers per the `tool-service-impact-tiers` capability. The full per-tool
+spec lives under `docs/tool_specs/<tool_name>.md`; the orchestrator
+prompt at `src/nora/prompts/netops_orchestrator.md` carries §6
+"Universal Service Impact & Disruption Gate" which references every
+tier and the clearance / HITL protocol for each.
+
+| Tier | Category | Policy | Tools |
+|------|----------|--------|-------|
+| 0 | Passive Telemetry (Read-Only) | Direct execution | 8 tools (AP summary, SM table, radio metrics, frame util, SM diagnostics, intervention history search, device lifecycle, sector correlation) |
+| 1 | Potentially Disruptive / Active Telemetry | Pause & Clearance Gate (`operator_confirmed=True`) | 1 tool (`snmp_run_spectrum_analysis`) |
+| 2 | Service-Affecting Mutations (Write / Config) | Strict HITL Gate (`approval_token` + HMAC verification + make-before-break) | 2 tools (`snmp_migrate_radio_frequency`, `save_intervention_record`) |
+
+The boot sequence loads both the packaged prompts directory
+(`src/nora/prompts/`) AND the tool-spec directory
+(`docs/tool_specs/` — overridable via `NORA_TOOL_SPECS_DIR`). Each
+tool-spec file carries YAML front-matter with the frozen ADR-4
+schema; the cross-validator at scan time enforces
+`{tier 1 ⇒ requires_operator_confirmed=True}`,
+`{tier 2 ⇒ requires_hitl_token=True}`, and
+`{tier ∈ {0, 1, 2}}`.

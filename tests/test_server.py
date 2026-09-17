@@ -23,21 +23,25 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SRC_DIR = PROJECT_ROOT / "src" / "nora"
 
 
-def test_server_exposes_exactly_eleven_tools() -> None:
-    """The FastMCP instance exposes exactly 11 tools.
+def test_server_exposes_exactly_thirteen_tools() -> None:
+    """The FastMCP instance exposes exactly 13 tools.
 
-    The eleven tools are: 1 driver (`snmp_get_pmp450i_radio_metrics`)
+    The thirteen tools are: 1 driver (`snmp_get_pmp450i_radio_metrics`)
     + 2 read-summary (`snmp_get_ap_summary`, `snmp_get_frame_utilization`)
     + 2 SM baseline (`snmp_get_sm_table`, `snmp_get_sm_detailed_diagnostics`)
     + 1 spectrum sweep (`snmp_run_spectrum_analysis`)
     + 1 HITL-gated migration (`snmp_migrate_radio_frequency`)
     + 3 intervention read (`search_intervention_history`,
     `get_device_lifecycle_summary`, `correlate_sector_interference`)
-    + 1 writer (`save_intervention_record`).
+    + 1 writer (`save_intervention_record`)
+    + 1 ad-hoc registration (`register_device`, issue #42 / change
+    `2026-09-15-register-device-mcp`)
+    + 1 admin HITL token issuance (`hitl_mint_token`, WU-4 / PR #44
+    follow-up plan).
 
-    The surface grew from 5 → 7 (PR 2) → 9 (PR 3) → 11 (PR 4).
-    This test was renamed from ``test_server_exposes_exactly_nine_tools``
-    in PR 5 to track the current contract.
+    The surface grew from 5 → 7 (PR 2) → 9 (PR 3) → 11 (PR 4) → 12 (PR
+    `2026-09-15-register-device-mcp`) → 13 (WU-4 / PR #44 follow-up).
+    Renamed from ``test_server_exposes_exactly_twelve_tools``.
     """
     import asyncio
 
@@ -60,10 +64,41 @@ def test_server_exposes_exactly_eleven_tools() -> None:
         "get_device_lifecycle_summary",
         "correlate_sector_interference",
         "save_intervention_record",
+        "register_device",
+        "hitl_mint_token",
     }
     assert names == expected, (
-        f"Expected exactly 11 tools; got {sorted(names)} "
+        f"Expected exactly 13 tools; got {sorted(names)} "
         f"(missing: {sorted(expected - names)}, extra: {sorted(names - expected)})"
+    )
+
+
+def test_server_exposes_exactly_thirteen_tools_alias_for_eleven_legacy() -> None:
+    """Back-compat alias — old callers referencing the prior tool-count name keep working.
+
+    The test name was renamed through several phases
+    (``test_server_exposes_exactly_eleven_tools`` →
+    ``test_server_exposes_exactly_twelve_tools`` →
+    ``test_server_exposes_exactly_thirteen_tools``). This alias test
+    exists so a stray import / fixture that references the legacy
+    name fails loudly with a clear message rather than silently
+    losing the check.
+    """
+    import asyncio
+
+    from nora import server as server_mod
+
+    async def _names() -> set[str]:
+        tools = await server_mod.mcp.list_tools()
+        return {t.name for t in tools}
+
+    names = asyncio.run(_names())
+    assert "register_device" in names, (
+        f"register_device must be registered on the FastMCP instance; got {sorted(names)}"
+    )
+    assert "hitl_mint_token" in names, (
+        f"hitl_mint_token must be registered on the FastMCP instance (WU-4 / PR #44); "
+        f"got {sorted(names)}"
     )
 
 
@@ -328,6 +363,35 @@ def test_server_module_exports_three_new_tool_names() -> None:
     assert "correlate_sector_interference" in server_mod.__all__
 
 
+def test_snmp_get_pmp450i_radio_metrics_no_longer_in_allowlist() -> None:
+    """R-NEW-6-S5 — `_ALLOWED_UNCATALOGUED_TOOLS` retired the radio-metrics entry.
+
+    After the Task 6 + 7 catalog re-sign, every PMP 450i baseline
+    carries `snmp_get_pmp450i_radio_metrics` in its `tools` envelope,
+    so the legacy allow-list entry is dead weight. This test pins
+    the contract: the entry is NOT in the frozenset, AND the four
+    remaining entries (the intervention-memory operators) are unchanged.
+    """
+    import nora.server as server_mod
+
+    allow = server_mod._ALLOWED_UNCATALOGUED_TOOLS  # type: ignore[attr-defined]
+    assert "snmp_get_pmp450i_radio_metrics" not in allow, (
+        f"legacy radio-metrics entry must be retired; allow-list is {sorted(allow)!r}"
+    )
+    # The four remaining entries (intervention-memory operators) stay
+    # unchanged — those tools consume the on-disk filesystem, not SNMP.
+    expected_remaining = {
+        "search_intervention_history",
+        "get_device_lifecycle_summary",
+        "correlate_sector_interference",
+        "save_intervention_record",
+    }
+    assert expected_remaining.issubset(allow), (
+        f"intervention-memory entries must remain in allow-list; "
+        f"missing: {sorted(expected_remaining - allow)!r}"
+    )
+
+
 def test_mcp_tool_wrapper_delegates_to_pure_library_function(tmp_path: Path) -> None:
     """R-NEW-1-S2 — the MCP wrapper delegates to the library function with the same kwargs.
 
@@ -373,13 +437,14 @@ def test_mcp_tool_wrapper_delegates_to_pure_library_function(tmp_path: Path) -> 
     assert result.data == sentinel
 
 
-def test_mcp_instance_exposes_all_nine_tools() -> None:  # noqa: F811 — alias kept for history
-    """Deprecated: use `test_server_exposes_exactly_nine_tools` instead.
+def test_mcp_instance_exposes_all_thirteen_tools() -> None:  # noqa: F811 — alias kept for history
+    """Deprecated alias: use `test_server_exposes_exactly_thirteen_tools`.
 
     Post-thin-split + writer + slice 2 + slice 3 + slice 4 (spectrum
-    + HITL-gated migration): exactly 11 tools. This alias test
-    exists so any accidentally re-added legacy tool fails the test
-    loudly.
+    + HITL-gated migration) + `register_device` (issue #42) +
+    `hitl_mint_token` (WU-4 / PR #44): exactly 13 tools. This alias
+    test exists so any accidentally re-added legacy tool fails the
+    test loudly.
     """
     import asyncio
 
@@ -402,8 +467,10 @@ def test_mcp_instance_exposes_all_nine_tools() -> None:  # noqa: F811 — alias 
         "get_device_lifecycle_summary",
         "correlate_sector_interference",
         "save_intervention_record",
+        "register_device",
+        "hitl_mint_token",
     }
-    assert names == expected, f"Expected exactly 11 tools after slice 4; got: {sorted(names)}"
+    assert names == expected, f"Expected exactly 13 tools after WU-4; got: {sorted(names)}"
 
 
 def test_free_text_fields_in_search_output_sanitized_via_mcp_wrapper(tmp_path: Path) -> None:

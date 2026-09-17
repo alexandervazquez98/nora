@@ -1,13 +1,21 @@
 """NORA FastMCP server — thin split.
 
 Boots a FastMCP instance named "nora" over stdio and exposes exactly
-five `@mcp.tool` registrations and two `@mcp.prompt` registrations:
+thirteen `@mcp.tool` registrations and two `@mcp.prompt` registrations:
 
 * `snmp_get_pmp450i_radio_metrics`         — PMP 450i SNMP driver.
+* `snmp_get_ap_summary`                    — PMP 450i AP summary.
+* `snmp_get_frame_utilization`             — PMP 450i frame utilization.
+* `snmp_get_sm_table`                      — PMP 450i SM baseline.
+* `snmp_get_sm_detailed_diagnostics`       — PMP 450i SM diagnostics.
+* `snmp_run_spectrum_analysis`             — PMP 450i spectrum sweep.
+* `snmp_migrate_radio_frequency`           — PMP 450i HITL-gated migration.
+* `register_device`                        — ad-hoc IP registration (issue #42).
 * `search_intervention_history`           — read-only intervention memory.
 * `get_device_lifecycle_summary`          — read-only intervention memory.
 * `correlate_sector_interference`         — read-only intervention memory.
 * `save_intervention_record`              — writer (issue #12 / new sibling package).
+* `hitl_mint_token`                       — admin HITL token issuance (WU-4).
 * `netops_orchestrator` (prompt)          — Lead NOC orchestrator system prompt.
 * `snmp_pmp450i` (prompt)                  — PMP 450i driver system prompt.
 
@@ -291,7 +299,7 @@ def snmp_get_sm_detailed_diagnostics(device_id: str, luid: str) -> dict[str, Any
 
 
 @mcp.tool
-def snmp_run_spectrum_analysis(device_id: str) -> dict[str, Any]:
+def snmp_run_spectrum_analysis(device_id: str, operator_confirmed: bool = False) -> dict[str, Any]:
     """Read a typed spectrum sweep for the named PMP 450i device.
 
     Returns a :class:`SpectrumAnalysis` carrying
@@ -304,12 +312,23 @@ def snmp_run_spectrum_analysis(device_id: str) -> dict[str, Any]:
     Maintenance Window": calls outside the configured maintenance
     window raise :class:`MaintenanceWindowViolation` and emit zero
     wire frames.
+
+    Per issue #43 ADDED requirement "Tier-1 Operator Clearance Gate":
+    ``operator_confirmed`` defaults to ``False`` (fail-closed). The
+    server-side gate raises :class:`Tier1ClearanceRequired` BEFORE any
+    wire frame when ``operator_confirmed`` is False (or absent). The
+    LLM orchestrator MUST request operator clearance before invoking.
     """
     from nora.drivers.snmp_pmp450i.spectrum import fetch_spectrum
 
     driver = get_driver()
     settings = get_runtime_state()
-    analysis = fetch_spectrum(driver=driver, device_id=device_id, settings=settings)
+    analysis = fetch_spectrum(
+        driver=driver,
+        device_id=device_id,
+        settings=settings,
+        operator_confirmed=operator_confirmed,
+    )
     return analysis.model_dump(mode="json")
 
 
@@ -491,6 +510,110 @@ def save_intervention_record(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Ad-hoc device registration — issue #42 / `2026-09-15-register-device-mcp`.
+#
+# Closes the IPv4-literal resolution gap: when the operator hands the
+# orchestrator an IP absent from `data/devices.yaml`, the orchestrator
+# calls `register_device(host, community, validate=True)` instead of
+# asking for a `device_id`. The tool body is a thin wrapper over
+# `_register_device_impl` — that helper handles the validation wire
+# frame, the typed error mapping, and the `MutableInventory` insertion.
+#
+# `validate=True` (default) issues a cheap `sysDescr` GET against OID
+# `1.3.6.1.2.1.1.1.0` BEFORE inserting; failure raises a typed
+# exception and inserts nothing. `validate=False` skips the wire frame
+# and inserts immediately (operator-supplied credentials only — no
+# out-of-band reachability check).
+#
+# Community credentials are wrapped in `SecretStr` so
+# `model_dump(mode="json")` masks the literal to `"**********"` at the
+# wire boundary — Zero-Leakage contract (§1 of the orchestrator prompt).
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool
+def register_device(host: str, community: str, validate: bool = True) -> dict[str, Any]:
+    """Ad-hoc-register a PMP 450i radio. `validate=True` issues a cheap
+    sysDescr GET (`1.3.6.1.2.1.1.1.0`) before insertion. Returns a typed
+    `DeviceRecord` with `community` masked to `"**********"`. Typed error
+    on any failure path; inserts NOTHING.
+
+    Issue #42 / change `2026-09-15-register-device-mcp`. The validation
+    contract (RFC 1213 sysDescr GET) is referenced from §4 Step 4 of
+    `src/nora/prompts/netops_orchestrator.md` so the orchestrator knows
+    that an unreachable radio fails closed.
+    """
+    from nora.drivers.snmp_pmp450i.register_device import (
+        _register_device_impl,
+    )
+
+    record = _register_device_impl(
+        driver=get_driver(),
+        host=host,
+        community=community,
+        validate=validate,
+        sanitizer=_sanitizer,
+    )
+    return record.model_dump(mode="json")
+
+
+# ---------------------------------------------------------------------------
+# HITL admin token issuance — WU-4 / PR #44 follow-up plan.
+#
+# Mirrors the `nora hitl mint --operator-id … --ttl-seconds …` CLI without
+# requiring shell access on the backend host; NOC operators without
+# terminal access can mint verification tokens from chat.
+#
+# Wired through `Settings.nora_hitl_signing_key` (lazy fail-closed — a
+# missing / empty key raises `AutonomousMutationRejected` to the MCP
+# caller). The wire response is `HitlApprovalToken.model_dump(mode="json")`
+# — a dict carrying `token`, `operator_id`, `issued_at`, `expires_at`,
+# `signature`. Default ON (`Settings.nora_hitl_admin_enabled = True`);
+# deploys that want CLI-only minting set
+# `NORA_HITL_ADMIN_ENABLED=false`.
+#
+# Imports are scoped to the tool body so the cold-import cost stays
+# zero when no caller invokes `hitl_mint_token` (same idiom as
+# `snmp_migrate_radio_frequency`).
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool
+def hitl_mint_token(
+    operator_id: str,
+    ttl_seconds: int = 900,
+) -> dict[str, Any]:
+    """Mint a HMAC-signed HITL approval token (WU-4 / PR #44).
+
+    Same semantics as the `nora hitl mint --operator-id … --ttl-seconds …`
+    CLI: a typed token is produced via `nora.hitl.tokens.mint_token`
+    using the boot-time `Settings.nora_hitl_signing_key`. The wire
+    response is `mint_token(...).model_dump(mode="json")` — a dict
+    carrying `token`, `operator_id`, `issued_at`, `expires_at`,
+    `signature`.
+
+    Default ON (`Settings.nora_hitl_admin_enabled = True`); deploys
+    that want CLI-only minting set `NORA_HITL_ADMIN_ENABLED=false`.
+
+    Raises:
+        AutonomousMutationRejected: missing or empty
+            `nora_hitl_signing_key`. The literal message is the
+            contract seam (mirrors `verify_approval_token`).
+    """
+    from nora.hitl.tokens import mint_token
+
+    settings = get_runtime_state()
+    signing_key = settings.nora_hitl_signing_key
+    effective_ttl = ttl_seconds if ttl_seconds is not None else settings.nora_hitl_token_ttl_seconds
+    token = mint_token(
+        operator_id,
+        ttl_seconds=effective_ttl,
+        signing_key=signing_key,
+    )
+    return token.model_dump(mode="json")
+
+
+# ---------------------------------------------------------------------------
 # Prompt registrations — `@mcp.prompt` thin wrappers over `PromptRegistry`.
 # ---------------------------------------------------------------------------
 
@@ -592,10 +715,11 @@ _NON_TOOL_NAMES: frozenset[str] = frozenset(
         # the guard focused on the LLM-tool surface.
         "netops_orchestrator",
         "snmp_pmp450i",
-        # Boot-time guard helper exposed for `cli.verify_tools_are_catalogued`
-        # and the integration-test subprocess pattern. NOT an
-        # `@mcp.tool` — must not show up in the guard's iteration.
+        # Boot-time guard helpers exposed for `cli` and the
+        # integration-test subprocess pattern. NOT `@mcp.tool`s —
+        # must not show up in the guard's iteration.
         "verify_tools_are_catalogued",
+        "verify_tools_have_tier_classification",
     }
 )
 
@@ -629,7 +753,22 @@ _ALLOWED_UNCATALOGUED_TOOLS: frozenset[str] = frozenset(
         "get_device_lifecycle_summary",
         "correlate_sector_interference",
         "save_intervention_record",
-        "snmp_get_pmp450i_radio_metrics",
+        # WU-4 / PR #44 follow-up plan: the HITL admin tool is NOT an
+        # SNMP-backed operator (no OID catalog will ever cover it —
+        # it consumes `Settings.nora_hitl_signing_key`, not the
+        # PMP 450i OID catalog). Allow-list entry keeps the
+        # boot-time tool-registration guard green until a follow-up
+        # change re-examines whether the tool warrants catalog
+        # coverage. See the deferred-tier-classification note near
+        # `_EXPECTED_TOOL_TIERS` for the related follow-up.
+        "hitl_mint_token",
+        # Issue #42 / `2026-09-15-register-device-mcp`: both
+        # `register_device` and `snmp_get_pmp450i_radio_metrics` were
+        # retired from this allow-list once their catalog envelope
+        # entries landed in the re-signed baselines (Tasks 6 + 7).
+        # The four remaining entries are intervention-memory operators
+        # that consume the on-disk filesystem, not SNMP — they will
+        # never carry an OID catalog entry.
     }
 )
 
@@ -703,6 +842,91 @@ def verify_tools_are_catalogued(
         )
 
 
+# ---------------------------------------------------------------------------
+# Issue #43 / `2026-09-15-3tier-tool-governance` — boot-time tier
+# classification guard. Per `tool-service-impact-tiers` capability
+# requirement "Three-Tier Taxonomy Is Frozen", every registered
+# `@mcp.tool` MUST be classified into exactly one of {Tier 0, Tier 1,
+# Tier 2}. The guard enumerates the canonical tool surface, looks up
+# each tool's tier in the tool-spec front-matter, and raises a typed
+# error on a missing or invalid classification.
+# ---------------------------------------------------------------------------
+
+
+# Tool name -> expected tier. Mirrors the verbatim table in
+# `openspec/changes/2026-09-15-3tier-tool-governance/specs/tool-service-impact-tiers/spec.md`.
+#
+# NOTE: `hitl_mint_token` (WU-4 / PR #44) is intentionally NOT
+# in _EXPECTED_TOOL_TIERS for this PR. A future change must:
+# (a) classify it as Tier 2 (it issues HMAC-signed tokens that
+# grant mutation authority),
+# (b) add a docs/tool_specs/hitl_mint_token.md file against
+# the ADR-4 frozen schema.
+_EXPECTED_TOOL_TIERS: dict[str, int] = {
+    # Tier 0 — Passive Telemetry (8)
+    "snmp_get_ap_summary": 0,
+    "snmp_get_sm_table": 0,
+    "snmp_get_pmp450i_radio_metrics": 0,
+    "snmp_get_frame_utilization": 0,
+    "snmp_get_sm_detailed_diagnostics": 0,
+    "search_intervention_history": 0,
+    "get_device_lifecycle_summary": 0,
+    "correlate_sector_interference": 0,
+    # Tier 1 — Potentially Disruptive (1)
+    "snmp_run_spectrum_analysis": 1,
+    # Tier 2 — Service-Affecting Mutations (2)
+    "snmp_migrate_radio_frequency": 2,
+    "save_intervention_record": 2,
+    # `register_device` (issue #42) is intentionally NOT in this table
+    # for now — its dedicated `docs/tool_specs/register_device.md` lands
+    # in a follow-up change. The guard's "expected_tier is None" branch
+    # below skips unknown tools so a future tool expansion does not
+    # fail boot.
+}
+
+
+def verify_tools_have_tier_classification(
+    prompt_registry: Any,
+) -> None:
+    """Boot-time guard — refuse any `@mcp.tool` whose tier is missing or invalid.
+
+    Iterates the canonical tool surface, looks up each tool's tier in
+    ``prompt_registry.get(name).metadata["tier"]`` (parsed by the
+    ToolSpecValidator), and raises
+    :class:`UncataloguedToolError` on any mismatch. Called from
+    :func:`nora.cli.main` AFTER ``PromptRegistry.from_settings`` and
+    BEFORE ``mcp.run()`` so a misclassification aborts the boot — the
+    server never reaches the LLM with an unclassified tool surface.
+    """
+    from nora.drivers.exceptions import UncataloguedToolError
+
+    for tool_name in _enumerate_tool_names():
+        # Tools that do NOT have a tool-spec (e.g. `register_device`,
+        # `save_intervention_record` may appear here when the override
+        # is off) fall back to the canonical tier table.
+        try:
+            prompt = prompt_registry.get(tool_name)
+            classified_tier = prompt.metadata.get("tier")
+        except Exception:  # noqa: BLE001
+            classified_tier = None
+
+        expected_tier = _EXPECTED_TOOL_TIERS.get(tool_name)
+        if expected_tier is None:
+            # Tool is not part of the canonical taxonomy (e.g. legacy
+            # tools added by follow-up PRs); skip without raising so a
+            # future tool expansion does not fail boot.
+            continue
+        if classified_tier != expected_tier:
+            raise UncataloguedToolError(
+                tool_name=tool_name,
+                reason=(
+                    f"tool {tool_name!r} has tier {classified_tier!r}; "
+                    f"expected {expected_tier!r} per "
+                    f"`tool-service-impact-tiers` taxonomy"
+                ),
+            )
+
+
 __all__ = [
     "mcp",
     "configure_logging",
@@ -721,8 +945,14 @@ __all__ = [
     "get_device_lifecycle_summary",
     "correlate_sector_interference",
     "save_intervention_record",
+    "register_device",
+    # WU-4 / PR #44 follow-up plan: HITL admin token issuance over MCP.
+    # Tier classification deferred — see the NOTE above
+    # `_EXPECTED_TOOL_TIERS` for the follow-up contract.
+    "hitl_mint_token",
     "netops_orchestrator",
     "snmp_pmp450i",
     "register_tool_log_middleware",
     "verify_tools_are_catalogued",
+    "verify_tools_have_tier_classification",
 ]

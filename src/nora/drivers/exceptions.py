@@ -162,6 +162,87 @@ class UncataloguedToolError(DriverError):
         self.reason = reason
 
 
+class DuplicateDeviceError(DriverError):
+    """Raised when `MutableInventory.register` collides on an existing `device_id`.
+
+    `MutableInventory` wrapper (issue #42 / change
+    `2026-09-15-register-device-mcp`): preserves `Inventory.frozen=True`
+    while allowing ad-hoc `register_device` inserts. The wrapper rejects
+    duplicate ids at insertion time so the operator gets a typed error
+    instead of a silent overwrite. Carries the offending id verbatim.
+    """
+
+
+class Tier1ClearanceRequired(DriverError):
+    """Raised when a Tier-1 tool is invoked without ``operator_confirmed=True``.
+
+    Per `openspec/changes/2026-09-15-3tier-tool-governance/specs/pmp450i-radio-tools/spec.md`
+    ADDED requirement "Tier-1 Clearance Gate": the
+    ``snmp_run_spectrum_analysis`` MCP tool refuses any call that
+    arrives without ``operator_confirmed=True`` (default ``False``,
+    including the absent-parameter case). The exception carries the
+    offending tool name and a clear message so the LLM orchestrator
+    can recover by re-invoking with operator clearance.
+
+    Mirrors the :class:`MaintenanceWindowViolation` pattern: the gate
+    fires BEFORE any wire frame is emitted, and inherits from
+    :class:`DriverError` so ``except DriverError`` catches the entire
+    surface.
+    """
+
+    def __init__(self, *, tool: str, message: str) -> None:
+        super().__init__(f"{tool}: {message}")
+        self.tool = tool
+        self.message = message
+
+
+class DeviceUnreachable(DriverError):
+    """Raised when the SNMP agent's port is closed or no response is received.
+
+    Issue #42 / change `2026-09-15-register-device-mcp`: the
+    `register_device` validate path distinguishes wire-level failures
+    (`OSError` / `TimeoutError`) from auth-rejected ones
+    (`InvalidCommunity`) so the orchestrator can show a typed error per
+    failure mode. Carries the offending host string verbatim via the
+    `.host` attribute (the message is the same string, by convention).
+    """
+
+    def __init__(self, host: str) -> None:
+        super().__init__(host)
+        self.host = host
+
+
+class InvalidCommunity(DriverError):
+    """Raised when the agent rejects the supplied community string.
+
+    Issue #42 / change `2026-09-15-register-device-mcp`: the
+    `register_device` validate path maps `puresnmp.exc.SnmpError` to
+    this typed error so the orchestrator sees a distinct error code
+    (auth-rejected, not unreachable). Carries the offending community
+    string verbatim via the `.community` attribute (the operator typed
+    it; the tool boundary sanitises before serialisation).
+    """
+
+    def __init__(self, community: str) -> None:
+        super().__init__(community)
+        self.community = community
+
+
+class InvalidHostError(DriverError):
+    """Raised when the supplied host string fails the IPv4-literal contract.
+
+    Issue #42 / change `2026-09-15-register-device-mcp`: the
+    `register_device` Pydantic boundary validates the host BEFORE any
+    wire frame so a malformed value (e.g. `not-an-ip`) raises a typed
+    error without sending any traffic. Carries the offending host
+    string verbatim via the `.host` attribute.
+    """
+
+    def __init__(self, host: str) -> None:
+        super().__init__(host)
+        self.host = host
+
+
 __all__ = [
     "DriverError",
     "RefusesWriteError",
@@ -175,4 +256,11 @@ __all__ = [
     "AutonomousMutationRejected",
     "MaintenanceWindowViolation",
     "UncataloguedToolError",
+    # Issue #42 / `2026-09-15-register-device-mcp` — typed errors for
+    # the `register_device` tool surface.
+    "DuplicateDeviceError",
+    "Tier1ClearanceRequired",
+    "DeviceUnreachable",
+    "InvalidCommunity",
+    "InvalidHostError",
 ]

@@ -37,7 +37,8 @@
     "spectrumChannelRank": "1.3.6.1.4.1.161.19.3.3.2.221.4",
     "spectrumScanStatus": "1.3.6.1.4.1.161.19.3.3.2.221.0",
     "migrateCarrierFrequency": "1.3.6.1.4.1.161.19.3.1.1.2.0",
-    "migratePriorCarrierFrequency": "1.3.6.1.4.1.161.19.3.1.1.2.0"
+    "migratePriorCarrierFrequency": "1.3.6.1.4.1.161.19.3.1.1.2.0",
+    "sysDescr": "1.3.6.1.2.1.1.1.0"
   },
   "tools": {
     "snmp_get_ap_summary": [
@@ -75,9 +76,21 @@
     "snmp_migrate_radio_frequency": [
       "migrateCarrierFrequency",
       "migratePriorCarrierFrequency"
+    ],
+    "register_device": [
+      "sysDescr"
+    ],
+    "snmp_get_pmp450i_radio_metrics": [
+      "radioDownlinkRate",
+      "radioUplinkRate",
+      "signalStrengthRx",
+      "signalStrengthTx",
+      "ssr",
+      "modulationMode",
+      "sysDescr"
     ]
   },
-  "hmac_sha256": "27139589b5a0f10881a4af6555b823baf3ea841b2130d3145a930e6de99dc7cf",
+  "hmac_sha256": "cf78db5dd9024e313abb0e464a84fccfc3cc1bf38714752c27d8e7c935d18079",
   "_provenance": {
     "source": "live SNMP walk against AP Cambium PMP 450i firmware 25.1 (192.0.2.10)",
     "verification_date": "2026-09-13",
