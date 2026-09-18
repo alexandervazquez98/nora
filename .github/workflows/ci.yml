@@ -1,0 +1,101 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel in-progress runs for the same branch / PR (saves CI minutes).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    env:
+      PYTHON_VERSION: "3.12"
+      UV_VERSION: "0.5"
+      # Forces uv to install into the project `.venv` so subsequent
+      # `actions/cache` keys can target it deterministically.
+      UV_PROJECT_ENVIRONMENT: .venv
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: false  # We manage the cache manually below for finer control.
+
+      - name: Set up Python
+        run: uv python install ${{ env.PYTHON_VERSION }}
+
+      # ------------------------------------------------------------------
+      # Cache layer #1: uv's downloaded wheels.
+      # Key = lockfile hash; falls back to a fresh download on miss.
+      # ------------------------------------------------------------------
+      - name: Cache uv wheels
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/uv
+          key: uv-wheels-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            uv-wheels-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      # ------------------------------------------------------------------
+      # Cache layer #2: the materialized .venv (site-packages + scripts).
+      # This avoids the `uv sync` install cost on a cache hit; on miss
+      # we install fresh and the next run re-populates the cache.
+      # ------------------------------------------------------------------
+      - name: Cache .venv site-packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            .venv/lib/python${{ env.PYTHON_VERSION }}/site-packages
+            .venv/bin
+          key: venv-${{ runner.os }}-${{ hashFiles('uv.lock') }}-${{ hashFiles('pyproject.toml') }}
+          restore-keys: |
+            venv-${{ runner.os }}-${{ hashFiles('uv.lock') }}-
+
+      - name: Re-sync after cache restore
+        run: uv sync --frozen
+
+      - name: Pre-compile bytecode
+        run: uv run python -m compileall -q src
+
+      - name: Lint (ruff check)
+        run: uv run ruff check .
+
+      - name: Format check (ruff format --check)
+        run: uv run ruff format --check .
+
+      - name: Type check (mypy --strict)
+        run: uv run mypy --strict src/nora
+
+      # Full suite WITH coverage. Sequential (no `-n auto`) because
+      # xdist + coverage exposes a pre-existing race condition in
+      # `tests/installer/test_bootstrap.py` and
+      # `tests/test_http_transport_smoke.py` — the test_bootstrap suite
+      # needs exclusive filesystem state and the http_smoke test binds
+      # a TCP port. CI prefers deterministic 105 s over flaky 60 s.
+      # The dev loop uses `make test-fast` (xdist, no coverage) — see
+      # OPERATIONS.md.
+      - name: Test (full suite, coverage, sequential)
+        run: uv run pytest --cov=src/nora --cov-report=xml --cov-report=term
+
+      - name: Upload coverage to Codecov
+        if: always()
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./coverage.xml
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}

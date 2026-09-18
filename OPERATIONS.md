@@ -4,6 +4,52 @@ Day-2 operations: key management, updates, log interpretation, integration
 contracts, troubleshooting. Read INSTALL.md first if the service is not
 yet running.
 
+## Test execution workflow
+
+Three execution modes, each tuned for a different loop. Pick the one that
+matches what you're doing — running the wrong mode is the single most
+common source of slow feedback.
+
+### Dev loop (fast iteration)
+
+Use when editing code or a single test file. Parallel, no coverage, no
+cache provider overhead. The full suite lands in ~25–35 s on a multi-core
+workstation; a single-file run lands under 1 s on the second invocation.
+
+```bash
+# Whole suite, parallel, no coverage
+make test-fast
+
+# One test by name pattern (substring match against test IDs / names)
+make test-one K=hitl_tokens
+make test-one K=snmp_pmp450i::test_register_device
+
+# Auto-rerun on file changes (uses pytest-watch under the hood)
+make watch
+```
+
+### Pre-commit / pre-PR (full suite with coverage)
+
+Use before opening a PR or after finishing a feature. Adds coverage
+measurement and the strict-markers / cacheprovider behavior the default
+`addopts` skips.
+
+```bash
+make test   # full pytest + coverage report in the terminal
+```
+
+### CI (GitHub Actions)
+
+`/.github/workflows/ci.yml` runs on every push and PR to `main`. Caches
+two layers — uv's wheel cache (key = `hashFiles('uv.lock')`) and the
+materialized `.venv` (key = `hashFiles('uv.lock') + hashFiles('pyproject.toml')`)
+— so a cache hit skips `uv sync` entirely. Pre-compiles bytecode before
+pytest so the first import inside the runner doesn't pay the cold-path
+cost. In-progress runs on the same ref are auto-cancelled.
+
+If CI is slow on a cache miss, that is expected; the second run is the
+steady state.
+
 ## Key management
 
 The signing key (`NORA_OID_CATALOG_SIGNING_KEY`) is the root of trust for

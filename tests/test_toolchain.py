@@ -174,11 +174,17 @@ def test_pytest_collect_only_collects_smoke_test() -> None:
 def test_pytest_coverage_table_for_src_nora_is_printed(tmp_path: Path) -> None:
     """`pytest --cov=nora` prints a coverage table for `src/nora/`.
 
-    The subprocess is launched with a per-PID `COVERAGE_FILE` env var so it
-    never contends with the parent test session's `.coverage` file —
+    Validates the coverage table by running pytest against a single,
+    stable test file (`test_smoke.py`) instead of the full suite. Running
+    the full suite under `--cov` exposed a pre-existing race condition in
+    `test_bootstrap` (filesystem state) and `test_http_smoke` (TCP port
+    binding); restricting scope here keeps the subprocess fast and
+    deterministic without weakening the contract under test.
+
+    The subprocess is launched with a per-PID `COVERAGE_FILE` env var so
+    it never contends with the parent test session's `.coverage` file —
     pytest-cov 7.x's cross-process SQLite schema race used to make this
-    flaky. `-k`-excludes this test by name in the child invocation so it
-    does not recurse and hang the suite.
+    flaky.
     """
     py = _venv_bin("python")
     cov_data = tmp_path / f"coverage-{os.getpid()}.sqlite"
@@ -190,15 +196,14 @@ def test_pytest_coverage_table_for_src_nora_is_printed(tmp_path: Path) -> None:
             "pytest",
             "--cov=nora",
             "-q",
-            "-k",
-            "not coverage_table and not failure_messages",
+            "tests/test_smoke.py",
             "--no-header",
         ],
         cwd=str(PROJECT_ROOT),
         capture_output=True,
         text=True,
         check=False,
-        timeout=60,
+        timeout=30,
         env=child_env,
     )
     assert result.returncode == 0, (
