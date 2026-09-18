@@ -166,22 +166,10 @@ def _boot_env(tmp_path: Path) -> dict[str, str]:
     }
 
 
-def test_subprocess_nora_mcp_exposes_thirteen_tools(
+def test_subprocess_nora_mcp_exposes_fourteen_tools(
     mcp_http_client: McpHttpClient,
 ) -> None:
-    """The shared HTTP MCP server exposes the 13-tool surface in `tools/list`.
-
-    Refactored in WU-#1a: the HTTP server is the same one `nora-mcp`'s
-    HTTP transport boots, so a positive here proves the tool surface is
-    intact regardless of entry point. The stdio `"nora-mcp boot complete"`
-    log assertion previously in this test moved to
-    `tests/test_integration.py::test_subprocess_emits_structured_startup_log_on_stderr`
-    (stdio-specific), and the cross-entry-point parity check is now
-    `test_subprocess_both_entry_points_expose_identical_tool_lists` below.
-
-    WU-4 / PR #44 follow-up plan added ``hitl_mint_token``; the
-    expected set is therefore 13 tools post-merge.
-    """
+    """The shared HTTP MCP server exposes the 14-tool surface in `tools/list`."""
     mcp_http_client.initialize()
     mcp_http_client.initialized()
     parsed = mcp_http_client.tools_list()
@@ -201,24 +189,17 @@ def test_subprocess_nora_mcp_exposes_thirteen_tools(
         "save_intervention_record",
         "register_device",
         "hitl_mint_token",
+        "snmp_reboot_radio",
     ]
     assert tool_names == expected, (
-        f"`nora-mcp` (HTTP) must expose exactly the 13 thin tools in order; got {tool_names!r}"
+        f"`nora-mcp` (HTTP) must expose exactly the 14 thin tools in order; got {tool_names!r}"
     )
 
 
 def test_subprocess_python_dash_m_nora_exposes_same_tools(
     mcp_http_client: McpHttpClient,
 ) -> None:
-    """`python -m nora` and the shared HTTP server expose the same 13 tools.
-
-    Refactored in WU-#1a: the HTTP server is the same one `python -m nora`
-    eventually delegates to via the deprecation alias. A positive here
-    proves the deprecation alias lands on the same tool surface. The
-    `DeprecationWarning` stderr assertion previously in this test moved to
-    `tests/test_main_alias.py::test_python_dash_m_nora_emits_deprecation_warning`
-    (stdio-specific).
-    """
+    """`python -m nora` and the shared HTTP server expose the same 14 tools."""
     mcp_http_client.initialize()
     mcp_http_client.initialized()
     parsed = mcp_http_client.tools_list()
@@ -238,9 +219,10 @@ def test_subprocess_python_dash_m_nora_exposes_same_tools(
         "save_intervention_record",
         "register_device",
         "hitl_mint_token",
+        "snmp_reboot_radio",
     ]
     assert tool_names == expected, (
-        f"`python -m nora` (HTTP) must expose 13 thin tools in order; got {tool_names!r}"
+        f"`python -m nora` (HTTP) must expose 14 thin tools in order; got {tool_names!r}"
     )
 
 

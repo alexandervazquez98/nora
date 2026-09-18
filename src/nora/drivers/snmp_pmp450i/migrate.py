@@ -52,6 +52,7 @@ from typing import TYPE_CHECKING, Any, Callable
 from pydantic import BaseModel, ConfigDict, Field
 
 from nora.drivers.exceptions import CommunityValidationFailed
+from nora.drivers.snmp_pmp450i.band_plan import _is_band_crossing
 from nora.drivers.snmp_pmp450i.subscribers import (
     fetch_sm_table,
 )
@@ -126,6 +127,15 @@ class MigrationResult(BaseModel):
     device_id: str
     dry_run: bool = False
     would_set: list[tuple[str, str | int | float]] = []
+    # WU-C (feat/multi-community-band-reboot) — band-crossing flag.
+    # ``True`` when the migration crosses regulatory bands
+    # (5.x ↔ 4.9 GHz); the orchestrator MUST mint a second HITL
+    # token and invoke ``snmp_reboot_radio`` after a successful
+    # migration. ``False`` for same-band sub-channel changes
+    # (5.7 → 5.8 GHz) where the 25.x MIB DESCRIPTION confirms no
+    # reboot is required (per ``radioFreqCarrier``: "As of release
+    # 16.1, this OID no longer requires reboot to take affect").
+    band_crossing: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -408,6 +418,28 @@ def _resolve_sm_device(driver: Any, luid: str) -> Any | None:
 # ---------------------------------------------------------------------------
 # Public seam — overridable for tests.
 # ---------------------------------------------------------------------------
+
+
+def _band_crossing_from_prior(
+    prior_carrier: Any,
+    target_mhz: float,
+) -> bool:
+    """Defensive helper — convert prior-carrier value to band-crossing flag.
+
+    The runtime layer reads ``migratePriorCarrierFrequency`` (kHz)
+    before the SET frame; on firmware ≥ 16.1 the read normally
+    succeeds and returns an integer. On a non-numeric value (legacy
+    firmware / fake client / mid-reboot) we conservatively return
+    False — the runtime layer would consult ``radioFrequencyBand``
+    for the authoritative vote in production. This is a fail-safe
+    choice: a False negative means we do NOT mint a second HITL
+    token for the reboot, which is the cheaper mistake.
+    """
+    try:
+        prior_mhz = float(prior_carrier) / 1000.0
+    except (TypeError, ValueError):
+        return False
+    return _is_band_crossing(prior_mhz, target_mhz)
 
 
 def migrate_subscriber(
@@ -780,6 +812,17 @@ def fetch_migrate(
             device_id=str(getattr(device, "host", device_id)),
             dry_run=dry_run,
             would_set=would_set,
+            # WU-C band-crossing flag — fires on a confirmed cross-band
+            # move (5.x ↔ 4.9). The prior_carrier read returns kHz;
+            # convert to MHz for the table-driven detector. On a
+            # non-numeric read (e.g. legacy firmware / fake client)
+            # we conservatively return False — the runtime layer
+            # would consult ``radioFrequencyBand`` OID for the
+            # authoritative vote in production.
+            band_crossing=_band_crossing_from_prior(
+                prior_carrier,
+                float(target_frequency_mhz),
+            ),
         ).model_dump(mode="json")
     finally:
         try:

@@ -207,7 +207,7 @@ def _boot_server(
 # ---------------------------------------------------------------------------
 
 
-def test_subprocess_responds_to_tools_list_with_thirteen_tools(
+def test_subprocess_responds_to_tools_list_with_fourteen_tools(
     mcp_http_client: McpHttpClient,
 ) -> None:
     """A real MCP server exposes the thirteen-tool surface in `tools/list`.
@@ -238,6 +238,7 @@ def test_subprocess_responds_to_tools_list_with_thirteen_tools(
         "snmp_get_sm_detailed_diagnostics",
         "snmp_run_spectrum_analysis",
         "snmp_migrate_radio_frequency",
+        "snmp_reboot_radio",
         "search_intervention_history",
         "get_device_lifecycle_summary",
         "correlate_sector_interference",
@@ -245,7 +246,7 @@ def test_subprocess_responds_to_tools_list_with_thirteen_tools(
         "register_device",
         "hitl_mint_token",
     }
-    assert names == expected, f"Expected exactly the 13 thin tools; got {names}"
+    assert names == expected, f"Expected exactly the 14 thin tools; got {names}"
 
 
 def test_subprocess_emits_structured_startup_log_on_stderr(tmp_path: Path) -> None:

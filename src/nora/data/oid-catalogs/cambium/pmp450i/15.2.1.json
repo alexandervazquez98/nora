@@ -93,6 +93,10 @@
       "ssr",
       "modulationMode",
       "sysDescr"
+    ],
+    "snmp_reboot_radio": [
+      "reboot",
+      "rebootIfRequired"
     ]
   },
   "hmac_sha256": "043a3421a5fe148071e7e7df991c72a4ebb492f8554b7bee250d86cfcf1c705b",

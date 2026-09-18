@@ -23,8 +23,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SRC_DIR = PROJECT_ROOT / "src" / "nora"
 
 
-def test_server_exposes_exactly_thirteen_tools() -> None:
-    """The FastMCP instance exposes exactly 13 tools.
+def test_server_exposes_exactly_fourteen_tools() -> None:
+    """The FastMCP instance exposes exactly 14 tools.
 
     The thirteen tools are: 1 driver (`snmp_get_pmp450i_radio_metrics`)
     + 2 read-summary (`snmp_get_ap_summary`, `snmp_get_frame_utilization`)
@@ -41,7 +41,7 @@ def test_server_exposes_exactly_thirteen_tools() -> None:
 
     The surface grew from 5 → 7 (PR 2) → 9 (PR 3) → 11 (PR 4) → 12 (PR
     `2026-09-15-register-device-mcp`) → 13 (WU-4 / PR #44 follow-up).
-    Renamed from ``test_server_exposes_exactly_twelve_tools``.
+    Renamed from ``test_server_exposes_exactly_thirteen_tools``.
     """
     import asyncio
 
@@ -60,6 +60,7 @@ def test_server_exposes_exactly_thirteen_tools() -> None:
         "snmp_get_sm_detailed_diagnostics",
         "snmp_run_spectrum_analysis",
         "snmp_migrate_radio_frequency",
+        "snmp_reboot_radio",
         "search_intervention_history",
         "get_device_lifecycle_summary",
         "correlate_sector_interference",
@@ -68,18 +69,18 @@ def test_server_exposes_exactly_thirteen_tools() -> None:
         "hitl_mint_token",
     }
     assert names == expected, (
-        f"Expected exactly 13 tools; got {sorted(names)} "
+        f"Expected exactly 14 tools; got {sorted(names)} "
         f"(missing: {sorted(expected - names)}, extra: {sorted(names - expected)})"
     )
 
 
-def test_server_exposes_exactly_thirteen_tools_alias_for_eleven_legacy() -> None:
+def test_server_exposes_exactly_fourteen_tools_alias_for_eleven_legacy() -> None:
     """Back-compat alias — old callers referencing the prior tool-count name keep working.
 
     The test name was renamed through several phases
     (``test_server_exposes_exactly_eleven_tools`` →
     ``test_server_exposes_exactly_twelve_tools`` →
-    ``test_server_exposes_exactly_thirteen_tools``). This alias test
+    ``test_server_exposes_exactly_fourteen_tools``). This alias test
     exists so a stray import / fixture that references the legacy
     name fails loudly with a clear message rather than silently
     losing the check.
@@ -438,11 +439,11 @@ def test_mcp_tool_wrapper_delegates_to_pure_library_function(tmp_path: Path) -> 
 
 
 def test_mcp_instance_exposes_all_thirteen_tools() -> None:  # noqa: F811 — alias kept for history
-    """Deprecated alias: use `test_server_exposes_exactly_thirteen_tools`.
+    """Deprecated alias: use `test_server_exposes_exactly_fourteen_tools`.
 
     Post-thin-split + writer + slice 2 + slice 3 + slice 4 (spectrum
     + HITL-gated migration) + `register_device` (issue #42) +
-    `hitl_mint_token` (WU-4 / PR #44): exactly 13 tools. This alias
+    `hitl_mint_token` (WU-4 / PR #44): exactly 14 tools. This alias
     test exists so any accidentally re-added legacy tool fails the
     test loudly.
     """
@@ -463,6 +464,7 @@ def test_mcp_instance_exposes_all_thirteen_tools() -> None:  # noqa: F811 — al
         "snmp_get_sm_detailed_diagnostics",
         "snmp_run_spectrum_analysis",
         "snmp_migrate_radio_frequency",
+        "snmp_reboot_radio",
         "search_intervention_history",
         "get_device_lifecycle_summary",
         "correlate_sector_interference",
@@ -470,7 +472,7 @@ def test_mcp_instance_exposes_all_thirteen_tools() -> None:  # noqa: F811 — al
         "register_device",
         "hitl_mint_token",
     }
-    assert names == expected, f"Expected exactly 13 tools after WU-4; got: {sorted(names)}"
+    assert names == expected, f"Expected exactly 14 tools after WU-4 + WU-C; got: {sorted(names)}"
 
 
 def test_free_text_fields_in_search_output_sanitized_via_mcp_wrapper(tmp_path: Path) -> None:

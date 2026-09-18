@@ -134,6 +134,12 @@ TOOLS_V1: dict[str, list[str]] = {
         "modulationMode",
         "sysDescr",
     ],
+    # WU-C (feat/multi-community-band-reboot) — snmp_reboot_radio tool.
+    # Reads rebootIfRequired first; emits SET on reboot on confirmation.
+    "snmp_reboot_radio": [
+        "reboot",
+        "rebootIfRequired",
+    ],
 }
 
 
