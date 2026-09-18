@@ -10,6 +10,11 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import os
+import socket
+import subprocess
+import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -247,3 +252,219 @@ def sample_inventory(tmp_path: Path) -> Path:
     path = tmp_path / "devices.yaml"
     path.write_text(yaml.safe_dump(payload))
     return path
+
+
+# ---------------------------------------------------------------------------
+# Shared HTTP MCP server (one per pytest-xdist worker)
+# ---------------------------------------------------------------------------
+#
+# WU-#1a (test-perf follow-up): convert tool-surface integration tests from
+# stdio subprocess boots to a shared HTTP MCP server so each test only pays
+# the JSON-RPC round-trip, not the full Python interpreter + nora boot.
+# pytest-xdist gives each worker its own process; with `scope="session"` plus
+# the `worker_id` parameter, each worker boots exactly one HTTP server on a
+# free OS-allocated port. Non-xdist runs (`worker_id == "master"`) also get
+# a single server, so the fixture is transparent across modes.
+#
+# Stdio-specific tests (`test_subprocess_keeps_stdout_reserved_for_jsonrpc`,
+# `test_subprocess_emits_structured_startup_log_on_stderr`, the
+# `test_subprocess_*` family that asserts on stderr framing) MUST stay on
+# stdio; this fixture is only for tests whose assertions are transport-
+# agnostic tool-surface checks.
+
+
+class McpHttpClient:
+    """JSON-RPC over HTTP MCP, with auto-managed `Mcp-Session-Id` header.
+
+    Each instance carries its own session; multiple clients against the same
+    server do NOT share state, so concurrent tests on different workers (or
+    serial tests within one worker) are isolated.
+    """
+
+    def __init__(self, base_url: str) -> None:
+        self._base_url = base_url
+        self._session_id: str | None = None
+
+    def request(
+        self,
+        method: str,
+        params: dict[str, Any] | None = None,
+        *,
+        id: int | None = None,
+    ) -> dict[str, Any]:
+        import httpx
+
+        frame: dict[str, Any] = {"jsonrpc": "2.0", "method": method}
+        if id is not None:
+            frame["id"] = id
+        if params is not None:
+            frame["params"] = params
+
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+        }
+        if self._session_id is not None:
+            headers["Mcp-Session-Id"] = self._session_id
+
+        response = httpx.post(self._base_url, json=frame, headers=headers, timeout=5.0)
+        if response.status_code not in (200, 202):
+            raise RuntimeError(f"HTTP {response.status_code} for {method}: {response.text!r}")
+
+        # Streamable-HTTP may reply with application/json OR text/event-stream.
+        # Notifications (`method` without `id`) get 202 Accepted with empty
+        # body — FastMCP's spec-compliant shape. Handle empty body first to
+        # avoid `response.json()` blowing up on `b""`.
+        if not response.content:
+            body: dict[str, Any] = {}
+        elif response.headers.get("content-type", "").startswith("application/json"):
+            body = response.json()
+        else:
+            data_line = next(
+                (ln for ln in response.text.splitlines() if ln.startswith("data:")),
+                None,
+            )
+            if data_line is None:
+                raise RuntimeError(f"SSE response without data: line; got: {response.text!r}")
+            body = json.loads(data_line.split(":", 1)[1].strip())
+
+        # Capture the server-assigned session ID for subsequent calls.
+        if "Mcp-Session-Id" in response.headers:
+            self._session_id = response.headers["Mcp-Session-Id"]
+
+        return body
+
+    def initialize(self) -> dict[str, Any]:
+        return self.request(
+            "initialize",
+            {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "pytest", "version": "0.0.0"},
+            },
+            id=1,
+        )
+
+    def initialized(self) -> None:
+        # Notification (no `id`); FastMCP returns 202 Accepted with empty body.
+        self.request("notifications/initialized")
+
+    def tools_list(self, *, id: int = 2) -> dict[str, Any]:
+        return self.request("tools/list", id=id)
+
+
+def _free_port() -> int:
+    """Ask the OS for an unused TCP port on 127.0.0.1."""
+    s = socket.socket()
+    try:
+        s.bind(("127.0.0.1", 0))
+        return int(s.getsockname()[1])
+    finally:
+        s.close()
+
+
+@pytest.fixture(scope="session")
+def mcp_http_server(
+    worker_id: str, tmp_path_factory: pytest.TempPathFactory
+) -> Iterator[tuple[str, int, subprocess.Popen[bytes]]]:
+    """One MCP HTTP server per pytest-xdist worker; free port per worker.
+
+    Yields `(host, port, proc)` so tests can build URLs and inspect
+    `proc.stderr` if needed. Stderr is captured but not exposed via HTTP,
+    so tests that assert on stderr framing MUST keep using stdio.
+    """
+    from nora.data import BUILTIN_BASELINE_SIGNING_KEY
+
+    host = "127.0.0.1"
+    port = _free_port()
+    # Per-worker tmp dir so parallel workers don't collide on catalogs /
+    # devices.yaml. pytest's `tmp_path_factory.mktemp` is itself safe under
+    # xdist; we just disambiguate the prefix per worker.
+    tmp = tmp_path_factory.mktemp(f"mcp_http_{worker_id}")
+    (tmp / "catalogs").mkdir(exist_ok=True)
+    (tmp / "devices.yaml").write_text("# empty hermetic inventory\n")
+
+    project_root = Path(__file__).resolve().parent.parent
+    venv_py = project_root / ".venv" / "bin" / "python"
+    if not venv_py.exists():
+        pytest.skip("venv python not present")
+    py = str(venv_py)
+
+    env = {
+        **os.environ,
+        "NORA_OID_CATALOG_SIGNING_KEY": BUILTIN_BASELINE_SIGNING_KEY,
+        "NORA_OID_CATALOGS_PATH": str(tmp / "catalogs"),
+        "NORA_DEVICES_INVENTORY_PATH": str(tmp / "devices.yaml"),
+        "NORA_MCP_TRANSPORT": "http",
+        "NORA_MCP_HOST": host,
+        "NORA_MCP_PORT": str(port),
+        "NORA_MCP_PATH": "/mcp",
+    }
+
+    proc = subprocess.Popen(
+        [
+            py,
+            "-m",
+            "nora.cli",
+            "--transport=http",
+            f"--host={host}",
+            f"--port={port}",
+            "--path=/mcp",
+        ],
+        cwd=str(project_root),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        bufsize=1,
+    )
+
+    # Wait up to 15s for the socket to bind. Polling `socket.create_connection`
+    # is faster and more reliable than parsing the boot log line.
+    deadline = time.monotonic() + 15.0
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            err = b""
+            try:
+                assert proc.stderr is not None
+                err = proc.stderr.read() or b""
+            except Exception:
+                pass
+            pytest.fail(
+                f"nora-mcp exited before bind (rc={proc.returncode}); "
+                f"stderr: {err.decode(errors='replace')!r}"
+            )
+        try:
+            with socket.create_connection((host, port), timeout=0.2):
+                break
+        except OSError:
+            time.sleep(0.1)
+    else:
+        proc.kill()
+        proc.wait()
+        pytest.fail(f"nora-mcp never bound {host}:{port} within 15s")
+
+    try:
+        yield (host, port, proc)
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+        # Drain remaining stderr so the next stream read doesn't emit a
+        # broken-pipe warning at the parent test runner.
+        try:
+            assert proc.stderr is not None
+            proc.stderr.read()
+        except Exception:
+            pass
+
+
+@pytest.fixture
+def mcp_http_client(mcp_http_server: tuple[str, int, subprocess.Popen[bytes]]) -> McpHttpClient:
+    """Per-test JSON-RPC client over the shared HTTP MCP server."""
+    host, port, _proc = mcp_http_server
+    return McpHttpClient(f"http://{host}:{port}/mcp")

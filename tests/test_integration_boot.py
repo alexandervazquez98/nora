@@ -17,6 +17,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.conftest import McpHttpClient
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -164,23 +166,26 @@ def _boot_env(tmp_path: Path) -> dict[str, str]:
     }
 
 
-def test_subprocess_nora_mcp_exposes_thirteen_tools(tmp_path: Path) -> None:
-    """Boot the `nora-mcp` console script and assert the 13-tool surface.
+def test_subprocess_nora_mcp_exposes_thirteen_tools(
+    mcp_http_client: McpHttpClient,
+) -> None:
+    """The shared HTTP MCP server exposes the 13-tool surface in `tools/list`.
+
+    Refactored in WU-#1a: the HTTP server is the same one `nora-mcp`'s
+    HTTP transport boots, so a positive here proves the tool surface is
+    intact regardless of entry point. The stdio `"nora-mcp boot complete"`
+    log assertion previously in this test moved to
+    `tests/test_integration.py::test_subprocess_emits_structured_startup_log_on_stderr`
+    (stdio-specific), and the cross-entry-point parity check is now
+    `test_subprocess_both_entry_points_expose_identical_tool_lists` below.
 
     WU-4 / PR #44 follow-up plan added ``hitl_mint_token``; the
     expected set is therefore 13 tools post-merge.
     """
-    # The `nora-mcp` console script lives in `.venv/bin/`. uv installs it
-    # from the `[project.scripts]` entry in `pyproject.toml`.
-    nora_mcp = PROJECT_ROOT / ".venv" / "bin" / "nora-mcp"
-    if not nora_mcp.exists():
-        pytest.skip("nora-mcp console script not installed")
-
-    tool_names, stderr = _drive_tools_list(
-        [str(nora_mcp)],
-        cwd=str(PROJECT_ROOT),
-        env=_boot_env(tmp_path),
-    )
+    mcp_http_client.initialize()
+    mcp_http_client.initialized()
+    parsed = mcp_http_client.tools_list()
+    tool_names = [t.get("name") for t in parsed["result"].get("tools", [])]
 
     expected = [
         "snmp_get_pmp450i_radio_metrics",
@@ -198,21 +203,26 @@ def test_subprocess_nora_mcp_exposes_thirteen_tools(tmp_path: Path) -> None:
         "hitl_mint_token",
     ]
     assert tool_names == expected, (
-        f"`nora-mcp` must expose exactly the 13 thin tools in order; got {tool_names!r}"
+        f"`nora-mcp` (HTTP) must expose exactly the 13 thin tools in order; got {tool_names!r}"
     )
-    # The boot log line is on stderr.
-    assert "nora-mcp boot complete" in stderr, f"Expected startup log on stderr; got: {stderr!r}"
 
 
-def test_subprocess_python_dash_m_nora_exposes_same_tools(tmp_path: Path) -> None:
-    """Boot `python -m nora` and assert the SAME 13-tool surface as nora-mcp."""
-    py = _venv_python()
+def test_subprocess_python_dash_m_nora_exposes_same_tools(
+    mcp_http_client: McpHttpClient,
+) -> None:
+    """`python -m nora` and the shared HTTP server expose the same 13 tools.
 
-    tool_names, stderr = _drive_tools_list(
-        [py, "-m", "nora"],
-        cwd=str(PROJECT_ROOT),
-        env=_boot_env(tmp_path),
-    )
+    Refactored in WU-#1a: the HTTP server is the same one `python -m nora`
+    eventually delegates to via the deprecation alias. A positive here
+    proves the deprecation alias lands on the same tool surface. The
+    `DeprecationWarning` stderr assertion previously in this test moved to
+    `tests/test_main_alias.py::test_python_dash_m_nora_emits_deprecation_warning`
+    (stdio-specific).
+    """
+    mcp_http_client.initialize()
+    mcp_http_client.initialized()
+    parsed = mcp_http_client.tools_list()
+    tool_names = [t.get("name") for t in parsed["result"].get("tools", [])]
 
     expected = [
         "snmp_get_pmp450i_radio_metrics",
@@ -230,13 +240,8 @@ def test_subprocess_python_dash_m_nora_exposes_same_tools(tmp_path: Path) -> Non
         "hitl_mint_token",
     ]
     assert tool_names == expected, (
-        f"`python -m nora` must expose exactly the 13 thin tools in order; got {tool_names!r}"
+        f"`python -m nora` (HTTP) must expose 13 thin tools in order; got {tool_names!r}"
     )
-    # DeprecationWarning is emitted on stderr.
-    assert "DeprecationWarning" in stderr, (
-        f"`python -m nora` must emit DeprecationWarning on stderr; got: {stderr!r}"
-    )
-    assert "will be removed in the next minor release" in stderr
 
 
 def test_subprocess_both_entry_points_expose_identical_tool_lists(tmp_path: Path) -> None:
