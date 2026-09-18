@@ -120,9 +120,9 @@ conocidos.
    un único subprocess boot entre `test_integration.py`, `test_integration_boot.py`,
    `test_server.py`, `test_main_alias.py`. Ahorro estimado: 30-40 s.
 
-2. **`test(installer): git clone --depth=1`** — `test_bootstrap` y
-   `test_verify_install` hacen clone real del repo. Con `--depth=1` bajan
-   ~3-5 s.
+2. **`test(installer): git clone --depth=1`** — **YA IMPLEMENTADO** desde
+   el commit `04f9588` (issue #22). `scripts/bootstrap.sh:241,244` ya usa
+   `--depth 1` en ambas invocaciones. Sin acción pendiente.
 
 3. **`test(http): session-scoped HTTP server fixture`** — `test_http_smoke`
    puede compartir server entre tests. Ahorro estimado: 2 s.
@@ -134,6 +134,26 @@ conocidos.
 5. **`test(perf): investigate -p no:cov -p no:hypothesis for dev loop`** —
    Explorar si se puede tener `addopts` distintos para dev vs CI. Trade-off:
    single-file ~0.4 s pero coverage solo disponible vía flag explícito.
+
+## Estado de avance (sesión 2026-09-18)
+
+- **WU-0** (`fix(toolchain-test)`): clear addopts en subprocess de coverage —
+  aplicado en commit `94a4d38`. El flag `--no-cov` del `addopts` del padre
+  envenenaba el `pytest --cov=nora` del subprocess; ahora se sobreescribe
+  con `-o "addopts=-q --strict-markers"`. Suite verde en este eje.
+
+- **WU-#4** (`test(perf)`): marker `no_xdist` para `test_bootstrap.py` (38
+  tests) y `test_http_transport_smoke.py` (2 tests) — aplicado en commit
+  `2105559`. `make test-fast` filtra `-m "not no_xdist"` y la suite baja
+  de 23-37 s con flake intermitente a 19.2 s verde estable. CI sequential
+  sigue corriendo los 40 tests marcados.
+
+- **WU-#2** (`test(installer)`): marcado como **YA IMPLEMENTADO** —
+  `bootstrap.sh` ya usa `--depth 1` desde el commit inicial. Sin acción
+  pendiente.
+
+- Pendientes: **WU-#1** (session-scoped MCP fixture, 30-40 s ahorro),
+  **WU-#3** (HTTP server fixture, 2 s), **WU-#5** (perfil dev/CI addopts).
 
 ## Estado del workspace
 
