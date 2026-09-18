@@ -27,9 +27,9 @@ PRIVATE_IPV4 = re.compile(
 
 
 def test_settings_has_eight_user_fields() -> None:
-    """After the thin split, `Settings.model_fields` has exactly 15 entries.
+    """After the thin split, `Settings.model_fields` has exactly 16 entries.
 
-    Fourteen user-settable fields plus the computed `loaded_from` = 15 total.
+    Fifteen user-settable fields plus the computed `loaded_from` = 16 total.
     The nine former LLM/journal fields MUST be gone.
 
     PR 4 (slice 4) extends the set with four HITL/maintenance-window
@@ -43,12 +43,16 @@ def test_settings_has_eight_user_fields() -> None:
     WU-4 / PR #44 follow-up extends the set with one more:
     ``nora_hitl_admin_enabled`` (gate for the `hitl_mint_token` MCP admin
     tool, default True per user decision 2026-09-17).
+
+    WU-A (feat/multi-community-band-reboot) extends the set with one more:
+    ``nora_preflight_community_validation`` (pre-flight community
+    validation gate, default True).
     """
     from nora.config import Settings
 
     fields = Settings.model_fields
-    assert len(fields) == 15, (
-        f"Expected 15 model fields (14 user + loaded_from); got {len(fields)}: {sorted(fields)}"
+    assert len(fields) == 16, (
+        f"Expected 16 model fields (15 user + loaded_from); got {len(fields)}: {sorted(fields)}"
     )
 
     forbidden = {

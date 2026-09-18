@@ -37,6 +37,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -250,7 +251,11 @@ def _mint_valid_token(operator_id: str = "tester") -> str:
     return json.dumps(token_obj.model_dump(mode="json"))
 
 
-def _settings_with_rollback_timeout(seconds: int) -> Settings:
+def _settings_with_rollback_timeout(
+    seconds: int,
+    *,
+    preflight_community_validation: bool = False,
+) -> Settings:
     from pydantic import SecretStr
 
     return Settings(
@@ -258,6 +263,11 @@ def _settings_with_rollback_timeout(seconds: int) -> Settings:
         _env_file_encoding=None,
         nora_hitl_rollback_timeout_seconds=seconds,
         nora_hitl_signing_key=SecretStr("test-snmp-migrate-hmac-key"),
+        # Legacy test fixtures (PR #44 slice 4) predate WU-A. The
+        # default is to opt them OUT of the pre-flight so the
+        # unchanged tests keep exercising the existing contract.
+        # WU-A's own tests (test_preflight_*) override this to True.
+        nora_preflight_community_validation=preflight_community_validation,
     )
 
 
@@ -1174,6 +1184,452 @@ def test_rollback_watchdog_start_and_cancel_round_trip() -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# WU-A (feat/multi-community-band-reboot) — pre-flight community
+# validation. The pre-flight runs BEFORE the HITL token gate so the
+# operator is never asked to mint an approval token for a migration
+# we already know will fail at the community-string level.
+#
+# Five scenarios from the feature doc:
+#   1. AP reachable + all SMs reachable -> pass (no CommunityValidationFailed)
+#   2. One SM unreachable -> DeviceUnreachable in report
+#   3. One SM wrong community -> InvalidCommunity in report
+#   4. SM not in inventory -> MISSING_INVENTORY_ENTRY
+#   5. Mix of failures -> all three error_classes surfaced
+# ---------------------------------------------------------------------------
+
+
+def _build_inventory_with_sms(
+    tmp_path: Path,
+    *,
+    ap_community: str = "change-me-v2c",
+    sm_luids: tuple[str, ...] = (),
+    sm_community: str = "change-me-v2c",
+) -> Inventory:
+    """Hermetic inventory with one AP plus N SMs (one per LUID)."""
+    devices: list[dict[str, Any]] = [
+        {
+            "device_id": "ap-7400-01",
+            "vendor": "cambium",
+            "model": "pmp450i",
+            "firmware": "15.2.1",
+            "host": "192.0.2.10",
+            "snmp_version": "v2c",
+            "community": ap_community,
+        },
+    ]
+    for idx, luid in enumerate(sm_luids, start=20):
+        devices.append(
+            {
+                "device_id": f"sm-7400-{luid}",
+                "vendor": "cambium",
+                "model": "pmp450i",
+                "firmware": "15.2.1",
+                "host": f"192.0.2.{idx}",
+                "snmp_version": "v2c",
+                "community": sm_community,
+            }
+        )
+    payload = {"devices": devices}
+    inv_path = tmp_path / "devices.yaml"
+    inv_path.write_text(yaml.safe_dump(payload))
+    return Inventory.from_yaml(inv_path)
+
+
+class _RoutedFakeSnmpClient:
+    """Fake client that routes sysDescr per host.
+
+    The WU-A pre-flight opens one client per SM (and one for the AP).
+    Each client must answer its own sysDescr GET — either with a
+    canned body on the success path or by raising a typed exception
+    on the failure path.
+    """
+
+    def __init__(
+        self,
+        *,
+        per_host_sysdescr: dict[str, str] | None = None,
+        per_host_raises: dict[str, type[BaseException]] | None = None,
+        default_sysdescr: str = "Cambium PMP 450i AP 15.2.1",
+    ) -> None:
+        self._per_host_sysdescr = per_host_sysdescr or {}
+        self._per_host_raises = per_host_raises or {}
+        self._default_sysdescr = default_sysdescr
+        self.get_calls: list[tuple[str, str]] = []  # (host, oid)
+
+    def get_oid(self, oid: str) -> str | int:
+        # The pre-flight calls get_oid with sysDescr; remember the
+        # host the call came from by inspecting ``self._current_host``.
+        host = getattr(self, "_current_host", "?")
+        self.get_calls.append((host, oid))
+        if host in self._per_host_raises:
+            raise self._per_host_raises[host](f"simulated failure for {host}")
+        if host in self._per_host_sysdescr:
+            return self._per_host_sysdescr[host]
+        return self._default_sysdescr
+
+    def walk(self, base_oid: str) -> list[tuple[str, str | int]]:
+        return []
+
+    def apply_oid(self, oid: str, value: str | int) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+
+def _routing_client_factory(routed: _RoutedFakeSnmpClient) -> Callable[[Any], Any]:
+    """Build a client factory that tags the fake with the device's host."""
+
+    def _factory(device: Any) -> Any:
+        # The fake tracks the current host via a transient attribute.
+        routed._current_host = str(getattr(device, "host", "?"))
+        return routed
+
+    return _factory
+
+
+def test_preflight_passes_when_ap_and_all_sms_reachable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """WU-A scenario 1: AP reachable + all SMs reachable -> pre-flight passes.
+
+    The migration proceeds; ``CommunityValidationFailed`` is NOT
+    raised. The HITL gate then fires (token gate is preserved).
+    """
+    from nora.drivers.snmp_pmp450i import migrate as migrate_mod
+
+    inv = _build_inventory_with_sms(tmp_path, sm_luids=("001", "002"))
+    registry = _build_catalog(firmware="15.2.1")
+    routed = _RoutedFakeSnmpClient(
+        per_host_sysdescr={
+            "192.0.2.10": "Cambium PMP 450i AP 15.2.1",
+            "192.0.2.20": "Cambium PMP 450i SM 001 15.2.1",
+            "192.0.2.21": "Cambium PMP 450i SM 002 15.2.1",
+        },
+    )
+    settings = _settings_with_rollback_timeout(60, preflight_community_validation=True)
+    driver = _build_driver(
+        inventory=inv,
+        registry=registry,
+        canned=routed,
+        settings=settings,
+    )
+    # Override client_factory so the fake tracks the current host.
+    monkeypatch.setattr(driver, "_client_factory", _routing_client_factory(routed))
+
+    # SM-table subtree reports both LUIDs as ONLINE_ACTIVE.
+    monkeypatch.setattr(
+        "nora.drivers.snmp_pmp450i.subscribers.search_intervention_history",
+        lambda *args, **kwargs: [],
+    )
+    monkeypatch.setattr(
+        migrate_mod,
+        "fetch_sm_table",
+        lambda **kw: _fake_sm_summary(online_luids=("001", "002"), degraded_luids=()),
+    )
+
+    # Stub the migration downstream so the test does not exercise
+    # the full SET path.
+    monkeypatch.setattr(migrate_mod, "_start_rollback_watchdog", lambda **kw: None)
+    monkeypatch.setattr(migrate_mod, "_cancel_rollback_watchdog", lambda *a, **kw: None)
+    monkeypatch.setattr(migrate_mod, "_wait_for_management_reachability", lambda **kw: True)
+    monkeypatch.setattr(migrate_mod, "save_intervention_record", lambda *a, **kw: {"status": "OK"})
+
+    valid_token = _mint_valid_token()
+    result = migrate_mod.fetch_migrate(
+        driver=driver,
+        device_id="ap-7400-01",
+        approval_token=valid_token,
+        target_frequency_mhz=5800.0,
+        settings=settings,
+    )
+    # No CommunityValidationFailed was raised; the pre-flight succeeded.
+    assert "rolled_back" in result, f"Expected a MigrationResult-shaped dict; got {result!r}"
+    assert result["rolled_back"] is False
+
+
+def test_preflight_raises_when_one_sm_unreachable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """WU-A scenario 2: one SM unreachable -> DeviceUnreachable in report."""
+    from nora.drivers.exceptions import CommunityValidationFailed
+    from nora.drivers.snmp_pmp450i import migrate as migrate_mod
+
+    inv = _build_inventory_with_sms(tmp_path, sm_luids=("001", "002"))
+    registry = _build_catalog(firmware="15.2.1")
+
+    # SM at 192.0.2.20 raises OSError (simulating unreachable).
+    routed = _RoutedFakeSnmpClient(
+        per_host_sysdescr={
+            "192.0.2.21": "Cambium PMP 450i SM 002 15.2.1",
+        },
+        per_host_raises={
+            "192.0.2.20": OSError,
+        },
+    )
+    settings = _settings_with_rollback_timeout(60, preflight_community_validation=True)
+    driver = _build_driver(inventory=inv, registry=registry, canned=routed, settings=settings)
+    monkeypatch.setattr(driver, "_client_factory", _routing_client_factory(routed))
+    monkeypatch.setattr(
+        "nora.drivers.snmp_pmp450i.subscribers.search_intervention_history",
+        lambda *args, **kwargs: [],
+    )
+    monkeypatch.setattr(
+        migrate_mod,
+        "fetch_sm_table",
+        lambda **kw: _fake_sm_summary(online_luids=("001", "002"), degraded_luids=()),
+    )
+
+    with pytest.raises(CommunityValidationFailed) as exc_info:
+        migrate_mod.fetch_migrate(
+            driver=driver,
+            device_id="ap-7400-01",
+            approval_token=_mint_valid_token(),
+            target_frequency_mhz=5800.0,
+            settings=settings,
+        )
+
+    report = exc_info.value.report
+    assert report.ap_reachable is True
+    failed = [r for r in report.sm_results if r.luid == "001"]
+    assert len(failed) == 1
+    assert failed[0].error_class == "DeviceUnreachable"
+    assert failed[0].host == "192.0.2.20"
+
+
+def test_preflight_raises_when_one_sm_wrong_community(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """WU-A scenario 3: one SM wrong community -> InvalidCommunity in report."""
+    import puresnmp.exc
+
+    from nora.drivers.exceptions import CommunityValidationFailed
+    from nora.drivers.snmp_pmp450i import migrate as migrate_mod
+
+    inv = _build_inventory_with_sms(tmp_path, sm_luids=("001", "002"))
+    registry = _build_catalog(firmware="15.2.1")
+    routed = _RoutedFakeSnmpClient(
+        per_host_raises={
+            "192.0.2.20": puresnmp.exc.SnmpError,
+        },
+        per_host_sysdescr={
+            "192.0.2.21": "Cambium PMP 450i SM 002 15.2.1",
+        },
+    )
+    settings = _settings_with_rollback_timeout(60, preflight_community_validation=True)
+    driver = _build_driver(inventory=inv, registry=registry, canned=routed, settings=settings)
+    monkeypatch.setattr(driver, "_client_factory", _routing_client_factory(routed))
+    monkeypatch.setattr(
+        "nora.drivers.snmp_pmp450i.subscribers.search_intervention_history",
+        lambda *args, **kwargs: [],
+    )
+    monkeypatch.setattr(
+        migrate_mod,
+        "fetch_sm_table",
+        lambda **kw: _fake_sm_summary(online_luids=("001", "002"), degraded_luids=()),
+    )
+
+    with pytest.raises(CommunityValidationFailed) as exc_info:
+        migrate_mod.fetch_migrate(
+            driver=driver,
+            device_id="ap-7400-01",
+            approval_token=_mint_valid_token(),
+            target_frequency_mhz=5800.0,
+            settings=settings,
+        )
+
+    report = exc_info.value.report
+    failed = [r for r in report.sm_results if r.luid == "001"]
+    assert len(failed) == 1
+    assert failed[0].error_class == "InvalidCommunity"
+    assert failed[0].host == "192.0.2.20"
+
+
+def test_preflight_raises_when_sm_not_in_inventory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """WU-A scenario 4: SM missing from inventory -> MISSING_INVENTORY_ENTRY."""
+    from nora.drivers.exceptions import CommunityValidationFailed
+    from nora.drivers.snmp_pmp450i import migrate as migrate_mod
+
+    # Only SM 001 in inventory; SM 002 is absent.
+    inv = _build_inventory_with_sms(tmp_path, sm_luids=("001",))
+    registry = _build_catalog(firmware="15.2.1")
+    routed = _RoutedFakeSnmpClient(
+        per_host_sysdescr={
+            "192.0.2.20": "Cambium PMP 450i SM 001 15.2.1",
+        },
+    )
+    settings = _settings_with_rollback_timeout(60, preflight_community_validation=True)
+    driver = _build_driver(inventory=inv, registry=registry, canned=routed, settings=settings)
+    monkeypatch.setattr(driver, "_client_factory", _routing_client_factory(routed))
+    monkeypatch.setattr(
+        "nora.drivers.snmp_pmp450i.subscribers.search_intervention_history",
+        lambda *args, **kwargs: [],
+    )
+    monkeypatch.setattr(
+        migrate_mod,
+        "fetch_sm_table",
+        lambda **kw: _fake_sm_summary(online_luids=("001", "002"), degraded_luids=()),
+    )
+
+    with pytest.raises(CommunityValidationFailed) as exc_info:
+        migrate_mod.fetch_migrate(
+            driver=driver,
+            device_id="ap-7400-01",
+            approval_token=_mint_valid_token(),
+            target_frequency_mhz=5800.0,
+            settings=settings,
+        )
+
+    report = exc_info.value.report
+    assert "002" in report.missing_inventory_luids
+    failed = [r for r in report.sm_results if r.luid == "002"]
+    assert len(failed) == 1
+    assert failed[0].error_class == "MISSING_INVENTORY_ENTRY"
+
+
+def test_preflight_raises_when_ap_unreachable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """WU-A edge case: AP unreachable -> pre-flight fails fast, no SM probes.
+
+    The orchestrator must see ``ap_reachable=False`` and the absence
+    of any SM probe so the operator can investigate the AP-side
+    problem first.
+    """
+    import puresnmp.exc
+
+    from nora.drivers.exceptions import CommunityValidationFailed
+    from nora.drivers.snmp_pmp450i import migrate as migrate_mod
+
+    inv = _build_inventory_with_sms(tmp_path, sm_luids=("001",))
+    registry = _build_catalog(firmware="15.2.1")
+    routed = _RoutedFakeSnmpClient(
+        per_host_raises={
+            "192.0.2.10": puresnmp.exc.SnmpError,
+        },
+    )
+    settings = _settings_with_rollback_timeout(60, preflight_community_validation=True)
+    driver = _build_driver(inventory=inv, registry=registry, canned=routed, settings=settings)
+    monkeypatch.setattr(driver, "_client_factory", _routing_client_factory(routed))
+    monkeypatch.setattr(
+        "nora.drivers.snmp_pmp450i.subscribers.search_intervention_history",
+        lambda *args, **kwargs: [],
+    )
+    monkeypatch.setattr(
+        migrate_mod,
+        "fetch_sm_table",
+        lambda **kw: _fake_sm_summary(online_luids=("001",), degraded_luids=()),
+    )
+
+    with pytest.raises(CommunityValidationFailed) as exc_info:
+        migrate_mod.fetch_migrate(
+            driver=driver,
+            device_id="ap-7400-01",
+            approval_token=_mint_valid_token(),
+            target_frequency_mhz=5800.0,
+            settings=settings,
+        )
+
+    report = exc_info.value.report
+    assert report.ap_reachable is False
+    assert report.sm_results == [], (
+        "AP unreachable: SM probes MUST be skipped to avoid flooding a broken network"
+    )
+
+
+def test_preflight_does_not_consume_hitl_token_on_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """WU-A decision: pre-flight fails BEFORE the HITL gate.
+
+    The operator does not pay for an approval token on a known-bad
+    migration.
+    """
+    import puresnmp.exc
+
+    from nora.drivers.exceptions import CommunityValidationFailed
+    from nora.drivers.snmp_pmp450i import migrate as migrate_mod
+    from nora.hitl import tokens as hitl_tokens_mod
+
+    inv = _build_inventory_with_sms(tmp_path, sm_luids=("001",))
+    registry = _build_catalog(firmware="15.2.1")
+    routed = _RoutedFakeSnmpClient(
+        per_host_raises={"192.0.2.20": puresnmp.exc.SnmpError},
+    )
+    settings = _settings_with_rollback_timeout(60, preflight_community_validation=True)
+    driver = _build_driver(inventory=inv, registry=registry, canned=routed, settings=settings)
+    monkeypatch.setattr(driver, "_client_factory", _routing_client_factory(routed))
+    monkeypatch.setattr(
+        "nora.drivers.snmp_pmp450i.subscribers.search_intervention_history",
+        lambda *args, **kwargs: [],
+    )
+    monkeypatch.setattr(
+        migrate_mod,
+        "fetch_sm_table",
+        lambda **kw: _fake_sm_summary(online_luids=("001",), degraded_luids=()),
+    )
+
+    verify_calls: list[Any] = []
+
+    def spy_verify(token: Any, **kw: Any) -> None:
+        verify_calls.append(token)
+        # The token would be valid here; the gate fires if reached.
+        return None
+
+    monkeypatch.setattr(hitl_tokens_mod, "verify_approval_token", spy_verify)
+    monkeypatch.setattr(migrate_mod, "verify_approval_token", spy_verify)
+
+    with pytest.raises(CommunityValidationFailed):
+        migrate_mod.fetch_migrate(
+            driver=driver,
+            device_id="ap-7400-01",
+            approval_token=_mint_valid_token(),
+            target_frequency_mhz=5800.0,
+            settings=settings,
+        )
+
+    # Crucial: the HITL verifier was NOT called because the pre-flight
+    # failed first.
+    assert verify_calls == [], (
+        f"HITL token verifier MUST NOT run when pre-flight fails; got {verify_calls!r}"
+    )
+
+
+def _fake_sm_summary(*, online_luids: tuple[str, ...], degraded_luids: tuple[str, ...]) -> Any:
+    """Build a minimal ``SubscriberSummary``-shaped namespace for pre-flight tests.
+
+    The WU-A pre-flight only reads ``.online_active`` and
+    ``.active_degraded``; we model the rest as empty to keep the
+    fake hermetic.
+    """
+    from nora.drivers.snmp_pmp450i.subscribers import SubscriberRecord, SubscriberSummary
+
+    online = [
+        SubscriberRecord(
+            luid=luid, session_uptime=86400, cinr_db=25, link_status="LINKED", modulation="8X"
+        )
+        for luid in online_luids
+    ]
+    degraded = [
+        SubscriberRecord(
+            luid=luid, session_uptime=43200, cinr_db=12, link_status="LINKED", modulation="2X"
+        )
+        for luid in degraded_luids
+    ]
+    return SubscriberSummary(
+        target_ip="192.0.2.10",
+        online_active=online,
+        active_degraded=degraded,
+        pre_existing_offline=[],
+        baseline_size=len(online) + len(degraded),
+        pre_existing_offline_count=0,
+        fetched_at="2026-09-18T00:00:00+00:00",
+    )
+
+
 __all__ = [
     "test_migrate_requires_hitl_approval_token",
     "test_migrate_make_before_break_migrates_online_active_first",
@@ -1187,4 +1643,12 @@ __all__ = [
     "test_fetch_migrate_real_set_still_works_via_apply_oid",
     "test_migrate_subscriber_default_logs_and_returns_ok",
     "test_rollback_watchdog_start_and_cancel_round_trip",
+    # WU-A (feat/multi-community-band-reboot) — pre-flight community
+    # validation scenarios. All six tests pin the WU-A contract.
+    "test_preflight_passes_when_ap_and_all_sms_reachable",
+    "test_preflight_raises_when_one_sm_unreachable",
+    "test_preflight_raises_when_one_sm_wrong_community",
+    "test_preflight_raises_when_sm_not_in_inventory",
+    "test_preflight_raises_when_ap_unreachable",
+    "test_preflight_does_not_consume_hitl_token_on_failure",
 ]

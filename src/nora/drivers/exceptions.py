@@ -243,6 +243,33 @@ class InvalidHostError(DriverError):
         self.host = host
 
 
+class CommunityValidationFailed(DriverError):
+    """Raised when the WU-A pre-flight discovers unreachable SMs or rejected communities.
+
+    Feature `feat/multi-community-band-reboot` (ODD 2026-09-18), WU-A:
+    ``snmp_migrate_radio_frequency`` runs a pre-flight community
+    validation against every SM in the migration candidate set BEFORE
+    the HITL gate. The pre-flight issues one cheap ``sysDescr`` GET
+    per SM (RFC 1213 OID ``1.3.6.1.2.1.1.1.0``) using that SM's own
+    credentials. Any failure (SM unreachable, community rejected,
+    SM missing from inventory) is folded into a typed
+    :class:`nora.drivers.snmp_pmp450i.migrate.PreFlightReport` and
+    raised as this exception so the orchestrator can prompt the
+    operator to confirm or supply a different community before the
+    HITL token is minted.
+
+    The exception carries the full :class:`PreFlightReport` via the
+    ``.report`` attribute so the MCP tool boundary can serialise the
+    structured report to the caller. Free-text fields (the
+    ``error_message`` per SM) carry the operator's typed community
+    string verbatim; the tool boundary sanitises per Zero-Leakage.
+    """
+
+    def __init__(self, report: object) -> None:
+        super().__init__(f"community pre-flight failed: {report}")
+        self.report = report
+
+
 __all__ = [
     "DriverError",
     "RefusesWriteError",
@@ -263,4 +290,7 @@ __all__ = [
     "DeviceUnreachable",
     "InvalidCommunity",
     "InvalidHostError",
+    # WU-A (feat/multi-community-band-reboot) — typed error for the
+    # pre-flight community validation in `snmp_migrate_radio_frequency`.
+    "CommunityValidationFailed",
 ]

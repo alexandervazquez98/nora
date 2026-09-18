@@ -89,6 +89,15 @@ class Settings(BaseSettings):
     # Watchdog With Timeout"; tests override to a fraction of a second
     # for fast execution.
     nora_hitl_rollback_timeout_seconds: int = 300
+    # WU-A (feat/multi-community-band-reboot): pre-flight community
+    # validation. Default True — ``snmp_migrate_radio_frequency``
+    # issues one sysDescr GET against every candidate SM using its
+    # own inventory credentials BEFORE the HITL gate. Operators (and
+    # the legacy test fixtures that pre-date WU-A) can opt out with
+    # ``NORA_PREFLIGHT_COMMUNITY_VALIDATION=false``; the catalog
+    # rollout plan recommends keeping it on so BAJ01-style multi-
+    # community sectors surface a typed report instead of aborting.
+    nora_preflight_community_validation: bool = True
     # HITL token TTL (commit 3). Default 900s (15 min); the operator
     # kill-switch sets ``NORA_HITL_TOKEN_TTL_SECONDS=0`` (read via
     # :func:`nora.config.hitl_kill_switch_active`) to disable HITL
