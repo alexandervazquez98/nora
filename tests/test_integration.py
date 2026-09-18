@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 
 from nora.data import BUILTIN_BASELINE_SIGNING_KEY
+from tests.conftest import McpHttpClient
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -206,37 +207,24 @@ def _boot_server(
 # ---------------------------------------------------------------------------
 
 
-def test_subprocess_responds_to_tools_list_with_thirteen_tools(tmp_path: Path) -> None:
-    """A real `python -m nora` boot exposes the thirteen-tool surface in `tools/list`.
+def test_subprocess_responds_to_tools_list_with_thirteen_tools(
+    mcp_http_client: McpHttpClient,
+) -> None:
+    """A real MCP server exposes the thirteen-tool surface in `tools/list`.
+
+    Refactored in WU-#1a: this test no longer boots a fresh stdio
+    subprocess per call. It uses the session-scoped HTTP MCP server
+    fixture, paying only the JSON-RPC round-trip cost. The transport
+    is irrelevant to the assertion (tool surface); stdio behaviour
+    is still covered by the `_boot_server` tests below.
 
     WU-4 / PR #44 follow-up plan added ``hitl_mint_token``; the
     expected set is therefore 13 tools post-merge.
     """
-    env_file = tmp_path / ".env"
-    env_file.write_text("NORA_OID_CATALOG_SIGNING_KEY=change-me\n")
-
-    proc, _ = _boot_server(env_file)
-
-    assert proc.returncode == 0 or proc.returncode is None, (
-        f"Server exited with code {proc.returncode}.\n"
-        f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
-    )
-
-    # Parse the JSON-RPC reply — at least one line is a `tools/list` result.
-    parsed_reply: dict | None = None
-    for line in proc.stdout.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if payload.get("id") == 1 and "result" in payload:
-            parsed_reply = payload
-            break
-
-    assert parsed_reply is not None, f"No `tools/list` reply found in stdout:\n{proc.stdout}"
+    init_reply = mcp_http_client.initialize()
+    assert init_reply.get("id") == 1, f"initialize must echo id=1; got: {init_reply!r}"
+    mcp_http_client.initialized()
+    parsed_reply = mcp_http_client.tools_list()
 
     # The reply's `result.tools` array MUST list exactly the thirteen thin tools
     # (12 pre-WU-4 + ``hitl_mint_token`` from WU-4 / PR #44).
