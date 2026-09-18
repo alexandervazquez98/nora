@@ -1353,19 +1353,17 @@ def test_preflight_raises_when_one_sm_unreachable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """WU-A scenario 2: one SM unreachable -> DeviceUnreachable in report."""
-    from nora.drivers.exceptions import CommunityValidationFailed
+    from nora.drivers.exceptions import CommunityValidationFailed, SnmpTimeoutError
     from nora.drivers.snmp_pmp450i import migrate as migrate_mod
 
     inv = _build_inventory_with_sms(tmp_path, sm_luids=("001", "002"))
     registry = _build_catalog(firmware="15.2.1")
-
-    # SM at 192.0.2.20 raises OSError (simulating unreachable).
     routed = _RoutedFakeSnmpClient(
         per_host_sysdescr={
             "192.0.2.21": "Cambium PMP 450i SM 002 15.2.1",
         },
         per_host_raises={
-            "192.0.2.20": OSError,
+            "192.0.2.20": SnmpTimeoutError,
         },
     )
     settings = _settings_with_rollback_timeout(60, preflight_community_validation=True)
@@ -1402,16 +1400,14 @@ def test_preflight_raises_when_one_sm_wrong_community(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """WU-A scenario 3: one SM wrong community -> InvalidCommunity in report."""
-    import puresnmp.exc
-
-    from nora.drivers.exceptions import CommunityValidationFailed
+    from nora.drivers.exceptions import CommunityValidationFailed, NetworkUnreachableError
     from nora.drivers.snmp_pmp450i import migrate as migrate_mod
 
     inv = _build_inventory_with_sms(tmp_path, sm_luids=("001", "002"))
     registry = _build_catalog(firmware="15.2.1")
     routed = _RoutedFakeSnmpClient(
         per_host_raises={
-            "192.0.2.20": puresnmp.exc.SnmpError,
+            "192.0.2.20": NetworkUnreachableError,
         },
         per_host_sysdescr={
             "192.0.2.21": "Cambium PMP 450i SM 002 15.2.1",
@@ -1499,16 +1495,14 @@ def test_preflight_raises_when_ap_unreachable(
     of any SM probe so the operator can investigate the AP-side
     problem first.
     """
-    import puresnmp.exc
-
-    from nora.drivers.exceptions import CommunityValidationFailed
+    from nora.drivers.exceptions import CommunityValidationFailed, NetworkUnreachableError
     from nora.drivers.snmp_pmp450i import migrate as migrate_mod
 
     inv = _build_inventory_with_sms(tmp_path, sm_luids=("001",))
     registry = _build_catalog(firmware="15.2.1")
     routed = _RoutedFakeSnmpClient(
         per_host_raises={
-            "192.0.2.10": puresnmp.exc.SnmpError,
+            "192.0.2.10": NetworkUnreachableError,
         },
     )
     settings = _settings_with_rollback_timeout(60, preflight_community_validation=True)
@@ -1548,16 +1542,14 @@ def test_preflight_does_not_consume_hitl_token_on_failure(
     The operator does not pay for an approval token on a known-bad
     migration.
     """
-    import puresnmp.exc
-
-    from nora.drivers.exceptions import CommunityValidationFailed
+    from nora.drivers.exceptions import CommunityValidationFailed, NetworkUnreachableError
     from nora.drivers.snmp_pmp450i import migrate as migrate_mod
     from nora.hitl import tokens as hitl_tokens_mod
 
     inv = _build_inventory_with_sms(tmp_path, sm_luids=("001",))
     registry = _build_catalog(firmware="15.2.1")
     routed = _RoutedFakeSnmpClient(
-        per_host_raises={"192.0.2.20": puresnmp.exc.SnmpError},
+        per_host_raises={"192.0.2.20": NetworkUnreachableError},
     )
     settings = _settings_with_rollback_timeout(60, preflight_community_validation=True)
     driver = _build_driver(inventory=inv, registry=registry, canned=routed, settings=settings)

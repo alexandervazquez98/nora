@@ -31,8 +31,8 @@ Strict-major hard fail: a device reporting firmware `20.0.1` does NOT resolve to
 
 Per `data/oid-catalogs/CHANGELOG.md`:
 
-1. `frequency` / `migrateCarrierFrequency` / `migratePriorCarrierFrequency` re-pointed from `1.3.6.1.4.1.161.19.3.1.1.2.0` (`rfFreqCarrier`, **STATUS deprecated**, `SYNTAX INTEGER { wired(0) }` only) to `1.3.6.1.4.1.161.19.3.1.10.1.1` (`radioFreqCarrier`, **STATUS current**, `MAX-ACCESS read-write`). The old OID silently rejected every non-zero SET with `badValue` / `wrongValue`; the firmware surfaced this as "no está en la lista" on the operator's UI. This was a pre-existing bug in v1 envelopes that masked the snmp_migrate_radio_frequency tool as broken.
-2. `radioFreqCarrier` added as an explicit OID name alongside `frequency` (alias). Both resolve to the same dotted OID; `radioFreqCarrier` is the canonical name from the WHISP-APS-MIB.
+1. `frequency` / `migrateCarrierFrequency` / `migratePriorCarrierFrequency` re-pointed from `1.3.6.1.4.1.161.19.3.1.1.2.0` (`rfFreqCarrier`, **STATUS deprecated**, `SYNTAX INTEGER { wired(0) }` only) to `1.3.6.1.4.1.161.19.3.1.10.1.1.1.1` (`radioFreqCarrier`, **STATUS current**, `MAX-ACCESS read-write`, leaf scalar instance: column 1, radioIndex 1). The old OID silently rejected every non-zero SET with `badValue` / `wrongValue`; the firmware surfaced this as "no está en la lista" on the operator's UI. This was a pre-existing bug in v1 envelopes that masked the snmp_migrate_radio_frequency tool as broken.
+2. `radioFreqCarrier` added as an explicit OID name alongside `frequency` (alias). Both resolve to `1.3.6.1.4.1.161.19.3.1.10.1.1.1.1`; `radioFreqCarrier` is the canonical name from the WHISP-APS-MIB.
 3. `reboot` (1.3.6.1.4.1.161.19.3.3.3.2.0) — for `snmp_reboot_radio` (WU-C).
 4. `rebootIfRequired` (1.3.6.1.4.1.161.19.3.3.3.4.0) — preferred over heuristic band-crossing detection.
 5. `radioFrequencyBand` (1.3.6.1.4.1.161.19.3.3.16.1.1.2) — enum covering 700 / 900 / 2400 / 3500 / 3700 / 4900 / 5100 / 5200 / 5400 / 5700 / 5800 / 5900 / 6050 / 3600 / 4959 / 3 / 5170 / 65 / 67 / 5763 / 66 MHz. Read current band for the band-crossing detector.

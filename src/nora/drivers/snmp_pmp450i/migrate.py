@@ -51,7 +51,11 @@ from typing import TYPE_CHECKING, Any, Callable
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from nora.drivers.exceptions import CommunityValidationFailed
+from nora.drivers.exceptions import (
+    CommunityValidationFailed,
+    NetworkUnreachableError,
+    SnmpTimeoutError,
+)
 from nora.drivers.snmp_pmp450i.band_plan import _is_band_crossing
 from nora.drivers.snmp_pmp450i.subscribers import (
     fetch_sm_table,
@@ -263,7 +267,7 @@ def _validate_sm_communities(
                 ap_client.close()
             except Exception:  # pragma: no cover - close is best-effort
                 pass
-    except (OSError, TimeoutError):
+    except (OSError, TimeoutError, SnmpTimeoutError, NetworkUnreachableError):
         ap_reachable = False
         ap_sysdescr = None
     except puresnmp.exc.SnmpError:
@@ -312,7 +316,7 @@ def _validate_sm_communities(
 
         try:
             sm_client = client_factory(sm_device)
-        except (OSError, TimeoutError) as exc:
+        except (OSError, TimeoutError, SnmpTimeoutError) as exc:
             sm_results.append(
                 SmPreFlightResult(
                     luid=luid,
@@ -324,7 +328,7 @@ def _validate_sm_communities(
                 )
             )
             continue
-        except puresnmp.exc.SnmpError as exc:
+        except (puresnmp.exc.SnmpError, NetworkUnreachableError) as exc:
             sm_results.append(
                 SmPreFlightResult(
                     luid=luid,
@@ -350,7 +354,7 @@ def _validate_sm_communities(
                         error_message=None,
                     )
                 )
-            except (OSError, TimeoutError) as exc:
+            except (OSError, TimeoutError, SnmpTimeoutError) as exc:
                 sm_results.append(
                     SmPreFlightResult(
                         luid=luid,
@@ -361,7 +365,7 @@ def _validate_sm_communities(
                         error_message=f"{host}: {exc!s}",
                     )
                 )
-            except puresnmp.exc.SnmpError as exc:
+            except (puresnmp.exc.SnmpError, NetworkUnreachableError) as exc:
                 sm_results.append(
                     SmPreFlightResult(
                         luid=luid,
