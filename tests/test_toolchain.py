@@ -185,6 +185,14 @@ def test_pytest_coverage_table_for_src_nora_is_printed(tmp_path: Path) -> None:
     it never contends with the parent test session's `.coverage` file —
     pytest-cov 7.x's cross-process SQLite schema race used to make this
     flaky.
+
+    `addopts` is overridden in the subprocess via `-o addopts=...` so the
+    parent's `--no-cov` (added by `pyproject.toml` for the dev-loop fast
+    path) does NOT poison this subprocess. pytest-cov treats `--no-cov`
+    as a kill switch that wins over the explicit `--cov=nora`; without
+    this override the subprocess would emit
+    `WARNING: Coverage disabled via --no-cov switch!` and the table
+    assertion would fail.
     """
     py = _venv_bin("python")
     cov_data = tmp_path / f"coverage-{os.getpid()}.sqlite"
@@ -194,6 +202,8 @@ def test_pytest_coverage_table_for_src_nora_is_printed(tmp_path: Path) -> None:
             py,
             "-m",
             "pytest",
+            "-o",
+            "addopts=-q --strict-markers",
             "--cov=nora",
             "-q",
             "tests/test_smoke.py",
