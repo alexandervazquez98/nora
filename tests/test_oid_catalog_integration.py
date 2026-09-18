@@ -730,6 +730,8 @@ def test_new_tool_without_oid_registration_rejected_at_registration_time(
 _RE_SIGNED_TRIPLES: list[tuple[str, str, str]] = [
     ("cambium", "pmp450i", "15.2.1"),
     ("cambium", "pmp450i", "15.3.0"),
+    ("cambium", "pmp450i", "25.0.1"),
+    ("cambium", "pmp450i", "25.1"),
     ("cambium", "pmp450i", "25.1.0"),
 ]
 

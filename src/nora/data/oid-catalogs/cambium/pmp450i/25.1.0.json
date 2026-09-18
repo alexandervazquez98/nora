@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "vendor": "cambium",
   "model": "pmp450i",
   "firmware": "25.1.0",
@@ -11,7 +11,7 @@
     "ssr": "1.3.6.1.4.1.161.19.3.1.4.1.86.0",
     "modulationMode": "1.3.6.1.4.1.161.19.3.1.4.1.40.0",
     "channelBandwidth": "1.3.6.1.4.1.161.19.3.3.2.83.0",
-    "frequency": "1.3.6.1.4.1.161.19.3.1.1.2.0",
+    "frequency": "1.3.6.1.4.1.161.19.3.1.10.1.1",
     "transmitPower": "1.3.6.1.4.1.161.19.3.3.1.232.0",
     "receivePower": "1.3.6.1.4.1.161.19.3.1.4.1.34.0",
     "jitter": "1.3.6.1.4.1.161.19.3.1.4.1.22.0",
@@ -36,9 +36,14 @@
     "spectrumNoiseFloorC": "1.3.6.1.4.1.161.19.3.3.2.221.3",
     "spectrumChannelRank": "1.3.6.1.4.1.161.19.3.3.2.221.4",
     "spectrumScanStatus": "1.3.6.1.4.1.161.19.3.3.2.221.0",
-    "migrateCarrierFrequency": "1.3.6.1.4.1.161.19.3.1.1.2.0",
-    "migratePriorCarrierFrequency": "1.3.6.1.4.1.161.19.3.1.1.2.0",
-    "sysDescr": "1.3.6.1.2.1.1.1.0"
+    "migrateCarrierFrequency": "1.3.6.1.4.1.161.19.3.1.10.1.1",
+    "migratePriorCarrierFrequency": "1.3.6.1.4.1.161.19.3.1.10.1.1",
+    "sysDescr": "1.3.6.1.2.1.1.1.0",
+    "radioFreqCarrier": "1.3.6.1.4.1.161.19.3.1.10.1.1",
+    "reboot": "1.3.6.1.4.1.161.19.3.3.3.2.0",
+    "rebootIfRequired": "1.3.6.1.4.1.161.19.3.3.3.4.0",
+    "radioFrequencyBand": "1.3.6.1.4.1.161.19.3.3.16.1.1.2",
+    "whispBoxRFPhysicalRadioFrequencies": "1.3.6.1.4.1.161.19.3.3.15.3"
   },
   "tools": {
     "snmp_get_ap_summary": [
@@ -90,15 +95,15 @@
       "sysDescr"
     ]
   },
-  "hmac_sha256": "cf78db5dd9024e313abb0e464a84fccfc3cc1bf38714752c27d8e7c935d18079",
+  "hmac_sha256": "043a3421a5fe148071e7e7df991c72a4ebb492f8554b7bee250d86cfcf1c705b",
   "_provenance": {
-    "source": "live SNMP walk against AP Cambium PMP 450i firmware 25.1 (192.0.2.10)",
-    "verification_date": "2026-09-13",
+    "source": "live SNMP walk against AP Cambium PMP 450i (192.0.2.10) + cross-checked against WHISP-BOX-MIBV2-MIB and WHISP-APS-MIB bundles in operator's ~/Downloads (PM450 25.0.1 MIBS.zip and PMP450 Series 25.1 MIBS.zip).",
+    "verification_date": "2026-09-18",
     "mib_references": [
-      "WHISP-BOX-MIBV2-MIB (whispBoxSwVersion, activeTxPowerStr)",
-      "WHISP-APS-MIB (whispApsConfig, whispApsFrUtlStats, whispLinkTable)",
+      "WHISP-BOX-MIBV2-MIB (whispBoxSwVersion, activeTxPowerStr, whispBoxControls.reboot, whispBoxControls.rebootIfRequired, whispBoxRFConfigRadios.radioFrequencyBand, whispBoxRFPhysical.whispBoxRFPhysicalRadioFrequencies)",
+      "WHISP-APS-MIB (whispApsRFConfigRadioEntry.radioFreqCarrier, whispApsConfig.rfFreqCarrier deprecated, whispApsFrUtlStats, whispLinkTable)",
       "WHISP-GLOBAL-REG-MIB (enterprises.161.19.3 root)"
     ],
-    "notes": "Zero OID drift vs 15.x \u2014 Cambium AP firmware 25.1 keeps strict backwards compatibility on the enterprise tree 1.3.6.1.4.1.161.19.3. Shipped as a separate envelope so resolve() does not fall back from major 25 to major 15 (strict-major hard fail in oid_catalog.py Pass 3)."
+    "notes": "v2 cut (feat/multi-community-band-reboot, ODD 2026-09-18): frequency / migrateCarrierFrequency / migratePriorCarrierFrequency re-pointed from rfFreqCarrier (1.3.6.1.4.1.161.19.3.1.1.2.0, STATUS deprecated, SYNTAX INTEGER { wired(0) } only) to radioFreqCarrier (whispApsRFConfigRadioEntry 1, INDEX radioIndex, 1.3.6.1.4.1.161.19.3.1.10.1.1 for radioIndex=1, STATUS current, MAX-ACCESS read-write). Adding reboot, rebootIfRequired, radioFrequencyBand, whispBoxRFPhysicalRadioFrequencies OIDs required for WU-A pre-flight community validation and WU-C snmp_reboot_radio tool. v1 envelopes are invalid for SET of any non-zero frequency and silently return wired(0) on GET."
   }
 }
