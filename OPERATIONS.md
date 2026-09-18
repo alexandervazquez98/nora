@@ -17,7 +17,9 @@ cache provider overhead. The full suite lands in ~25–35 s on a multi-core
 workstation; a single-file run lands under 1 s on the second invocation.
 
 ```bash
-# Whole suite, parallel, no coverage
+# Whole suite, parallel, no coverage. Skips tests marked `no_xdist`
+# (pre-existing flakes on /tmp/nora-bootstrap-* and TCP port 8765); they
+# still run in `make test` (CI sequential).
 make test-fast
 
 # One test by name pattern (substring match against test IDs / names)

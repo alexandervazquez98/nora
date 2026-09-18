@@ -36,10 +36,12 @@ test:
 	$(PY) -m pytest --cov=src/nora --cov-report=term-missing
 
 # Fast iteration target: parallel (pytest-xdist), no coverage, no cache.
-# Mirrors the `addopts` defaults but explicit so a developer sees the
-# intent. Override parallelism with `PYTEST_XDIST_WORKERS=N`.
+# `-m "not no_xdist"` skips the pre-existing flaky installer / HTTP smoke
+# tests that race on `/tmp/nora-bootstrap-*` or TCP port 8765 between
+# xdist workers; `make test` (CI, sequential) still runs them.
+# Override parallelism with `PYTEST_XDIST_WORKERS=N`.
 test-fast:
-	$(PY) -m pytest -n auto --no-cov
+	$(PY) -m pytest -n auto --no-cov -m "not no_xdist"
 
 # Run a single test by name pattern. Usage:
 #   make test-one K=snmp_get

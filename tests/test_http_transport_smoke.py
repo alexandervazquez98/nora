@@ -28,6 +28,13 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 BIND_HOST = "127.0.0.1"
 BIND_PORT = 8765
+
+# Module-level mark: both tests bind a real TCP port on `BIND_PORT`. Under
+# pytest-xdist workers can collide on that port before either is ready,
+# producing intermittent `Connection refused` failures. Sequential pytest
+# (CI) is deterministic; `make test-fast` skips these via
+# `-m "not no_xdist"`.
+pytestmark = pytest.mark.no_xdist
 BIND_PATH = "/mcp"
 
 

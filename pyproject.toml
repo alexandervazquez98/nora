@@ -86,6 +86,7 @@ addopts = "-q --strict-markers --no-cov -p no:cacheprovider"
 pythonpath = ["src"]
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "no_xdist: pre-existing flaky under pytest-xdist (filesystem state or TCP port binding); skipped by 'make test-fast', still runs in 'make test' (CI sequential)",
 ]
 filterwarnings = [
     # `importlib.abc.Traversable` is deprecated in 3.12 and slated for

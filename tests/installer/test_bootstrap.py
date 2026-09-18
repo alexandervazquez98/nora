@@ -26,6 +26,14 @@ import pytest
 
 from tests.installer.conftest import ScriptResult, run_script
 
+# Module-level mark: every test in this file drives a real `git clone`
+# against a fake bare remote at a script-controlled `/tmp/nora-bootstrap-*`
+# path. Under pytest-xdist two workers can collide on that path before
+# either finishes, producing intermittent failures unrelated to the
+# bootstrap logic. Sequential pytest (CI) is deterministic; `make test-fast`
+# skips these via `-m "not no_xdist"`.
+pytestmark = pytest.mark.no_xdist
+
 
 @pytest.fixture(autouse=True)
 def _isolate_nora_bootstrap_tmp() -> None:
