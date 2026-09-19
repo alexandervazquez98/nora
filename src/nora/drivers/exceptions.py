@@ -142,6 +142,29 @@ class MaintenanceWindowViolation(DriverError):
     """
 
 
+class SpectrumSweepTimeout(DriverError):
+    """Raised when the sweep's GET-poll loop exceeds the configured timeout without reaching idle.
+
+    Issue #62 / WU-3: the spectrum sweep polls .221.0 (spectrumScanAction)
+    after arm+start. If the scalar does not return to 0 (idle) within
+    Settings.nora_spectrum_sweep_timeout_seconds, the helper raises this
+    typed exception so the orchestrator gets an explicit signal instead
+    of silently consuming a partial sweep.
+
+    Carries the device_id, the requested duration, and the last polled
+    status so the operator sees WHERE the sweep got stuck.
+    """
+
+    def __init__(self, *, device_id: str, duration_seconds: int, last_status: int) -> None:
+        super().__init__(
+            f"spectrum sweep timed out on device={device_id!r} "
+            f"after {duration_seconds}s; last_status={last_status}"
+        )
+        self.device_id = device_id
+        self.duration_seconds = duration_seconds
+        self.last_status = last_status
+
+
 class UncataloguedToolError(DriverError):
     """Raised when an `@mcp.tool` is registered without an OID catalog entry.
 
@@ -282,6 +305,11 @@ __all__ = [
     # Slice-1 stubs (raise sites in PR 4 + PR 5).
     "AutonomousMutationRejected",
     "MaintenanceWindowViolation",
+    # Issue #62 / WU-3 — typed timeout for the real Cambium sweep
+    # GET-poll loop. Re-exported from `snmp_pmp450i.spectrum` so the
+    # MCP tool boundary can `except` it without re-importing the
+    # internal helper module.
+    "SpectrumSweepTimeout",
     "UncataloguedToolError",
     # Issue #42 / `2026-09-15-register-device-mcp` — typed errors for
     # the `register_device` tool surface.

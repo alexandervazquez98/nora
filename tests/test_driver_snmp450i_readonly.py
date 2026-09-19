@@ -32,9 +32,11 @@ _WRITE_VERB_SET: frozenset[str] = frozenset({"set", "update", "setbulk", "bulk_s
 # protocol requires SET frames (write duration + arm + start) against
 # the Cambium WHISP-BOX-MIBV2-MIB sweep scalars. The carve-out is
 # scoped to the writable seam — `WritableSnmpClient` Protocol +
-# `WritableV2CClient` / `WritableV3Client` adapters — and ONLY to
-# those three files. Every other `.py` file under `src/nora/drivers/`
-# still asserts zero `def set` / `def update` / etc.
+# `WritableV2CClient` / `WritableV3Client` adapters — and to the
+# single consumer (`spectrum.py`) that calls `client.set(...)` to
+# drive the SET/GET poll loop. Every other `.py` file under
+# `src/nora/drivers/` still asserts zero `def set` / `def update` /
+# etc.
 #
 # Adding a NEW file to this allow-list is a Driver-R2 violation and
 # must come with an updated ADR. Removing a file from this allow-list
@@ -45,6 +47,17 @@ _WRITABLE_SEAM_FILES: frozenset[str] = frozenset(
         "src/nora/drivers/snmp_pmp450i/client.py",
         "src/nora/drivers/snmp_pmp450i/v2c.py",
         "src/nora/drivers/snmp_pmp450i/v3.py",
+        # Issue #62 / WU-3 (2026-09-19): the spectrum sweep helper
+        # (``_arm_sweep`` → ``client.set(duration_oid, duration)`` +
+        # ``client.set(action_oid, 8)`` + ``client.set(action_oid, 1)``)
+        # is the documented consumer of the writable seam. The
+        # writable seam is read-only at the wire Protocol level
+        # (Driver-R2 invariant) but the spectrum helper carries the
+        # SET verb by virtue of consuming ``WritableSnmpClient`` via
+        # ``driver._writable_client_factory``. The ADR update is the
+        # ``odd/tasks/issue-62-spectrum-and-multi-community.md`` doc
+        # itself — see the WU-3 section.
+        "src/nora/drivers/snmp_pmp450i/spectrum.py",
     }
 )
 

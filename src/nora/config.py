@@ -122,6 +122,19 @@ class Settings(BaseSettings):
     # `PromptRegistry.from_settings` reads this field; `None` (or a
     # non-existent path) skips the tool-spec dir without raising.
     nora_tool_specs_dir: Path | None = Path("docs/tool_specs")
+    # --- Slice 4 — spectrum sweep SET/GET poll (PR 4 / issue #62 WU-3) ---
+    # Default sweep duration in seconds. The hard [1, 600] bound is
+    # enforced by the validator below and by the FastMCP tool wiring
+    # (snmp_run_spectrum_analysis accepts an optional override at call
+    # time). Mirrors the ICMP probe config layout.
+    nora_spectrum_sweep_duration_seconds: int = 15
+    # Inter-poll interval. 1.0s mirrors the Cambium WHISP-BOX-MIBV2-MIB
+    # recommendation; the WU-3 helper defaults to this.
+    nora_spectrum_sweep_poll_interval_seconds: float = 1.0
+    # Hard upper bound on a single sweep (poll loop). 60s matches the
+    # Cambium reference implementation; sweeps longer than this should
+    # raise SpectrumSweepTimeout and let the orchestrator decide.
+    nora_spectrum_sweep_timeout_seconds: int = 60
 
     loaded_from: LoadSource = "defaults"
 
@@ -153,6 +166,31 @@ class Settings(BaseSettings):
 
         values["loaded_from"] = "defaults"
         return values
+
+    @model_validator(mode="after")
+    def _validate_spectrum_sweep_duration_bounds(self) -> "Settings":
+        """Bound ``nora_spectrum_sweep_duration_seconds`` to the documented [1, 600] range.
+
+        Issue #62 / WU-3: the FastMCP tool wiring accepts an optional
+        ``sweep_duration_seconds`` override at call time, but the
+        stored default and the runtime override must BOTH land in
+        ``[1, 600]`` so the helper never SETs a duration outside the
+        Cambium WHISP-BOX-MIBV2-MIB's supported range. Mirrors the
+        ICMP probe ``_validate_icmp_duration_bounds`` pattern.
+
+        Raising here keeps the contract fail-closed: a misconfigured
+        boot (``NORA_SPECTRUM_SWEEP_DURATION_SECONDS=0``) is caught
+        before the first sweep rather than silently emitting an
+        out-of-range SET frame against ``.220.0``.
+        """
+        duration = int(self.nora_spectrum_sweep_duration_seconds)
+        if duration < 1 or duration > 600:
+            raise ValueError(
+                f"nora_spectrum_sweep_duration_seconds={duration} "
+                f"is outside the documented [1, 600] range; "
+                f"see Settings.nora_spectrum_sweep_duration_seconds"
+            )
+        return self
 
     def __init__(self, **values: Any) -> None:
         """Detect the source of values BEFORE merging, then delegate to super.
