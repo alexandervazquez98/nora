@@ -50,14 +50,15 @@ def _wired_driver_env(tmp_path: Path, sample_catalog: dict[str, Any], sample_inv
         device_id="ap-7400-01",
         fetched_at=datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc),
         firmware="15.2.1",
-        radio_dl_rate_bps=54000000,
-        radio_ul_rate_bps=21000000,
-        rx_signal_dbm=-58,
-        # Issue #54 (2026-09-19): ``tx_signal_dbm`` field replaced by
-        # ``eirp_dbm`` (sector-level active EIRP in dBm).
+        # Issue #57 (2026-09-19): the legacy per-LUID radio-metrics
+        # subset (``radio_dl_rate_bps`` / ``radio_ul_rate_bps`` /
+        # ``rx_signal_dbm`` / ``ssr`` / ``modulation``) was dropped
+        # from the model. Only sector scalars remain.
         eirp_dbm=44,
-        ssr=75,
-        modulation="256QAM",
+        active_tx_power_dbm=27.0,
+        channel_bandwidth_mhz=20.0,
+        carrier_frequency_khz=5490000,
+        transmit_power_dbm=27,
     )
 
     fake_driver = mock.MagicMock(spec=Pmp450iDriver)
@@ -104,21 +105,21 @@ def test_tool_returns_typed_report_payload(_wired_driver_env: Any) -> None:
         "device_id",
         "fetched_at",
         "firmware",
-        "radio_dl_rate_bps",
-        "radio_ul_rate_bps",
-        "rx_signal_dbm",
-        # Issue #54 (2026-09-19): ``tx_signal_dbm`` field replaced by
-        # ``eirp_dbm``.
         "eirp_dbm",
-        "ssr",
-        "modulation",
+        "active_tx_power_dbm",
+        "channel_bandwidth_mhz",
+        "carrier_frequency_khz",
+        "transmit_power_dbm",
     }
     assert set(payload.keys()) == expected_fields, (
         f"unexpected payload shape: {set(payload.keys())!r}"
     )
     assert payload["device_id"] == "ap-7400-01"
-    assert payload["radio_dl_rate_bps"] == 54000000
-    assert payload["modulation"] == "256QAM"
+    assert payload["eirp_dbm"] == 44
+    assert payload["active_tx_power_dbm"] == 27.0
+    assert payload["channel_bandwidth_mhz"] == 20.0
+    assert payload["carrier_frequency_khz"] == 5490000
+    assert payload["transmit_power_dbm"] == 27
 
 
 def test_tool_invokes_driver_fetch_radio_metrics(_wired_driver_env: Any) -> None:

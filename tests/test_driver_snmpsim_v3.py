@@ -155,18 +155,19 @@ def _build_v3_driver(
         vendor="cambium",
         model="pmp450i",
         firmware="15.2.1",
-        # Issue #35 — verified WHISP-APS-MIB positions:
-        # see ``data/oid-catalogs/sources/cambium/pmp450i/15.2.1.source.json``.
+        # Issue #57 (2026-09-19): the v1 radio-metrics subset
+        # (``radioDownlinkRate`` / ``radioUplinkRate`` /
+        # ``signalStrengthRx`` / ``ssr`` / ``modulationMode``) was
+        # dropped — those OIDs are per-LUID ``whispLinkEntry``
+        # tabular columns whose ``.0`` instance returns
+        # ``noSuchName`` on real Cambium PMP 450i hardware. The stub
+        # now mirrors the sector-scalar seed in ``REQUIRED_OIDS``.
         oids={
-            "radioDownlinkRate": "1.3.6.1.4.1.161.19.3.1.4.1.36.0",
-            "radioUplinkRate": "1.3.6.1.4.1.161.19.3.1.4.1.38.0",
-            "signalStrengthRx": "1.3.6.1.4.1.161.19.3.1.4.1.34.0",
-            # Issue #54 (2026-09-19): ``signalStrengthTx`` (broken
-            # ``maxSMTxPwr``) replaced by ``eirp`` (``whispBoxActiveEIRP``,
-            # ``.306.0``).
             "eirp": "1.3.6.1.4.1.161.19.3.3.1.306.0",
-            "ssr": "1.3.6.1.4.1.161.19.3.1.4.1.86.0",
-            "modulationMode": "1.3.6.1.4.1.161.19.3.1.4.1.40.0",
+            "activeTxPowerDbh": "1.3.6.1.4.1.161.19.3.3.1.233.0",
+            "channelBandwidth": "1.3.6.1.4.1.161.19.3.3.2.83.0",
+            "frequency": "1.3.6.1.4.1.161.19.3.1.10.1.1.1.1",
+            "transmitPower": "1.3.6.1.4.1.161.19.3.3.1.232.0",
         },
     )
     registry = OidCatalogRegistry(
@@ -194,8 +195,10 @@ def test_v3_auth_priv_full_fetch_returns_typed_report(
     report = driver.fetch_radio_metrics("sm-7400-02")
 
     assert report.device_id == "sm-7400-02"
-    assert report.radio_dl_rate_bps == 87000000
-    assert report.modulation == "64QAM"
+    # Issue #57 (2026-09-19): only ``eirp_dbm`` is in REQUIRED_OIDS
+    # after the WU-A cleanup; the other sector scalars stay ``None``
+    # when the snmpsim recording fixture does not carry them.
+    assert report.eirp_dbm >= 0
 
 
 def _probe_agent_or_skip(host: str, port: int) -> None:

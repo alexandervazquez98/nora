@@ -143,8 +143,10 @@ def test_signed_envelope_round_trips_through_registry(tmp_path: Path) -> None:
     )
     catalog = registry.resolve(("cambium", "pmp450i", "15.2.1"))
     # At least one of the v1 OIDs lands in the catalog body.
-    assert "ssr" in catalog.oids
-    # Issue #35: the verified WHISP-APS-MIB position for ``ssr`` is
-    # column 86 in ``whispLinkTable`` (.3.1.4.1), not the placeholder
-    # sequential position (.3.1.1.5) the original v1 seed used.
-    assert catalog.oids["ssr"] == "1.3.6.1.4.1.161.19.3.1.4.1.86.0"
+    assert "eirp" in catalog.oids
+    # Issue #57 (2026-09-19): ``ssr`` was dropped from the signed
+    # catalogs — it pointed at a per-LUID tabular column (.86.0)
+    # that does not exist on real Cambium PMP 450i hardware;
+    # ``ssrLink`` (also .86.0, semantically the per-LUID canonical)
+    # survives as ``linkRadioAggrSignalStrengthRatio``.
+    assert catalog.oids["eirp"] == "1.3.6.1.4.1.161.19.3.3.1.306.0"

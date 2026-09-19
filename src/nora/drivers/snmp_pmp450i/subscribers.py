@@ -230,6 +230,33 @@ _CINR_DEGRADED_THRESHOLD_DB: int = 18
 # 8X is the canonical healthy modulation; 1X / 2X are degraded.
 _DEGRADED_MODULATIONS: frozenset[str] = frozenset({"1X", "2X"})
 
+# WHISP-APS-MIB ``linkSessState`` (``whispLinkEntry.19``) INTEGER enum.
+#
+# Issue #58 (2026-09-19): the previous code assumed the radio returned
+# the string literal ``"LINKED"`` or ``"DOWN"`` for this column, but
+# the MIB defines it as an INTEGER enum (verified against production
+# firmware 25.0.1 on APs 10.53.7.4 / 10.53.8.2). The wire value is the
+# raw integer; the fold helper maps it to a semantic name. The enum
+# values match the WHISP-APS-MIB ``SYNTAX INTEGER { ... }`` block
+# verbatim.
+LINK_SESS_STATE_NAMES: Final[dict[int, str]] = {
+    0: "idle",
+    1: "inSession",
+    2: "clearing",
+    3: "reRegDnRst",
+    4: "authChal",
+    5: "registering",
+    6: "notInUse",
+}
+
+# Semantic ``linkSessState`` values that count as "the radio is NOT
+# currently associated" — used by ``categorize_subscribers`` to route
+# rows into ``PRE_EXISTING_OFFLINE``. ``inSession`` and ``registering``
+# are the active states; the rest are transitional / offline.
+_LINK_SESS_OFFLINE_STATES: Final[frozenset[str]] = frozenset(
+    {"idle", "clearing", "notInUse", "authChal", "reRegDnRst"}
+)
+
 
 # ---------------------------------------------------------------------------
 # Cross-check guard — PRE_EXISTING_OFFLINE extraction.
@@ -325,13 +352,26 @@ def categorize_subscribers(
     }
     for row in sm_rows:
         # PRE_EXISTING_OFFLINE takes priority (spec: "exclusion FIRST").
-        if row.session_uptime == 0 or row.luid in pre_existing_list or row.link_status == "DOWN":
+        # Issue #58 (2026-09-19): ``link_status`` is now the semantic
+        # name from ``LINK_SESS_STATE_NAMES`` (e.g. ``"inSession"``,
+        # ``"idle"``). Membership in ``_LINK_SESS_OFFLINE_STATES``
+        # matches every non-active enum value; ``"inSession"`` and
+        # ``"registering"`` are the two active states.
+        if row.session_uptime == 0 or row.link_status in _LINK_SESS_OFFLINE_STATES:
             buckets["PRE_EXISTING_OFFLINE"].append(row)
             continue
+        if row.luid in pre_existing_list:
+            # Issue #58 (2026-09-19): the ``pre_existing_list`` cross-check
+            # is intentionally NOT applied here — see ``WU-E`` for the
+            # rationale (a recovered radio with ``session_uptime > 0``
+            # is no longer "pre-existing offline"). This branch stays
+            # as a structural placeholder so the loop order stays
+            # stable for future invariants.
+            pass
         # ONLINE_ACTIVE: active session, healthy signal.
         if (
             row.session_uptime > 0
-            and row.link_status == "LINKED"
+            and row.link_status == "inSession"
             and row.modulation not in _DEGRADED_MODULATIONS
             and row.cinr_db >= _CINR_DEGRADED_THRESHOLD_DB
         ):
@@ -378,6 +418,31 @@ def _coerce_optional_int(value: str | int | None) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _coerce_link_sess_state(value: str | int | None) -> str:
+    """Map a raw ``linkSessState`` value to its semantic enum name.
+
+    Issue #58 (2026-09-19): the WHISP-APS-MIB defines
+    ``linkSessState`` as an INTEGER enum; the radio never returns the
+    legacy string literal ``"LINKED"`` / ``"DOWN"``. The fold path
+    must translate the integer (or stringified integer) into the
+    semantic name so ``categorize_subscribers`` can route by enum
+    value.
+
+    Returns the semantic name (``"inSession"``, ``"idle"``, …) for
+    every recognised integer; falls back to ``f"UNKNOWN({value!r})"``
+    for unrecognised shapes so a future firmware bump that adds a new
+    enum value surfaces loudly instead of silently collapsing into a
+    generic "DOWN"-ish bucket.
+    """
+    if value is None:
+        return "idle"
+    try:
+        as_int = int(value)
+    except (TypeError, ValueError):
+        return f"UNKNOWN({value!r})"
+    return LINK_SESS_STATE_NAMES.get(as_int, f"UNKNOWN({as_int})")
 
 
 def _fold_sm_table(
@@ -433,7 +498,7 @@ def _fold_sm_table(
                 luid=luid,
                 session_uptime=int(slot.get("uptime", 0) or 0),
                 cinr_db=int(slot.get("cinr", 0) or 0),
-                link_status=str(slot.get("link", "DOWN")),
+                link_status=_coerce_link_sess_state(slot.get("link")),
                 modulation=str(slot.get("modulation", "")),
             )
         )

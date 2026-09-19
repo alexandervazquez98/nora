@@ -89,17 +89,23 @@ def test_required_oids_is_non_empty_frozenset() -> None:
     ``eirp`` (sector-level active EIRP).
     """
     assert isinstance(REQUIRED_OIDS, frozenset)
-    expected_subset = {
-        "radioDownlinkRate",
-        "radioUplinkRate",
-        "signalStrengthRx",
-        "eirp",
-        "ssr",
-        "modulationMode",
-    }
-    assert expected_subset.issubset(REQUIRED_OIDS)
+    # Issue #57 (2026-09-19): the legacy radio-metrics subset
+    # (``radioDownlinkRate`` / ``radioUplinkRate`` /
+    # ``signalStrengthRx`` / ``ssr`` / ``modulationMode``) was dropped
+    # — every one of those OIDs is a per-LUID ``whispLinkEntry``
+    # tabular column whose ``.0`` instance returns ``noSuchName`` on
+    # real PMP 450i hardware. ``eirp`` (sector scalar) is the only
+    # legacy survivor in this alias until WU-B adds the remaining
+    # sector scalars.
+    assert "eirp" in REQUIRED_OIDS
     # Issue #54 regression guard: ``signalStrengthTx`` no longer in REQUIRED_OIDS.
     assert "signalStrengthTx" not in REQUIRED_OIDS
+    # Issue #57 regression guards: the broken tabular OIDs are out.
+    assert "radioDownlinkRate" not in REQUIRED_OIDS
+    assert "radioUplinkRate" not in REQUIRED_OIDS
+    assert "signalStrengthRx" not in REQUIRED_OIDS
+    assert "ssr" not in REQUIRED_OIDS
+    assert "modulationMode" not in REQUIRED_OIDS
 
 
 # ---------------------------------------------------------------------------
@@ -322,9 +328,16 @@ def test_key_rotation_invalidates_previously_signed_catalog(
 def test_missing_required_oid_raises_catalog_verification_error(
     tmp_catalogs_dir: Path, sample_catalog: dict[str, Any]
 ) -> None:
-    """A catalog missing `radioDownlinkRate` fails schema validation."""
+    """A catalog missing ``eirp`` (the only sector-scalar seed after
+    WU-A) fails schema validation.
+
+    Issue #57 (2026-09-19): the previous test target
+    (``radioDownlinkRate``) was a broken per-LUID tabular column
+    with no ``.0`` instance on real hardware; it is no longer in
+    REQUIRED_OIDS, so dropping it from a catalog is now allowed.
+    """
     payload = json.loads(sample_catalog["path"].read_text())
-    payload["oids"].pop("radioDownlinkRate")
+    payload["oids"].pop("eirp")
     # Re-sign so the HMAC matches the new bytes (canonicalised same way
     # as the verifier).
     canonical_body = json.dumps(payload["oids"], sort_keys=True, separators=(",", ":")).encode(
@@ -341,7 +354,7 @@ def test_missing_required_oid_raises_catalog_verification_error(
             operator_root=tmp_catalogs_dir,
             signing_key=sample_catalog["key"],
         )
-    assert "radioDownlinkRate" in str(exc.value)
+    assert "eirp" in str(exc.value)
 
 
 # ---------------------------------------------------------------------------
@@ -404,13 +417,14 @@ class TestMultiRoot:
         # production firmware), ``eirp`` (sector-level active EIRP) added.
         # ``smJitter`` / ``smTxLevel`` dropped (FSK-only / engineering-only),
         # ``smSnrH`` / ``ssrLink`` added as OFDM-correct per-LUID metrics.
+        # Issue #57 (2026-09-19): the v1 radio-metrics subset
+        # (``radioDownlinkRate`` / ``radioUplinkRate`` /
+        # ``signalStrengthRx`` / ``ssr`` / ``modulationMode``) was
+        # dropped from the per-triple gate too — they all live under
+        # the per-LUID ``whispLinkEntry`` subtree whose ``.0`` instance
+        # does not exist on real hardware.
         expected = {
-            "radioDownlinkRate",
-            "radioUplinkRate",
-            "signalStrengthRx",
             "eirp",
-            "ssr",
-            "modulationMode",
             "smSnrH",
             "ssrLink",
             "smRetransmits",
@@ -421,6 +435,12 @@ class TestMultiRoot:
         assert "signalStrengthTx" not in pmp450i_required
         assert "smJitter" not in pmp450i_required
         assert "smTxLevel" not in pmp450i_required
+        # Issue #57 regression guards — broken tabular OIDs no longer required.
+        assert "radioDownlinkRate" not in pmp450i_required
+        assert "radioUplinkRate" not in pmp450i_required
+        assert "signalStrengthRx" not in pmp450i_required
+        assert "ssr" not in pmp450i_required
+        assert "modulationMode" not in pmp450i_required
 
     def test_required_oids_alias_is_radio_metrics_subset(self) -> None:
         """`REQUIRED_OIDS` is the radio-metrics subset of the PMP 450i triple.
@@ -434,18 +454,16 @@ class TestMultiRoot:
         delegate paths in ``nora.drivers.snmp_pmp450i.summaries`` look
         those up directly against the resolved catalog.
         """
-        radio_metrics_oids = frozenset(
-            {
-                "radioDownlinkRate",
-                "radioUplinkRate",
-                "signalStrengthRx",
-                # Issue #54 (2026-09-19): ``signalStrengthTx`` dropped,
-                # ``eirp`` added (sector-level active EIRP).
-                "eirp",
-                "ssr",
-                "modulationMode",
-            }
-        )
+        # Issue #57 (2026-09-19): the legacy radio-metrics subset
+        # (``radioDownlinkRate`` / ``radioUplinkRate`` /
+        # ``signalStrengthRx`` / ``ssr`` / ``modulationMode``) is
+        # gone from the alias — those OIDs are per-LUID tabular
+        # columns whose ``.0`` instance returns ``noSuchName`` on
+        # real Cambium PMP 450i hardware. The alias carries only
+        # the sector-scalar seed ``eirp`` (the only OID also
+        # enforced by the boot-time gate); the remaining sector
+        # scalars are optional in the fold path.
+        radio_metrics_oids = frozenset({"eirp"})
         assert REQUIRED_OIDS == radio_metrics_oids
         assert REQUIRED_OIDS.issubset(_REQUIRED_OIDS_BY_VENDOR_MODEL[("cambium", "pmp450i")])
 
@@ -454,13 +472,19 @@ class TestMultiRoot:
     ) -> None:
         """Scenario: missing OID fails verification per triple.
 
-        Build a catalog that lacks `radioDownlinkRate` and re-sign it so
-        the HMAC matches the truncated `oids` map. The verifier MUST
-        raise `CatalogVerificationError` naming the missing key.
+        Build a catalog that lacks ``eirp`` (the only sector-scalar
+        survivor of the WU-A #57 cleanup) and re-sign it so the HMAC
+        matches the truncated ``oids`` map. The verifier MUST raise
+        ``CatalogVerificationError`` naming the missing key.
+
+        Issue #57 (2026-09-19): the previous test target
+        (``radioDownlinkRate``) was a broken per-LUID tabular column
+        with no ``.0`` instance on real hardware; it is no longer in
+        REQUIRED_OIDS, so dropping it from a catalog is now allowed.
         """
-        # Strip `radioDownlinkRate` from the catalog body.
+        # Strip ``eirp`` from the catalog body.
         payload = json.loads(sample_catalog["path"].read_text())
-        payload["oids"].pop("radioDownlinkRate")
+        payload["oids"].pop("eirp")
         canonical_body = json.dumps(payload["oids"], sort_keys=True, separators=(",", ":")).encode(
             "utf-8"
         )
@@ -475,7 +499,7 @@ class TestMultiRoot:
                 operator_root=tmp_catalogs_dir,
                 signing_key=sample_catalog["key"],
             )
-        assert "radioDownlinkRate" in str(exc.value)
+        assert "eirp" in str(exc.value)
 
     def test_operator_wins(
         self,

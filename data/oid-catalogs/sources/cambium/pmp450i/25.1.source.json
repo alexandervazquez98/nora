@@ -14,11 +14,6 @@
     "notes": "New v2 catalog shipped by feat/multi-community-band-reboot. Built from local MIB bundles. Firmware string is '25.1' (NOT '25.1.0') to match what the operator's field SMs advertise via apFirmwareVersion \u2014 the operator can confirm at deploy time and we can re-sign with '25.1.0' as alias if needed. Same OID set as the rest of the v2 envelopes. Issue #54 fix (2026-09-19): dropped FSK-only smJitter (.22 linkAveJitter returns noSuchInstance on OFDM/MIMO hardware) and engineering-only maxSMTxPwr (.89, tabular). Added eirp (.306 whispBoxActiveEIRP), activeTxPowerDbh (.233 whispBoxActiveTxPowerInHundredthsDbm), smSnrH (.84 linkRadioAggrSmHCalculatedSnr), and ssrLink (.86 linkRadioAggrSignalStrengthRatio). Subscribers.fetch_sm_detailed_diagnostics appends .<luid> to every whispLinkEntry column query."
   },
   "oids": {
-    "radioDownlinkRate": "1.3.6.1.4.1.161.19.3.1.4.1.36.0",
-    "radioUplinkRate": "1.3.6.1.4.1.161.19.3.1.4.1.38.0",
-    "signalStrengthRx": "1.3.6.1.4.1.161.19.3.1.4.1.34.0",
-    "ssr": "1.3.6.1.4.1.161.19.3.1.4.1.86.0",
-    "modulationMode": "1.3.6.1.4.1.161.19.3.1.4.1.40.0",
     "channelBandwidth": "1.3.6.1.4.1.161.19.3.3.2.83.0",
     "frequency": "1.3.6.1.4.1.161.19.3.1.10.1.1.1.1",
     "transmitPower": "1.3.6.1.4.1.161.19.3.3.1.232.0",
