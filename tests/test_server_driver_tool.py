@@ -441,3 +441,119 @@ def test_icmp_cancel_sector_stability_probe_marks_cancelled(
         )
     )
     assert progress.data["status"] == "cancelled"
+
+
+# ---------------------------------------------------------------------------
+# Issue #61 / PR3 WU-3.14 — `icmp_list_probe_runs` smoke test.
+#
+# Verifies the listing tool is wired into the @mcp.tool surface and
+# returns the expected JSON shape. The test does NOT spawn a real
+# daemon; instead it monkeypatches the @mcp.tool body to write one
+# synthetic PRB-*.json file into ``settings.nora_probe_results_dir``
+# so the listing loop has something to read. This keeps the test
+# fast (no daemon thread) while exercising the full JSON-loading +
+# ProbeRunRecord-validation + Sanitizer-pre-clean + sort pipeline.
+# ---------------------------------------------------------------------------
+
+
+def test_icmp_list_probe_runs_returns_records(_wired_probe_env: Any, tmp_path: Path) -> None:
+    """`icmp_list_probe_runs` returns the registry contents as JSON.
+
+    Writes a synthetic PRB-*.json file via the in-memory
+    ``ProbeRunRecord`` model + JSON serialisation, then calls the
+    listing tool over FastMCP and asserts the response shape.
+    """
+    server_mod, _ = _wired_probe_env
+
+    # Build a synthetic ProbeRunRecord and write it to disk.
+    settings = server_mod.get_runtime_state()
+    probe_dir = Path(settings.nora_probe_results_dir)
+    probe_dir.mkdir(parents=True, exist_ok=True)
+
+    # Minimal payload that ProbeRunRecord.model_validate accepts.
+    payload: dict[str, Any] = {
+        "run_id": "abcd1234",
+        "sector": "norte",
+        "device_id": "ap-7400-01",
+        "ap_ip": "192.0.2.10",
+        "started_at_unix": 1_761_234_567.0,
+        "finished_at_unix": 1_761_235_167.0,
+        "metrics": {
+            "ap_metrics": {
+                "target": "ap",
+                "packets_transmitted": 600,
+                "packets_received": 600,
+                "packet_loss_pct": 0.0,
+                "drop_burst_max": 0,
+                "outage_events": 0,
+                "rtt_min_ms": 1.0,
+                "rtt_avg_ms": 1.5,
+                "rtt_median_ms": 1.4,
+                "rtt_p95_ms": 2.0,
+                "rtt_max_ms": 3.0,
+                "jitter_avg_ms": 0.3,
+                "jitter_max_ms": 0.8,
+                "samples_used": 600,
+            },
+            "sm_metrics": [],
+            "sector_delta": [],
+        },
+        "verdict": {
+            "ap_verdict": "EXCELLENT",
+            "per_sm": [],
+            "sector_verdict": "EXCELLENT",
+            "rationale": "Synthetic test record.",
+            "evaluated_at_unix": 1_761_235_167.0,
+        },
+    }
+    (probe_dir / "PRB-norte-192.0.2.10-1761234567-aabbcc.json").write_text(
+        __import__("json").dumps(payload), encoding="utf-8"
+    )
+
+    listing = asyncio.run(
+        _call_tool(
+            server_mod,
+            "icmp_list_probe_runs",
+            {"limit": 5},
+        )
+    )
+    result = listing.data
+    assert isinstance(result, dict)
+    assert "runs" in result
+    assert "total_files_scanned" in result
+    assert "errors_skipped" in result
+    assert len(result["runs"]) >= 1
+    first = result["runs"][0]
+    # The bypass fields stay verbatim; the listing surfaces every
+    # documented column the WU-3.7 spec requires.
+    assert first["run_id"] == "abcd1234"
+    assert first["sector"] == "norte"
+    assert first["device_id"] == "ap-7400-01"
+    assert first["verdict"]["sector_verdict"] == "EXCELLENT"
+
+
+def test_icmp_list_probe_runs_returns_empty_when_dir_missing(
+    _wired_probe_env: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When `nora_probe_results_dir` does not exist, the listing is empty.
+
+    The tool does NOT raise; it returns the documented empty payload
+    so the orchestrator can probe before committing to a real fetch.
+    """
+    server_mod, _ = _wired_probe_env
+    # Point the settings at a non-existent directory for this test only.
+    fake_dir = tmp_path / "no-such-probe-dir"
+    settings = server_mod.get_runtime_state()
+    monkeypatch.setattr(settings, "nora_probe_results_dir", fake_dir, raising=False)
+
+    listing = asyncio.run(
+        _call_tool(
+            server_mod,
+            "icmp_list_probe_runs",
+            {"limit": 5},
+        )
+    )
+    result = listing.data
+    assert result["runs"] == []
+    assert result["total_files_scanned"] == 0
+    assert result["errors_skipped"] == 0

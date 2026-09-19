@@ -253,6 +253,8 @@ def test_subprocess_responds_to_tools_list_with_fifteen_tools(
         "icmp_run_sector_stability_probe",
         "icmp_get_sector_stability_progress",
         "icmp_cancel_sector_stability_probe",
+        # Issue #61 / PR3 WU-3.7 — list probe runs.
+        "icmp_list_probe_runs",
     }
     assert names == expected, f"Expected exactly the 18 thin tools; got {names}"
 

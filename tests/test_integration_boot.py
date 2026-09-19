@@ -194,6 +194,8 @@ def test_subprocess_nora_mcp_exposes_fifteen_tools(
         "icmp_run_sector_stability_probe",
         "icmp_get_sector_stability_progress",
         "icmp_cancel_sector_stability_probe",
+        # Issue #61 / PR3 WU-3.7 — list probe runs.
+        "icmp_list_probe_runs",
         # Issue #72 / PR #73 follow-up — nora_get_tool_spec bridge.
         "nora_get_tool_spec",
     ]
@@ -231,6 +233,8 @@ def test_subprocess_python_dash_m_nora_exposes_same_tools(
         "icmp_run_sector_stability_probe",
         "icmp_get_sector_stability_progress",
         "icmp_cancel_sector_stability_probe",
+        # Issue #61 / PR3 WU-3.7 — list probe runs.
+        "icmp_list_probe_runs",
         # Issue #72 / PR #73 follow-up — nora_get_tool_spec bridge.
         "nora_get_tool_spec",
     ]

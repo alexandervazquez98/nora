@@ -1,7 +1,7 @@
 """NORA FastMCP server — thin split.
 
 Boots a FastMCP instance named "nora" over stdio and exposes exactly
-seventeen `@mcp.tool` registrations and two `@mcp.prompt` registrations:
+eighteen `@mcp.tool` registrations and two `@mcp.prompt` registrations:
 
 * `snmp_get_pmp450i_radio_metrics`         — PMP 450i SNMP driver.
 * `snmp_get_ap_summary`                    — PMP 450i AP summary.
@@ -20,6 +20,7 @@ seventeen `@mcp.tool` registrations and two `@mcp.prompt` registrations:
 * `icmp_run_sector_stability_probe`        — ICMP sector stability (issue #61, PR1 WU-1.5).
 * `icmp_get_sector_stability_progress`     — ICMP progress poll (issue #61, PR1 WU-1.5).
 * `icmp_cancel_sector_stability_probe`     — ICMP cancel (issue #61, PR1 WU-1.5).
+* `icmp_list_probe_runs`                   — ICMP on-disk listing (issue #61, PR3 WU-3.7).
 * `netops_orchestrator` (prompt)          — Lead NOC orchestrator system prompt.
 * `snmp_pmp450i` (prompt)                  — PMP 450i driver system prompt.
 
@@ -46,9 +47,11 @@ call.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import sys
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from fastmcp import FastMCP
@@ -968,6 +971,98 @@ def icmp_cancel_sector_stability_probe(run_id: str) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# ICMP sector stability probe — issue #61 / PR3 WU-3.7 listing tool.
+#
+# Reads ``<settings.nora_probe_results_dir>/PRB-*.json`` and returns the
+# most recent ``limit`` records sorted by ``started_at_unix`` descending.
+# Tier 0 — same governance as the run / progress / cancel triplet.
+#
+# Each record is validated against ``ProbeRunRecord`` (defined in PR2)
+# so a corrupt / truncated JSON file is silently skipped and counted in
+# ``errors_skipped`` (never raised to MCP — the listing tool is a
+# read-only convenience for operators browsing past runs).
+#
+# The Sanitizer (module-level ``_sanitizer``) is applied to every
+# returned record so a private IPv4 literal in the device_id / ap_ip
+# fields is masked before the wire. The bypass list inside
+# ``sanitize_run_metadata`` keeps ``run_id`` / ``sector`` / ``pdf_path``
+# verbatim.
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool
+def icmp_list_probe_runs(limit: int = 20) -> dict[str, Any]:
+    """List recent probe-run records from the on-disk registry (issue #61 / PR3).
+
+    Reads ``<settings.nora_probe_results_dir>/PRB-*.json``, validates
+    each against the :class:`ProbeRunRecord` model, applies the
+    Sanitizer to the metadata, and returns the most recent ``limit``
+    records sorted by ``started_at_unix`` descending.
+
+    Returns a JSON object:
+        ``{"runs": [list of dicts], "total_files_scanned": int,
+        "errors_skipped": int}``
+
+    Each run dict has: ``run_id``, ``sector``, ``device_id``
+    (sanitized), ``started_at_unix``, ``finished_at_unix``,
+    ``verdict.sector_verdict``, ``verdict.rationale``,
+    ``samples_count``, ``pdf_path``.
+
+    Files that fail validation (corrupt JSON, missing fields) are
+    skipped and counted in ``errors_skipped`` — never raises to MCP.
+
+    Bounds:
+        ``limit`` is clamped to ``[1, 200]`` to keep the response
+        payload bounded. ``limit=0`` returns an empty list (the
+        call still succeeds so the orchestrator can probe before
+        committing to a real fetch).
+
+    Tier 0 — no operator clearance required.
+    """
+    from pydantic import ValidationError
+
+    from nora.probes.models import ProbeRunRecord
+    from nora.probes.sanitize import sanitize_run_metadata
+
+    settings = get_runtime_state()
+
+    # Clamp `limit` to [1, 200] (defensive — the orchestrator may
+    # pass any int; we do NOT raise so the listing tool stays a
+    # graceful read-only surface).
+    effective_limit = max(0, min(int(limit), 200))
+
+    try:
+        base = Path(settings.nora_probe_results_dir)
+    except AttributeError:
+        # Missing setting — return empty listing rather than raising.
+        return {"runs": [], "total_files_scanned": 0, "errors_skipped": 0}
+    if not base.is_dir():
+        return {"runs": [], "total_files_scanned": 0, "errors_skipped": 0}
+
+    records: list[dict[str, Any]] = []
+    errors = 0
+    for json_file in sorted(base.glob("PRB-*.json")):
+        try:
+            raw = json.loads(json_file.read_text(encoding="utf-8"))
+            rec = ProbeRunRecord.model_validate(raw)
+            payload = rec.model_dump(mode="json")
+            sanitized = sanitize_run_metadata(payload, sanitizer=_sanitizer)
+            records.append(sanitized)
+        except (json.JSONDecodeError, ValidationError, OSError):
+            errors += 1
+            continue
+
+    # Sort newest first (stable sort — preserves on-disk order on tie).
+    records.sort(key=lambda r: r.get("started_at_unix", 0.0), reverse=True)
+    truncated = records[:effective_limit]
+    return {
+        "runs": truncated,
+        "total_files_scanned": len(records) + errors,
+        "errors_skipped": errors,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Prompt registrations — `@mcp.prompt` thin wrappers over `PromptRegistry`.
 # ---------------------------------------------------------------------------
 
@@ -1272,6 +1367,10 @@ _ALLOWED_UNCATALOGUED_TOOLS: frozenset[str] = frozenset(
         "icmp_run_sector_stability_probe",
         "icmp_get_sector_stability_progress",
         "icmp_cancel_sector_stability_probe",
+        # Issue #61 / PR3 WU-3.7: the listing tool reads the on-disk
+        # PRB-*.json files (no OID catalog coverage). Same
+        # uncatalogued exemption as the run/progress/cancel triplet.
+        "icmp_list_probe_runs",
     }
 )
 
@@ -1400,6 +1499,11 @@ _EXPECTED_TOOL_TIERS: dict[str, int] = {
     "icmp_run_sector_stability_probe": 0,
     "icmp_get_sector_stability_progress": 0,
     "icmp_cancel_sector_stability_probe": 0,
+    # Issue #61 / PR3 WU-3.7: the listing tool is Tier 0 (read-only;
+    # walks the on-disk registry; no wire activity; no OIDs). Same
+    # tier as the run/progress/cancel triplet so the boot-time guard
+    # stays green.
+    "icmp_list_probe_runs": 0,
 }
 
 
@@ -1475,6 +1579,8 @@ __all__ = [
     "icmp_run_sector_stability_probe",
     "icmp_get_sector_stability_progress",
     "icmp_cancel_sector_stability_probe",
+    # Issue #61 / PR3 WU-3.7: the on-disk listing tool.
+    "icmp_list_probe_runs",
     "netops_orchestrator",
     "snmp_pmp450i",
     "register_tool_log_middleware",

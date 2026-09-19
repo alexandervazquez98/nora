@@ -285,3 +285,47 @@ Run `bash scripts/bootstrap.sh --help` for the full reference.
 ## Troubleshooting
 
 See `OPERATIONS.md` § "Troubleshooting" for the error-by-error table.
+
+## Unprivileged ICMP (issue #61 / PR3 prerequisite)
+
+The Cambium PMP 450i sector stability probe uses **unprivileged
+ICMP** — it sends and receives ICMP echo packets on a datagram
+socket (`IPPROTO_ICMP` via `socket.SOCK_DGRAM`), which on Linux only
+requires the sender's gid to be in `net.ipv4.ping_group_range`. It
+does NOT require `CAP_NET_RAW` and does NOT change the systemd
+hardening (`PrivateDevices=true`, `NoNewPrivileges=true`) shipped
+with NORA.
+
+### sysctl wire-up
+
+Set the host's `ping_group_range` to cover the `nora` group:
+
+    sudo sysctl -w net.ipv4.ping_group_range=0 2147483647
+
+(Production deployments can scope this tighter: e.g.
+`sudo sysctl -w net.ipv4.ping_group_range=<nora_gid> 2147483647`.)
+
+To make this survive reboots, persist it:
+
+- Debian/Ubuntu: write to `/etc/sysctl.d/99-nora.conf`:
+
+    net.ipv4.ping_group_range = 0 2147483647
+
+- RHEL-family: write to `/etc/sysctl.d/99-nora.conf` (same body).
+
+Then `sudo sysctl --system`.
+
+### Verify
+
+After the sysctl wire-up and a `systemctl restart nora-mcp`, the
+probe should produce samples. If `icmp_get_sector_stability_progress`
+returns `samples_count == 0` after the daemon has been running for
+several intervals, the sysctl is almost certainly the cause — see
+the troubleshooting recipe in OPERATIONS.md.
+
+### No raw-socket alternatives
+
+If the sysctl cannot be set on the deployment host (e.g. a hard
+CIS-benchmark block), PR4 will land a `subprocess` fallback that
+shells out to a setcap'd `/bin/ping`. PR3 does NOT include this
+fallback.

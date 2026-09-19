@@ -622,6 +622,8 @@ def test_unified_tool_catalog_references_required_oids_per_tool(tmp_path: Path) 
         "icmp_run_sector_stability_probe",
         "icmp_get_sector_stability_progress",
         "icmp_cancel_sector_stability_probe",
+        # Issue #61 / PR3 WU-3.7 — list probe runs.
+        "icmp_list_probe_runs",
     }, f"server.__all__ tool surface drifted; got {sorted(server_tool_names)!r}"
 
 

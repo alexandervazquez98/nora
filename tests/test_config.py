@@ -75,10 +75,8 @@ def test_settings_has_eight_user_fields() -> None:
     from nora.config import Settings
 
     fields = Settings.model_fields
-<<<<<<< HEAD
     assert len(fields) == 29, (
         f"Expected 29 model fields (28 user + loaded_from); got {len(fields)}: {sorted(fields)}"
-    )
     )
 
     forbidden = {
