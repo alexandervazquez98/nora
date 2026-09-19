@@ -27,9 +27,9 @@ PRIVATE_IPV4 = re.compile(
 
 
 def test_settings_has_eight_user_fields() -> None:
-    """After the thin split, `Settings.model_fields` has exactly 19 entries.
+    """After the thin split, `Settings.model_fields` has exactly 24 entries.
 
-    Eighteen user-settable fields plus the computed `loaded_from` = 19 total.
+    Twenty-three user-settable fields plus the computed `loaded_from` = 24 total.
     The nine former LLM/journal fields MUST be gone.
 
     PR 4 (slice 4) extends the set with four HITL/maintenance-window
@@ -52,12 +52,19 @@ def test_settings_has_eight_user_fields() -> None:
     ``nora_spectrum_sweep_duration_seconds``,
     ``nora_spectrum_sweep_poll_interval_seconds``,
     ``nora_spectrum_sweep_timeout_seconds``.
+
+    Issue #70 / WU-1 extends the set with five more:
+    ``nora_spectrum_http_timeout_seconds``,
+    ``nora_spectrum_http_max_retries``,
+    ``nora_spectrum_http_retry_delay_seconds``,
+    ``nora_spectrum_sm_reassociation_timeout_seconds``,
+    ``nora_spectrum_ranking_top_n``.
     """
     from nora.config import Settings
 
     fields = Settings.model_fields
-    assert len(fields) == 19, (
-        f"Expected 19 model fields (18 user + loaded_from); got {len(fields)}: {sorted(fields)}"
+    assert len(fields) == 24, (
+        f"Expected 24 model fields (23 user + loaded_from); got {len(fields)}: {sorted(fields)}"
     )
 
     forbidden = {
