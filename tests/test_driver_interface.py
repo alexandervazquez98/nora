@@ -206,12 +206,11 @@ def test_report_firmware_returns_typed_version(tmp_path: Path) -> None:
         device_id="ap-7400-01",
         fetched_at=datetime(2026, 1, 1, 12, 0, 0),
         firmware="15.2.1",
-        radio_dl_rate_bps=54000000,
-        radio_ul_rate_bps=21000000,
-        rx_signal_dbm=-58,
         eirp_dbm=44,
-        ssr=75,
-        modulation="256QAM",
+        active_tx_power_dbm=27.0,
+        channel_bandwidth_mhz=20.0,
+        carrier_frequency_khz=5490000,
+        transmit_power_dbm=27,
     )
 
     class _SysDescrClient:
@@ -224,18 +223,18 @@ def test_report_firmware_returns_typed_version(tmp_path: Path) -> None:
             if oid == "1.3.6.1.2.1.1.1.0":
                 return self._sys_descr
             # Mirror the same canned values used elsewhere for the
-            # radio-metrics OIDs so the driver is exercised too.
-            # Issue #54 (2026-09-19): ``eirp`` (``.1.1.4.0`` here as a
-            # hermetic stub of ``whispBoxActiveEIRP`` ``.306.0``)
-            # returns a DisplayString like ``"44 dBm"``; the fold
-            # parser strips the unit.
+            # sector-scalar OIDs so the driver is exercised too.
+            # Issue #57 (2026-09-19): the legacy per-LUID tabular
+            # subset was dropped. ``eirp`` is the only REQUIRED_OID;
+            # the other sector scalars are optional.
             return {
-                "1.3.6.1.4.1.161.19.3.1.1.1.0": str(canned_report.radio_dl_rate_bps),
-                "1.3.6.1.4.1.161.19.3.1.1.2.0": str(canned_report.radio_ul_rate_bps),
-                "1.3.6.1.4.1.161.19.3.1.1.3.0": str(canned_report.rx_signal_dbm),
-                "1.3.6.1.4.1.161.19.3.1.1.4.0": f"{canned_report.eirp_dbm} dBm",
-                "1.3.6.1.4.1.161.19.3.1.1.5.0": str(canned_report.ssr),
-                "1.3.6.1.4.1.161.19.3.1.1.6.0": canned_report.modulation,
+                "1.3.6.1.4.1.161.19.3.3.1.306.0": f"{canned_report.eirp_dbm} dBm",
+                "1.3.6.1.4.1.161.19.3.3.1.233.0": int(canned_report.active_tx_power_dbm * 100)
+                if canned_report.active_tx_power_dbm is not None
+                else 0,
+                "1.3.6.1.4.1.161.19.3.3.2.83.0": str(canned_report.channel_bandwidth_mhz),
+                "1.3.6.1.4.1.161.19.3.1.10.1.1.1.1": int(canned_report.carrier_frequency_khz),
+                "1.3.6.1.4.1.161.19.3.3.1.232.0": f"{canned_report.transmit_power_dbm} dBm",
             }[oid]
 
         def walk(self, base_oid: str) -> list[tuple[str, str | int]]:
@@ -386,6 +385,11 @@ def test_inventory_path_still_works_no_regression(tmp_path: Path) -> None:
         "1.3.6.1.4.1.161.19.3.1.1.1.0": "54000000",
         "1.3.6.1.4.1.161.19.3.1.1.2.0": "21000000",
         "1.3.6.1.4.1.161.19.3.1.1.3.0": "-58",
+        # Issue #57 (2026-09-19): the hermetic stub for ``eirp``
+        # remains at ``.1.1.4.0`` (test-local OID, not the production
+        # ``whispBoxActiveEIRP`` ``.306.0``). Only the sector-scalar
+        # seed is asserted below; the legacy per-LUID tabular
+        # columns are gone from the model.
         "1.3.6.1.4.1.161.19.3.1.1.4.0": "23",
         "1.3.6.1.4.1.161.19.3.1.1.5.0": "75",
         "1.3.6.1.4.1.161.19.3.1.1.6.0": "256QAM",
@@ -401,7 +405,7 @@ def test_inventory_path_still_works_no_regression(tmp_path: Path) -> None:
     assert isinstance(report, RadioMetricsReport)
     assert report.device_id == "ap-7400-01"
     assert report.firmware == "15.2.1"
-    assert report.modulation == "256QAM"
+    assert report.eirp_dbm == 23
 
 
 # ---------------------------------------------------------------------------

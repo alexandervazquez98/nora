@@ -197,12 +197,14 @@ def test_full_driver_path_does_not_call_banned_symbols(tmp_path: Path) -> None:
         device_id="ap-7400-01",
         fetched_at=__import__("datetime").datetime(2026, 1, 1, 12, 0, 0),
         firmware="15.2.1",
-        radio_dl_rate_bps=54000000,
-        radio_ul_rate_bps=21000000,
-        rx_signal_dbm=-58,
         eirp_dbm=44,
-        ssr=75,
-        modulation="256QAM",
+        # Optional sector scalars — populated when the catalog carries
+        # the matching OIDs. The airgap probe populates them all to
+        # mirror a fully-resolved catalog.
+        active_tx_power_dbm=27.0,
+        channel_bandwidth_mhz=20.0,
+        carrier_frequency_khz=5490000,
+        transmit_power_dbm=27,
     )
 
     driver = Pmp450iDriver(
@@ -246,18 +248,18 @@ class _FakeClient:
         self._report = report
 
     def get_oid(self, oid: str) -> str | int:
-        # Issue #35 — verified WHISP-APS-MIB positions in
-        # whispLinkTable (.3.1.4.1).
-        # Issue #54 (2026-09-19): ``.306.0`` is the sector-level
-        # whispBoxActiveEIRP (DisplayString "44 dBm"); the fold parser
-        # strips the unit and stores the integer dBm value.
+        # Issue #57 (2026-09-19): the legacy per-LUID tabular subset
+        # was dropped. The driver now asks for the sector-scalar seed
+        # ``eirp`` (and the optional sector scalars when the catalog
+        # carries them).
         return {
-            "1.3.6.1.4.1.161.19.3.1.4.1.36.0": str(self._report.radio_dl_rate_bps),
-            "1.3.6.1.4.1.161.19.3.1.4.1.38.0": str(self._report.radio_ul_rate_bps),
-            "1.3.6.1.4.1.161.19.3.1.4.1.34.0": str(self._report.rx_signal_dbm),
             "1.3.6.1.4.1.161.19.3.3.1.306.0": f"{self._report.eirp_dbm} dBm",
-            "1.3.6.1.4.1.161.19.3.1.4.1.86.0": str(self._report.ssr),
-            "1.3.6.1.4.1.161.19.3.1.4.1.40.0": self._report.modulation,
+            "1.3.6.1.4.1.161.19.3.3.1.233.0": int(self._report.active_tx_power_dbm * 100)
+            if self._report.active_tx_power_dbm is not None
+            else 0,
+            "1.3.6.1.4.1.161.19.3.3.2.83.0": str(self._report.channel_bandwidth_mhz),
+            "1.3.6.1.4.1.161.19.3.1.10.1.1.1.1": int(self._report.carrier_frequency_khz),
+            "1.3.6.1.4.1.161.19.3.3.1.232.0": f"{self._report.transmit_power_dbm} dBm",
         }[oid]
 
     def walk(self, base_oid: str) -> list[tuple[str, str | int]]:

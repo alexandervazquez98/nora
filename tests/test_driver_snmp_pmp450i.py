@@ -82,13 +82,20 @@ def _build_catalog() -> OidCatalogRegistry:
         # Issue #54 (2026-09-19): ``signalStrengthTx`` (broken
         # ``maxSMTxPwr``) replaced by ``eirp`` (``whispBoxActiveEIRP``,
         # ``.306.0``).
+        # Issue #57 (2026-09-19): the v1 radio-metrics subset
+        # (``radioDownlinkRate`` / ``radioUplinkRate`` /
+        # ``signalStrengthRx`` / ``ssr`` / ``modulationMode``) was
+        # dropped — those OIDs are per-LUID ``whispLinkEntry``
+        # tabular columns whose ``.0`` instance returns
+        # ``noSuchName`` on real Cambium PMP 450i hardware. The stub
+        # now mirrors the sector-scalar seed in
+        # ``REQUIRED_OIDS``.
         oids={
-            "radioDownlinkRate": "1.3.6.1.4.1.161.19.3.1.4.1.36.0",
-            "radioUplinkRate": "1.3.6.1.4.1.161.19.3.1.4.1.38.0",
-            "signalStrengthRx": "1.3.6.1.4.1.161.19.3.1.4.1.34.0",
             "eirp": "1.3.6.1.4.1.161.19.3.3.1.306.0",
-            "ssr": "1.3.6.1.4.1.161.19.3.1.4.1.86.0",
-            "modulationMode": "1.3.6.1.4.1.161.19.3.1.4.1.40.0",
+            "activeTxPowerDbh": "1.3.6.1.4.1.161.19.3.3.1.233.0",
+            "channelBandwidth": "1.3.6.1.4.1.161.19.3.3.2.83.0",
+            "frequency": "1.3.6.1.4.1.161.19.3.1.10.1.1.1.1",
+            "transmitPower": "1.3.6.1.4.1.161.19.3.3.1.232.0",
         },
     )
     return OidCatalogRegistry(
@@ -98,15 +105,23 @@ def _build_catalog() -> OidCatalogRegistry:
 
 
 def _fake_values() -> dict[str, str]:
-    # Issue #54 (2026-09-19): the eirp OID (.306.0) returns a
-    # DisplayString like "44 dBm"; the fold parser strips the unit.
+    # Issue #57 (2026-09-19): only ``eirp`` is in ``REQUIRED_OIDS`` —
+    # the driver emits one wire GET for it. The other sector scalars
+    # are optional in the fold path (populated when the resolved
+    # catalog carries them and a tool asks for them). Their values
+    # live here so direct ``fold(...)`` calls can populate them.
     return {
-        "1.3.6.1.4.1.161.19.3.1.4.1.36.0": "54000000",
-        "1.3.6.1.4.1.161.19.3.1.4.1.38.0": "21000000",
-        "1.3.6.1.4.1.161.19.3.1.4.1.34.0": "-58",
+        # ``whispBoxActiveEIRP`` (.306.0) returns DisplayString "44 dBm".
         "1.3.6.1.4.1.161.19.3.3.1.306.0": "44 dBm",
-        "1.3.6.1.4.1.161.19.3.1.4.1.86.0": "75",
-        "1.3.6.1.4.1.161.19.3.1.4.1.40.0": "256QAM",
+        # ``whispBoxActiveTxPowerInHundredthsDbm`` (.233.0) returns
+        # Integer32 in hundredths of dBm (2700 -> 27.0 dBm).
+        "1.3.6.1.4.1.161.19.3.3.1.233.0": 2700,
+        # ``channelBandwidth`` (.83.0) returns DisplayString "20.0" MHz.
+        "1.3.6.1.4.1.161.19.3.3.2.83.0": "20.0",
+        # ``radioFreqCarrier`` (.1.1.1) returns Integer32 in kHz.
+        "1.3.6.1.4.1.161.19.3.1.10.1.1.1.1": 5490000,
+        # ``whispBoxActiveTxPower`` (.232.0) returns DisplayString "27 dBm".
+        "1.3.6.1.4.1.161.19.3.3.1.232.0": "27 dBm",
     }
 
 
@@ -129,15 +144,19 @@ def test_v2c_fetch_returns_typed_report(tmp_path: Path) -> None:
     assert isinstance(report, RadioMetricsReport)
     assert report.device_id == "ap-7400-01"
     assert report.firmware == "15.2.1"
-    assert report.radio_dl_rate_bps == 54000000
-    assert report.radio_ul_rate_bps == 21000000
-    assert report.rx_signal_dbm == -58
-    # Issue #54 (2026-09-19): ``tx_signal_dbm`` field replaced by
-    # ``eirp_dbm`` (sector-level active EIRP in dBm). The fold
-    # parser strips the "dBm" suffix from the DisplayString.
+    # Issue #57 (2026-09-19): the legacy per-LUID radio-metrics
+    # subset (``radio_dl_rate_bps`` / ``radio_ul_rate_bps`` /
+    # ``rx_signal_dbm`` / ``ssr`` / ``modulation``) was dropped
+    # from the model — those OIDs are per-LUID tabular columns with
+    # no ``.0`` instance on real hardware. The required
+    # sector-scalar seed ``eirp_dbm`` is populated by the single
+    # wire GET the driver emits; the other sector scalars stay
+    # ``None`` because the driver only iterates ``REQUIRED_OIDS``.
     assert report.eirp_dbm == 44
-    assert report.ssr == 75
-    assert report.modulation == "256QAM"
+    assert report.active_tx_power_dbm is None
+    assert report.channel_bandwidth_mhz is None
+    assert report.carrier_frequency_khz is None
+    assert report.transmit_power_dbm is None
     # No dict / Any field — every field is a typed scalar.
     assert isinstance(report.fetched_at, datetime)
 
@@ -229,10 +248,10 @@ def test_malformed_oid_value_raises_typed_error(tmp_path: Path) -> None:
     registry = _build_catalog()
     fake_client = mock.MagicMock(spec=SnmpClient)
     values = _fake_values()
-    # Issue #35: the verified radioDownlinkRate position is
-    # whispLinkTable (.3.1.4.1.36), not the placeholder sequential
-    # .3.1.1.1.
-    values["1.3.6.1.4.1.161.19.3.1.4.1.36.0"] = "not-a-number"
+    # Issue #57 (2026-09-19): ``eirp`` is the only REQUIRED_OID after
+    # the WU-A cleanup. Corrupting its DisplayString triggers the
+    # ``_coerce_dbm_display`` parser to raise the typed error.
+    values["1.3.6.1.4.1.161.19.3.3.1.306.0"] = "not-a-number"
     fake_client.get_oid.side_effect = lambda oid: values[oid]
     driver = Pmp450iDriver(
         inventory=inv, catalog_registry=registry, client_factory=lambda d: fake_client
@@ -268,8 +287,9 @@ def test_repeated_oid_lookup_within_call_is_cached(tmp_path: Path) -> None:
 
     report = driver.fetch_radio_metrics("ap-7400-01")
 
-    # Six required OIDs; exactly six wire GETs (no duplicates).
-    assert counter["calls"] == 6
+    # One REQUIRED_OID (``eirp``) after the WU-A cleanup; exactly
+    # one wire GET (no duplicates).
+    assert counter["calls"] == 1
     assert isinstance(report, RadioMetricsReport)
 
 
@@ -415,10 +435,14 @@ def test_fold_maps_oid_values_to_typed_fields(tmp_path: Path) -> None:
     )
     assert report.device_id == "ap-7400-01"
     assert report.firmware == "15.2.1"
-    assert report.radio_dl_rate_bps == 54000000
-    assert report.rx_signal_dbm == -58
-    assert report.ssr == 75
-    assert report.modulation == "256QAM"
+    # Issue #57 (2026-09-19): the legacy per-LUID radio-metrics
+    # subset was dropped from the fold path. See ``report.py`` for
+    # the new sector-scalar schema.
+    assert report.eirp_dbm == 44
+    assert report.active_tx_power_dbm == 27.0
+    assert report.channel_bandwidth_mhz == 20.0
+    assert report.carrier_frequency_khz == 5490000
+    assert report.transmit_power_dbm == 27
 
 
 # ---------------------------------------------------------------------------

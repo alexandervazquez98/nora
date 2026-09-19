@@ -65,17 +65,23 @@ logger = logging.getLogger("nora.drivers.oid_catalog")
 _REQUIRED_OIDS_BY_VENDOR_MODEL: Final[dict[tuple[str, str], frozenset[str]]] = {
     ("cambium", "pmp450i"): frozenset(
         {
-            # Radio-metrics seed (PR 1).
-            "radioDownlinkRate",
-            "radioUplinkRate",
-            "signalStrengthRx",
-            # Issue #54 (2026-09-19): ``signalStrengthTx`` dropped —
-            # it pointed at ``maxSMTxPwr`` (engineering-only + tabular,
-            # returns empty on production firmware). Sector-level
-            # active EIRP (``whispBoxActiveEIRP``) replaces it.
+            # Issue #57 (2026-09-19): the v1 radio-metrics seed
+            # (``radioDownlinkRate`` / ``radioUplinkRate`` /
+            # ``signalStrengthRx`` / ``ssr`` / ``modulationMode``)
+            # was dropped — every one of those OIDs lives under the
+            # per-LUID ``whispLinkEntry`` subtree, and the ``.0``
+            # instance does not exist on a physical PMP 450i AP
+            # (verified against production firmware 25.0.1 on APs
+            # 10.53.7.4 / 10.53.8.2). The per-triple gate now
+            # requires only the sector-scalar seed ``eirp``. The
+            # additional sector scalars (``activeTxPowerDbh``,
+            # ``channelBandwidth``, ``frequency``, ``transmitPower``)
+            # live in the ``RadioMetricsReport`` model as optional
+            # fields, populated by the fold path when the resolved
+            # catalog carries them. This keeps the boot-time gate
+            # minimal while still letting callers see the full sector
+            # picture.
             "eirp",
-            "ssr",
-            "modulationMode",
             # Read-summary additions (PR 2 — slice 2).
             "apFirmwareVersion",
             "subscribersCount",
@@ -116,17 +122,20 @@ _REQUIRED_OIDS_BY_VENDOR_MODEL: Final[dict[tuple[str, str], frozenset[str]]] = {
 # radio-metrics driver path. The summary helpers in
 # ``nora.drivers.snmp_pmp450i.summaries`` look up the summary OIDs
 # directly against the resolved catalog's ``oids`` dict.
+# Issue #57 (2026-09-19): the legacy radio-metrics subset
+# (``radioDownlinkRate`` / ``radioUplinkRate`` / ``signalStrengthRx`` /
+# ``ssr`` / ``modulationMode``) was dropped from this alias too — they
+# point at per-LUID ``whispLinkEntry`` tabular columns whose ``.0``
+# instance returns ``noSuchName`` on real Cambium PMP 450i hardware.
+# The alias carries only the sector-scalar seed ``eirp`` (the only
+# OID that is also enforced by the per-triple boot-time gate). The
+# remaining sector scalars (``activeTxPowerDbh``, ``channelBandwidth``,
+# ``frequency``, ``transmitPower``) are optional in the fold path and
+# populate ``RadioMetricsReport`` only when the resolved catalog
+# carries them.
 REQUIRED_OIDS: Final[frozenset[str]] = frozenset(
     {
-        "radioDownlinkRate",
-        "radioUplinkRate",
-        "signalStrengthRx",
-        # Issue #54 (2026-09-19): ``signalStrengthTx`` dropped (broken
-        # on production firmware — maxSMTxPwr engineering-only + tabular).
-        # Sector-level active EIRP (``eirp``, ``whispBoxActiveEIRP``) replaces it.
         "eirp",
-        "ssr",
-        "modulationMode",
     }
 )
 
