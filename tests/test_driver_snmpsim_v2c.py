@@ -195,11 +195,14 @@ def _build_driver(
         vendor="cambium",
         model="pmp450i",
         firmware="15.2.1",
+        # Issue #54 (2026-09-19): ``signalStrengthTx`` (broken
+        # ``maxSMTxPwr``) replaced by ``eirp`` (``whispBoxActiveEIRP``,
+        # ``.306.0``). Hermetic stub here.
         oids={
             "radioDownlinkRate": "1.3.6.1.4.1.161.19.3.1.1.1.0",
             "radioUplinkRate": "1.3.6.1.4.1.161.19.3.1.1.2.0",
             "signalStrengthRx": "1.3.6.1.4.1.161.19.3.1.1.3.0",
-            "signalStrengthTx": "1.3.6.1.4.1.161.19.3.1.1.4.0",
+            "eirp": "1.3.6.1.4.1.161.19.3.1.1.4.0",
             "ssr": "1.3.6.1.4.1.161.19.3.1.1.5.0",
             "modulationMode": "1.3.6.1.4.1.161.19.3.1.1.6.0",
         },
@@ -235,6 +238,8 @@ def test_v2c_full_fetch_returns_typed_report(snmpsim_v2c: dict[str, Any], tmp_pa
     assert report.radio_dl_rate_bps == 54000000
     assert report.radio_ul_rate_bps == 21000000
     assert report.rx_signal_dbm == -58
-    assert report.tx_signal_dbm == 23
+    # Issue #54 (2026-09-19): ``tx_signal_dbm`` field replaced by
+    # ``eirp_dbm`` (sector-level active EIRP in dBm).
+    assert report.eirp_dbm == 44
     assert report.ssr == 75
     assert report.modulation == "256QAM"

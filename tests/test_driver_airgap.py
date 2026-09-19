@@ -177,11 +177,14 @@ def test_full_driver_path_does_not_call_banned_symbols(tmp_path: Path) -> None:
         firmware="15.2.1",
         # Issue #35 — verified WHISP-APS-MIB positions:
         # see ``data/oid-catalogs/sources/cambium/pmp450i/15.2.1.source.json``.
+        # Issue #54 (2026-09-19): ``signalStrengthTx`` (broken
+        # ``maxSMTxPwr``) replaced by ``eirp`` (``whispBoxActiveEIRP``,
+        # ``.306.0``).
         oids={
             "radioDownlinkRate": "1.3.6.1.4.1.161.19.3.1.4.1.36.0",
             "radioUplinkRate": "1.3.6.1.4.1.161.19.3.1.4.1.38.0",
             "signalStrengthRx": "1.3.6.1.4.1.161.19.3.1.4.1.34.0",
-            "signalStrengthTx": "1.3.6.1.4.1.161.19.3.1.4.1.89.0",
+            "eirp": "1.3.6.1.4.1.161.19.3.3.1.306.0",
             "ssr": "1.3.6.1.4.1.161.19.3.1.4.1.86.0",
             "modulationMode": "1.3.6.1.4.1.161.19.3.1.4.1.40.0",
         },
@@ -197,7 +200,7 @@ def test_full_driver_path_does_not_call_banned_symbols(tmp_path: Path) -> None:
         radio_dl_rate_bps=54000000,
         radio_ul_rate_bps=21000000,
         rx_signal_dbm=-58,
-        tx_signal_dbm=23,
+        eirp_dbm=44,
         ssr=75,
         modulation="256QAM",
     )
@@ -245,11 +248,14 @@ class _FakeClient:
     def get_oid(self, oid: str) -> str | int:
         # Issue #35 — verified WHISP-APS-MIB positions in
         # whispLinkTable (.3.1.4.1).
+        # Issue #54 (2026-09-19): ``.306.0`` is the sector-level
+        # whispBoxActiveEIRP (DisplayString "44 dBm"); the fold parser
+        # strips the unit and stores the integer dBm value.
         return {
             "1.3.6.1.4.1.161.19.3.1.4.1.36.0": str(self._report.radio_dl_rate_bps),
             "1.3.6.1.4.1.161.19.3.1.4.1.38.0": str(self._report.radio_ul_rate_bps),
             "1.3.6.1.4.1.161.19.3.1.4.1.34.0": str(self._report.rx_signal_dbm),
-            "1.3.6.1.4.1.161.19.3.1.4.1.89.0": str(self._report.tx_signal_dbm),
+            "1.3.6.1.4.1.161.19.3.3.1.306.0": f"{self._report.eirp_dbm} dBm",
             "1.3.6.1.4.1.161.19.3.1.4.1.86.0": str(self._report.ssr),
             "1.3.6.1.4.1.161.19.3.1.4.1.40.0": self._report.modulation,
         }[oid]

@@ -102,7 +102,10 @@ def _radio_seed_oids() -> dict[str, str]:
         "radioDownlinkRate": "1.3.6.1.4.1.161.19.3.1.4.1.36.0",
         "radioUplinkRate": "1.3.6.1.4.1.161.19.3.1.4.1.38.0",
         "signalStrengthRx": "1.3.6.1.4.1.161.19.3.1.4.1.34.0",
-        "signalStrengthTx": "1.3.6.1.4.1.161.19.3.1.4.1.89.0",
+        # Issue #54 (2026-09-19): ``signalStrengthTx`` (broken
+        # ``maxSMTxPwr``) replaced by ``eirp`` (``whispBoxActiveEIRP``,
+        # ``.306.0``).
+        "eirp": "1.3.6.1.4.1.161.19.3.3.1.306.0",
         "ssr": "1.3.6.1.4.1.161.19.3.1.4.1.86.0",
         "modulationMode": "1.3.6.1.4.1.161.19.3.1.4.1.40.0",
     }

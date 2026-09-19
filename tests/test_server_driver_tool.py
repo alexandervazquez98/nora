@@ -53,7 +53,9 @@ def _wired_driver_env(tmp_path: Path, sample_catalog: dict[str, Any], sample_inv
         radio_dl_rate_bps=54000000,
         radio_ul_rate_bps=21000000,
         rx_signal_dbm=-58,
-        tx_signal_dbm=23,
+        # Issue #54 (2026-09-19): ``tx_signal_dbm`` field replaced by
+        # ``eirp_dbm`` (sector-level active EIRP in dBm).
+        eirp_dbm=44,
         ssr=75,
         modulation="256QAM",
     )
@@ -105,7 +107,9 @@ def test_tool_returns_typed_report_payload(_wired_driver_env: Any) -> None:
         "radio_dl_rate_bps",
         "radio_ul_rate_bps",
         "rx_signal_dbm",
-        "tx_signal_dbm",
+        # Issue #54 (2026-09-19): ``tx_signal_dbm`` field replaced by
+        # ``eirp_dbm``.
+        "eirp_dbm",
         "ssr",
         "modulation",
     }

@@ -79,11 +79,14 @@ def _build_catalog() -> OidCatalogRegistry:
         vendor="cambium",
         model="pmp450i",
         firmware="15.2.1",
+        # Issue #54 (2026-09-19): ``signalStrengthTx`` (broken
+        # ``maxSMTxPwr``) replaced by ``eirp`` (``whispBoxActiveEIRP``,
+        # ``.306.0``).
         oids={
             "radioDownlinkRate": "1.3.6.1.4.1.161.19.3.1.4.1.36.0",
             "radioUplinkRate": "1.3.6.1.4.1.161.19.3.1.4.1.38.0",
             "signalStrengthRx": "1.3.6.1.4.1.161.19.3.1.4.1.34.0",
-            "signalStrengthTx": "1.3.6.1.4.1.161.19.3.1.4.1.89.0",
+            "eirp": "1.3.6.1.4.1.161.19.3.3.1.306.0",
             "ssr": "1.3.6.1.4.1.161.19.3.1.4.1.86.0",
             "modulationMode": "1.3.6.1.4.1.161.19.3.1.4.1.40.0",
         },
@@ -95,11 +98,13 @@ def _build_catalog() -> OidCatalogRegistry:
 
 
 def _fake_values() -> dict[str, str]:
+    # Issue #54 (2026-09-19): the eirp OID (.306.0) returns a
+    # DisplayString like "44 dBm"; the fold parser strips the unit.
     return {
         "1.3.6.1.4.1.161.19.3.1.4.1.36.0": "54000000",
         "1.3.6.1.4.1.161.19.3.1.4.1.38.0": "21000000",
         "1.3.6.1.4.1.161.19.3.1.4.1.34.0": "-58",
-        "1.3.6.1.4.1.161.19.3.1.4.1.89.0": "23",
+        "1.3.6.1.4.1.161.19.3.3.1.306.0": "44 dBm",
         "1.3.6.1.4.1.161.19.3.1.4.1.86.0": "75",
         "1.3.6.1.4.1.161.19.3.1.4.1.40.0": "256QAM",
     }
@@ -127,7 +132,10 @@ def test_v2c_fetch_returns_typed_report(tmp_path: Path) -> None:
     assert report.radio_dl_rate_bps == 54000000
     assert report.radio_ul_rate_bps == 21000000
     assert report.rx_signal_dbm == -58
-    assert report.tx_signal_dbm == 23
+    # Issue #54 (2026-09-19): ``tx_signal_dbm`` field replaced by
+    # ``eirp_dbm`` (sector-level active EIRP in dBm). The fold
+    # parser strips the "dBm" suffix from the DisplayString.
+    assert report.eirp_dbm == 44
     assert report.ssr == 75
     assert report.modulation == "256QAM"
     # No dict / Any field — every field is a typed scalar.

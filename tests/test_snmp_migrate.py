@@ -74,12 +74,17 @@ def _build_inventory(tmp_path: Path) -> Inventory:
 
 
 def _radio_seed_oids() -> dict[str, str]:
-    """The six radio-metrics REQUIRED_OIDs."""
+    """The six radio-metrics REQUIRED_OIDs (issue #54 rename).
+
+    Issue #54 (2026-09-19): ``signalStrengthTx`` (the broken
+    ``maxSMTxPwr`` engineering-only + tabular OID) was replaced by
+    ``eirp`` (``whispBoxActiveEIRP``, ``.306.0``).
+    """
     return {
         "radioDownlinkRate": "1.3.6.1.4.1.161.19.3.1.4.1.36.0",
         "radioUplinkRate": "1.3.6.1.4.1.161.19.3.1.4.1.38.0",
         "signalStrengthRx": "1.3.6.1.4.1.161.19.3.1.4.1.34.0",
-        "signalStrengthTx": "1.3.6.1.4.1.161.19.3.1.4.1.89.0",
+        "eirp": "1.3.6.1.4.1.161.19.3.3.1.306.0",
         "ssr": "1.3.6.1.4.1.161.19.3.1.4.1.86.0",
         "modulationMode": "1.3.6.1.4.1.161.19.3.1.4.1.40.0",
     }

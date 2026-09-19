@@ -100,7 +100,7 @@
       "rebootIfRequired"
     ]
   },
-  "hmac_sha256": "808febf4a7fbb01440a4c57204d4d7c67c5d55f012adb85326bf948d8879c303",
+  "hmac_sha256": "62a206a939310250c792705cb21b7e4fb8577d783c5df73a2f59f448011620a9",
   "_provenance": {
     "source": "WHISP-BOX-MIBV2-MIB and WHISP-APS-MIB from operator's ~/Downloads/PM450 25.0.1 MIBS.zip (extracted 2026-09-18). Cross-checked MIB object positions against shipped 25.1.0 baseline; no zero-drift differences found.",
     "verification_date": "2026-09-18",

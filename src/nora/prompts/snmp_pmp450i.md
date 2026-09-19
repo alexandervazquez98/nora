@@ -20,7 +20,7 @@ Subscriber Module over SNMPv2c or SNMPv3 (auth+priv).
   - `radio_dl_rate_bps` (int)
   - `radio_ul_rate_bps` (int)
   - `rx_signal_dbm` (int)
-  - `tx_signal_dbm` (int)
+  - `eirp_dbm` (int — sector-level active EIRP in dBm; issue #54)
   - `ssr` (int)
   - `modulation` (string)
 

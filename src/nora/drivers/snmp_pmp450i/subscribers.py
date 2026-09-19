@@ -524,9 +524,7 @@ def _per_luid_oid(dotted: str, luid: str) -> str:
         The per-LUID form, e.g. ``"1.3.6.1.4.1.161.19.3.1.4.1.74.3"``.
     """
     if not dotted.endswith(".0"):
-        raise ValueError(
-            f"per-LUID dispatch expects a scalar OID ending in '.0'; got {dotted!r}"
-        )
+        raise ValueError(f"per-LUID dispatch expects a scalar OID ending in '.0'; got {dotted!r}")
     return dotted[:-2] + f".{luid}"
 
 
