@@ -97,6 +97,8 @@ The real Cambium sweep protocol requires SET frames (write duration, arm, start)
 
 **Driver-R2 invariant preserved**: the base `SnmpClient` Protocol keeps its read-only docstring + the property test (`tests/test_driver_snmp_pmp450i_readonly.py` if present) still passes. The new `WritableSnmpClient` Protocol is opt-in: callers that need it import explicitly. `V2CClient` and `V3Client` stay read-only at the type level; the write capability lives on the `Writable*` adapter.
 
+**Tests**: `tests/snmp_pmp450i/test_writable_client.py` (new, 19 hermetic tests) covers the Protocol structural contract (superset, runtime-checkable, single-verb exposure), adapter composition (forward `get_oid`/`walk`/`close`, route `set` through `_call_async`, int+str SET values, v2c+v3 paths), and driver integration (`writable_client_factory` round-trip, default-factory dispatch, base `SnmpClient` still read-only). The readonly gate test (`tests/test_driver_snmp450i_readonly.py`) gains a narrow `_WRITABLE_SEAM_FILES` allow-list covering exactly `{client.py, v2c.py, v3.py}` — adding a NEW file to that constant is itself a Driver-R2 violation and must come with an updated ADR. WU-3 later adds `spectrum.py` to the same allow-list with the documented rationale that the spectrum helper is the WU-3 consumer of the WU-2 seam.
+
 ### WU-3: Spectrum helper rewrite (`src/nora/drivers/snmp_pmp450i/spectrum.py`)
 
 **Touch**:
@@ -112,17 +114,7 @@ The real Cambium sweep protocol requires SET frames (write duration, arm, start)
 - New helpers: `_arm_sweep(client, duration_oid, action_oid, duration)`, `_poll_sweep_status(client, action_oid, poll_interval, timeout) -> int`.
 - Tier-1 `operator_confirmed` gate + maintenance-window guard preserved.
 
-**Tests**: `tests/snmp_pmp450i/test_spectrum.py` covers happy path, timeout, ARM-only (no START), maintenance-window rejection, Tier-1 refusal. `test_oid_catalog_integration.py` covers the new required-OID set + HMAC verification.
-
-### WU-3: Tests for spectrum sweep + conftest alignment
-
-**Touch**:
-- `tests/conftest.py` (existing `spectrumNoiseFloorA/B/C` aliases — drop or align with new schema)
-- `tests/snmp_pmp450i/test_spectrum.py` (full coverage)
-
-**Change**:
-- Drop the legacy 4 OIDs from the conftest catalog stub; add `spectrumScanDuration` and `spectrumScanAction` aliases.
-- New tests use a fake `SnmpClient` that records SET/GET sequence and lets the test inject the polled-status sequence.
+**Tests**: `tests/test_snmp_spectrum.py` (full rewrite, 11 tests, module-level `pytest.mark.skip` removed) covers happy path (SET duration, 8, 1; GET-poll returns 0), timeout path (raises `SpectrumSweepTimeout` with `last_status`), Tier-1 `operator_confirmed` gate, maintenance-window gate, catalog miss (LookupError on missing OID name), `sweep_duration_seconds` override, client lifecycle (close on success AND exception paths), frozen model (mutation attempt raises), SET ordering (duration before 8 before 1), poll sentinel (no stale `last_status`), and `scan_outcome=COMPLETED` only when `final_status==0`. Conftest catalog fixture alignment (`tests/conftest.py`, `tests/test_oid_catalog.py`, `tests/test_oid_catalog_integration.py`) landed inside WU-1 alongside the catalog re-sign, not here. `tests/test_config.py` field-count assertion (16 → 19) updated to enumerate the three new spectrum knobs. `tests/test_driver_snmp450i_readonly.py` allow-list extended with `spectrum.py` per the documented WU-3 rationale (spectrum helper is the WU-3 consumer of the WU-2 writable seam).
 
 ### WU-4: Per-SM community overrides — public API
 
