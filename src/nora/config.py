@@ -123,7 +123,48 @@ class Settings(BaseSettings):
     # non-existent path) skips the tool-spec dir without raising.
     nora_tool_specs_dir: Path | None = Path("docs/tool_specs")
 
+    # --- ICMP probe (issue #61) ---------------------------------------------
+    # Default probe duration when the operator does not specify one on the
+    # tool call. The hard floor / ceiling is enforced by the `_validate_`
+    # model validator below and by the FastMCP tool wiring (WU-1.5).
+    nora_icmp_default_duration_seconds: int = 600
+    # Inter-packet interval. 1.0s mirrors issue §3 default cadence.
+    nora_icmp_default_interval_seconds: float = 1.0
+    # ICMP echo payload size (bytes). 64 mirrors the standard `ping -s 56`
+    # + 8-byte ICMP header convention.
+    nora_icmp_default_packet_size_bytes: int = 64
+    # Per-packet `wait_for` timeout forwarded to `UnprivilegedIcmpPinger`.
+    nora_icmp_per_packet_timeout_seconds: float = 5.0
+    # Hard upper bound on operator-supplied probe duration (30 min).
+    nora_icmp_max_duration_seconds: int = 1800
+    # Hard lower bound on operator-supplied probe duration (1 min).
+    nora_icmp_min_duration_seconds: int = 60
+
     loaded_from: LoadSource = "defaults"
+
+    @model_validator(mode="after")
+    def _validate_icmp_duration_bounds(self) -> Settings:
+        """Enforce `min <= default <= max` on the ICMP duration triplet.
+
+        Issue #61 §3 caps probe duration at 30 min; the validator fails
+        closed on operator-supplied misconfigurations before the engine
+        (WU-1.1) or the FastMCP tool wiring (WU-1.5) ever read them.
+        """
+        if self.nora_icmp_min_duration_seconds > self.nora_icmp_default_duration_seconds:
+            raise ValueError(
+                f"nora_icmp_min_duration_seconds "
+                f"({self.nora_icmp_min_duration_seconds}) must be <= "
+                f"nora_icmp_default_duration_seconds "
+                f"({self.nora_icmp_default_duration_seconds})"
+            )
+        if self.nora_icmp_default_duration_seconds > self.nora_icmp_max_duration_seconds:
+            raise ValueError(
+                f"nora_icmp_default_duration_seconds "
+                f"({self.nora_icmp_default_duration_seconds}) must be <= "
+                f"nora_icmp_max_duration_seconds "
+                f"({self.nora_icmp_max_duration_seconds})"
+            )
+        return self
 
     @model_validator(mode="before")
     @classmethod
