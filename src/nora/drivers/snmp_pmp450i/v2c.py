@@ -6,6 +6,14 @@ to expose a synchronous read-only surface that the driver can call
 without pytest-asyncio or an event loop.
 
 Errors are mapped to typed driver exceptions.
+
+Driver-R2 carve-out (issue #62, 2026-09-19): the read-only
+``V2CClient`` stays read-only. The write capability lives on
+``WritableV2CClient`` (below) which wraps a ``V2CClient`` and forwards
+``get_oid`` / ``walk`` / ``close`` to it, exposing ``set`` only via
+the ``puresnmp.PyWrapper.set`` async coroutine. The carve-out is
+narrowly scoped to this file (``v2c.py``) — see
+``tests/test_driver_snmp450i_readonly.py::_WRITABLE_SEAM_FILES``.
 """
 
 from __future__ import annotations
@@ -26,7 +34,7 @@ from nora.drivers.exceptions import (
 )
 from nora.drivers.inventory import Device
 
-from .client import SnmpClient
+from .client import SnmpClient, WritableSnmpClient
 
 
 class V2CClient:
@@ -184,4 +192,94 @@ def make_v2c_client(device: Device) -> SnmpClient:
     return V2CClient(device)
 
 
-__all__ = ["V2CClient", "make_v2c_client"]
+# ---------------------------------------------------------------------------
+# Writable seam — Driver-R2 carve-out (issue #62, 2026-09-19)
+# ---------------------------------------------------------------------------
+
+
+class WritableV2CClient:
+    """Write-capable adapter wrapping a read-only :class:`V2CClient`.
+
+    The Cambium WHISP-BOX-MIBV2-MIB sweep protocol requires SET
+    frames against ``whispBoxSpectrumScanDuration`` (`.220.0`) and
+    ``whispBoxSpectrumScanAction`` (`.221.0`); ``V2CClient`` itself
+    stays read-only. This adapter forwards the read-only surface
+    unchanged and adds a single ``set(oid, value)`` verb that drives
+    ``puresnmp.PyWrapper.set`` through the same asyncio.run plumbing
+    as ``_call_async``.
+
+    The adapter is NOT itself a :class:`V2CClient`; it composes one.
+    Construction accepts either an already-built ``V2CClient`` (so
+    tests can inject a mock by wrapping their mock) OR the same
+    ``device`` + ``timeout`` / ``retries`` kwargs as ``V2CClient``
+    (so production code can pass a factory result transparently).
+    """
+
+    def __init__(
+        self,
+        client: V2CClient | None = None,
+        *,
+        device: Device | None = None,
+        timeout: float = 5.0,
+        retries: int = 1,
+    ) -> None:
+        if client is not None:
+            if device is not None:
+                raise ValueError("WritableV2CClient: pass either `client` or `device`, not both")
+            self._inner = client
+        elif device is not None:
+            self._inner = V2CClient(device, timeout=timeout, retries=retries)
+        else:
+            raise ValueError("WritableV2CClient requires either an existing V2CClient or a Device")
+
+    # ------------------------------------------------------------------
+    # Forwarded read-only surface
+    # ------------------------------------------------------------------
+
+    def get_oid(self, oid: str) -> str | int:
+        return self._inner.get_oid(oid)
+
+    def walk(self, base_oid: str) -> list[tuple[str, str | int]]:
+        return self._inner.walk(base_oid)
+
+    def close(self) -> None:
+        self._inner.close()
+
+    # ------------------------------------------------------------------
+    # Writable seam — single `set` verb
+    # ------------------------------------------------------------------
+
+    def set(self, oid: str, value: str | int) -> None:
+        """Emit one SNMP SET frame against `oid` with `value`.
+
+        Delegates to ``puresnmp.PyWrapper.set`` via the same async-run
+        plumbing as ``V2CClient._call_async``. ``puresnmp`` requires
+        typed values, so ``int`` is coerced to ``x690.types.Integer``
+        and ``str`` to ``x690.types.OctetString`` before emitting.
+        Wire failures surface as typed driver exceptions via the existing
+        exception mapping (``SnmpTimeoutError`` / ``NetworkUnreachableError``).
+        """
+        import x690.types as x690_types
+
+        if isinstance(value, x690_types.X690Type):
+            typed_val: Any = value
+        elif isinstance(value, int):
+            typed_val = x690_types.Integer(value)
+        elif isinstance(value, str):
+            typed_val = x690_types.OctetString(value.encode("ascii", errors="replace"))
+        else:
+            typed_val = value
+
+        result = self._inner._call_async("set", oid, typed_val)
+        # `puresnmp.PyWrapper.set` returns the assigned varbind on
+        # success; we intentionally swallow it so the Protocol contract
+        # (returns ``None``) holds for the sweep / migrate callers.
+        del result
+
+
+def make_writable_v2c_client(device: Device) -> WritableSnmpClient:
+    """Factory used by the driver to construct a write-capable v2c client."""
+    return WritableV2CClient(device=device)
+
+
+__all__ = ["V2CClient", "WritableV2CClient", "make_v2c_client", "make_writable_v2c_client"]

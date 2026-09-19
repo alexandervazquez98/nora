@@ -35,15 +35,26 @@ from nora.drivers.exceptions import (
     UncataloguedToolError,
 )
 from nora.drivers.inventory import Device, Inventory
-from nora.drivers.snmp_pmp450i.client import SnmpClient
+from nora.drivers.snmp_pmp450i.client import SnmpClient, WritableSnmpClient
 from nora.drivers.snmp_pmp450i.driver import (
     Pmp450iDriver,
     Pmp450iSnmpDriver,
     default_client_factory,
+    default_writable_client_factory,
 )
 from nora.drivers.snmp_pmp450i.report import RadioMetricsReport
-from nora.drivers.snmp_pmp450i.v2c import V2CClient, make_v2c_client
-from nora.drivers.snmp_pmp450i.v3 import V3Client, make_v3_client
+from nora.drivers.snmp_pmp450i.v2c import (
+    V2CClient,
+    WritableV2CClient,
+    make_v2c_client,
+    make_writable_v2c_client,
+)
+from nora.drivers.snmp_pmp450i.v3 import (
+    V3Client,
+    WritableV3Client,
+    make_v3_client,
+    make_writable_v3_client,
+)
 
 __all__ = [
     "DriverError",
@@ -61,12 +72,18 @@ __all__ = [
     "Device",
     "Inventory",
     "SnmpClient",
+    "WritableSnmpClient",
     "V2CClient",
+    "WritableV2CClient",
     "V3Client",
+    "WritableV3Client",
     "make_v2c_client",
+    "make_writable_v2c_client",
     "make_v3_client",
+    "make_writable_v3_client",
     "RadioMetricsReport",
     "Pmp450iDriver",
     "Pmp450iSnmpDriver",
     "default_client_factory",
+    "default_writable_client_factory",
 ]

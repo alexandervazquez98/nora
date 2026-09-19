@@ -302,37 +302,69 @@ def snmp_get_sm_detailed_diagnostics(device_id: str, luid: str) -> dict[str, Any
 
 
 @mcp.tool
-def snmp_run_spectrum_analysis(device_id: str, operator_confirmed: bool = False) -> dict[str, Any]:
-    """Read a typed spectrum sweep for the named PMP 450i device.
+def snmp_run_spectrum_analysis(
+    device_id: str,
+    operator_confirmed: bool = False,
+    sweep_duration_seconds: int | None = None,
+) -> dict[str, Any]:
+    """Run the real Cambium spectrum sweep against the named PMP 450i device.
 
-    Returns a :class:`SpectrumAnalysis` carrying
-    ``ranked_clean_frequencies`` (sorted by ascending noise floor),
-    ``noise_floor_dbm`` (frequency-kHz → noise-dBm map), and
-    ``scan_started_at``.
+    Returns a :class:`SpectrumSweepResult` carrying ``device_id``,
+    ``scan_started_at`` (UTC ISO-8601, marking the SET-arm call),
+    ``scan_completed_at`` (UTC ISO-8601, marking the moment ``.221.0``
+    returned ``0``/idle), ``sweep_duration_seconds`` (echoes the
+    duration SET on ``.220.0``), ``final_status`` (last polled value
+    on ``.221.0``), ``scan_outcome`` (``COMPLETED`` | ``TIMEOUT`` |
+    ``ABORTED``), ``ranked_clean_frequencies`` (empty in WU-3 — real
+    per-bin noise decoding is a future slice), and ``noise_floor_dbm``
+    (empty in WU-3 for the same reason).
 
-    Per `pmp450i-radio-tools/spec.md` sub-cluster 3 requirement
-    "snmp_run_spectrum_analysis — Ranked Clean Frequencies +
-    Maintenance Window": calls outside the configured maintenance
-    window raise :class:`MaintenanceWindowViolation` and emit zero
-    wire frames.
+    Wire protocol (issue #62, 2026-09-19): the helper emits SET
+    ``.220.0 = duration`` then SET ``.221.0 = 8`` (arm) then SET
+    ``.221.0 = 1`` (start), then GET-polls ``.221.0`` every
+    ``Settings.nora_spectrum_sweep_poll_interval_seconds`` (default
+    1.0s) until the scalar returns ``0`` (idle) OR
+    ``Settings.nora_spectrum_sweep_timeout_seconds`` (default 60s)
+    elapses.
 
-    Per issue #43 ADDED requirement "Tier-1 Operator Clearance Gate":
-    ``operator_confirmed`` defaults to ``False`` (fail-closed). The
-    server-side gate raises :class:`Tier1ClearanceRequired` BEFORE any
-    wire frame when ``operator_confirmed`` is False (or absent). The
-    LLM orchestrator MUST request operator clearance before invoking.
+    Gates (preserve existing behaviour):
+      * Tier-1 ``operator_confirmed`` gate FIRST (per issue #43 ADDED
+        requirement "Tier-1 Operator Clearance Gate"). The default is
+        ``False`` (fail-closed); the server-side gate raises
+        :class:`Tier1ClearanceRequired` BEFORE any wire frame when
+        ``operator_confirmed`` is False (or absent). The LLM
+        orchestrator MUST request operator clearance before invoking.
+      * Maintenance window check SECOND (per
+        `pmp450i-radio-tools/spec.md` sub-cluster 3 requirement
+        "snmp_run_spectrum_analysis — Ranked Clean Frequencies +
+        Maintenance Window"). Outside the configured window the
+        helper raises :class:`MaintenanceWindowViolation` and emits
+        zero wire frames.
+
+    ``sweep_duration_seconds`` (1..600; optional): when supplied,
+    overrides ``Settings.nora_spectrum_sweep_duration_seconds`` (the
+    default 15). Out-of-range values raise :class:`ValueError` at the
+    Pydantic boundary BEFORE any wire frame.
+
+    On poll timeout (``.221.0`` does not return to ``0`` within
+    ``Settings.nora_spectrum_sweep_timeout_seconds``) the helper
+    raises :class:`SpectrumSweepTimeout` carrying ``device_id``,
+    ``duration_seconds``, and ``last_status`` so the orchestrator
+    receives an explicit signal instead of silently consuming a
+    partial sweep.
     """
     from nora.drivers.snmp_pmp450i.spectrum import fetch_spectrum
 
     driver = get_driver()
     settings = get_runtime_state()
-    analysis = fetch_spectrum(
+    result = fetch_spectrum(
         driver=driver,
         device_id=device_id,
         settings=settings,
         operator_confirmed=operator_confirmed,
+        sweep_duration_seconds=sweep_duration_seconds,
     )
-    return analysis.model_dump(mode="json")
+    return result.model_dump(mode="json")
 
 
 # ---------------------------------------------------------------------------

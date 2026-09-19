@@ -5,6 +5,14 @@ Mirrors `V2CClient` but uses `V3(user, Auth(key, method), Priv(key, method))`.
 `pyproject.toml`) — without it, `puresnmp.Auth` / `puresnmp.Priv`
 construction still works because they are plain namedtuples, but the
 HMAC / encryption routines aren't available.
+
+Driver-R2 carve-out (issue #62, 2026-09-19): the read-only
+``V3Client`` stays read-only. The write capability lives on
+``WritableV3Client`` (below) which wraps a ``V3Client`` and forwards
+``get_oid`` / ``walk`` / ``close`` to it, exposing ``set`` only via
+the ``puresnmp.PyWrapper.set`` async coroutine. The carve-out is
+narrowly scoped to this file (``v3.py``) — see
+``tests/test_driver_snmp450i_readonly.py::_WRITABLE_SEAM_FILES``.
 """
 
 from __future__ import annotations
@@ -27,7 +35,7 @@ from nora.drivers.exceptions import (
 )
 from nora.drivers.inventory import Device
 
-from .client import SnmpClient
+from .client import SnmpClient, WritableSnmpClient
 
 # Default auth / priv protocols. SHA + AES-128 are the Cambium PMP 450i
 # defaults; operators needing a different pair set explicit values via
@@ -201,4 +209,95 @@ def make_v3_client(device: Device) -> SnmpClient:
     return V3Client(device)
 
 
-__all__ = ["V3Client", "make_v3_client"]
+# ---------------------------------------------------------------------------
+# Writable seam — Driver-R2 carve-out (issue #62, 2026-09-19)
+# ---------------------------------------------------------------------------
+
+
+class WritableV3Client:
+    """Write-capable adapter wrapping a read-only :class:`V3Client`.
+
+    Mirror of :class:`WritableV2CClient` for SNMPv3 — same thin
+    forward-the-read-only-surface-and-add-`set` pattern. The Cambium
+    WHISP-BOX-MIBV2-MIB sweep protocol requires SET frames regardless
+    of credential family; both adapters expose the same Protocol
+    surface (``get_oid`` / ``walk`` / ``close`` / ``set``) so the
+    driver can pick one at wire-up time and not branch on v2c-vs-v3
+    inside the sweep loop.
+    """
+
+    def __init__(
+        self,
+        client: V3Client | None = None,
+        *,
+        device: Device | None = None,
+        auth_protocol: str = _DEFAULT_AUTH_PROTOCOL,
+        priv_protocol: str = _DEFAULT_PRIV_PROTOCOL,
+        timeout: float = 5.0,
+        retries: int = 1,
+        user: str = _DEFAULT_USER,
+    ) -> None:
+        if client is not None:
+            if device is not None:
+                raise ValueError("WritableV3Client: pass either `client` or `device`, not both")
+            self._inner = client
+        elif device is not None:
+            self._inner = V3Client(
+                device,
+                auth_protocol=auth_protocol,
+                priv_protocol=priv_protocol,
+                timeout=timeout,
+                retries=retries,
+                user=user,
+            )
+        else:
+            raise ValueError("WritableV3Client requires either an existing V3Client or a Device")
+
+    # ------------------------------------------------------------------
+    # Forwarded read-only surface
+    # ------------------------------------------------------------------
+
+    def get_oid(self, oid: str) -> str | int:
+        return self._inner.get_oid(oid)
+
+    def walk(self, base_oid: str) -> list[tuple[str, str | int]]:
+        return self._inner.walk(base_oid)
+
+    def close(self) -> None:
+        self._inner.close()
+
+    # ------------------------------------------------------------------
+    # Writable seam — single `set` verb
+    # ------------------------------------------------------------------
+
+    def set(self, oid: str, value: str | int) -> None:
+        """Emit one SNMPv3 SET frame against `oid` with `value`.
+
+        Delegates to ``puresnmp.PyWrapper.set`` via the same async-run
+        plumbing as ``V3Client._call_async``. ``puresnmp`` requires
+        typed values, so ``int`` is coerced to ``x690.types.Integer``
+        and ``str`` to ``x690.types.OctetString`` before emitting.
+        Wire failures surface as typed driver exceptions via the existing
+        exception mapping (``SnmpTimeoutError`` / ``NetworkUnreachableError``).
+        """
+        import x690.types as x690_types
+
+        if isinstance(value, x690_types.X690Type):
+            typed_val: Any = value
+        elif isinstance(value, int):
+            typed_val = x690_types.Integer(value)
+        elif isinstance(value, str):
+            typed_val = x690_types.OctetString(value.encode("ascii", errors="replace"))
+        else:
+            typed_val = value
+
+        result = self._inner._call_async("set", oid, typed_val)
+        del result
+
+
+def make_writable_v3_client(device: Device) -> WritableSnmpClient:
+    """Factory used by the driver to construct a write-capable v3 client."""
+    return WritableV3Client(device=device)
+
+
+__all__ = ["V3Client", "WritableV3Client", "make_v3_client", "make_writable_v3_client"]

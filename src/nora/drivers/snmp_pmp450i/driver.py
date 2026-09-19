@@ -34,7 +34,7 @@ from nora.drivers.exceptions import (
 from nora.drivers.inventory import Device
 from nora.drivers.mutable_inventory import _InventoryLike
 from nora.drivers.oid_catalog import REQUIRED_OIDS, OidCatalog, OidCatalogRegistry
-from nora.drivers.snmp_pmp450i.client import SnmpClient
+from nora.drivers.snmp_pmp450i.client import SnmpClient, WritableSnmpClient
 from nora.drivers.snmp_pmp450i.report import RadioMetricsReport
 
 logger = logging.getLogger("nora.drivers.snmp_pmp450i")
@@ -67,6 +67,24 @@ def default_client_factory(device: Device) -> SnmpClient:
     return make_v3_client(device)
 
 
+def default_writable_client_factory(device: Device) -> WritableSnmpClient:
+    """Pick the v2c or v3 write-capable adapter from `device.snmp_version`.
+
+    Driver-R2 carve-out (issue #62, 2026-09-19): the read-only
+    :class:`SnmpClient` Protocol forbids write verbs; the spectrum /
+    migrate helpers need a client that exposes ``set``. This factory
+    selects the matching ``Writable*`` adapter so the driver exposes
+    a single ``writable_client_factory`` seam the helpers can use
+    without branching on v2c-vs-v3.
+    """
+    from nora.drivers.snmp_pmp450i.v2c import make_writable_v2c_client
+    from nora.drivers.snmp_pmp450i.v3 import make_writable_v3_client
+
+    if device.snmp_version == "v2c":
+        return make_writable_v2c_client(device)
+    return make_writable_v3_client(device)
+
+
 class Pmp450iDriver:
     """Public facade over the PMP 450i driver layer.
 
@@ -81,6 +99,9 @@ class Pmp450iDriver:
         inventory: _InventoryLike,
         catalog_registry: OidCatalogRegistry,
         client_factory: Callable[[Device], SnmpClient] = default_client_factory,
+        writable_client_factory: Callable[
+            [Device], WritableSnmpClient
+        ] = default_writable_client_factory,
     ) -> None:
         # `_InventoryLike` is the seam (issue #42 / Task 3): both the
         # frozen `Inventory` (back-compat for the 8 read sites) AND
@@ -92,6 +113,13 @@ class Pmp450iDriver:
         self._inventory = inventory
         self._catalog_registry = catalog_registry
         self._client_factory = client_factory
+        # Driver-R2 carve-out (issue #62, 2026-09-19): the writable
+        # seam is opt-in. The default factory wraps the matching
+        # `Writable*` adapter around the device; tests inject a fake
+        # that records SET/GET sequences. No read-side call site ever
+        # touches this attribute — it exists for `spectrum.py` /
+        # `migrate.py` (the WU-3+ helpers) to consume.
+        self._writable_client_factory = writable_client_factory
 
     # ------------------------------------------------------------------
     # Runtime mutation — `register_device` MCP tool seam (issue #42).
@@ -193,6 +221,7 @@ __all__ = [
     "Pmp450iDriver",
     "Pmp450iSnmpDriver",
     "default_client_factory",
+    "default_writable_client_factory",
 ]
 
 

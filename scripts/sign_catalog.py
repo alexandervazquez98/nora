@@ -110,11 +110,8 @@ TOOLS_V1: dict[str, list[str]] = {
         "smRetransmits",
     ],
     "snmp_run_spectrum_analysis": [
-        "spectrumNoiseFloorA",
-        "spectrumNoiseFloorB",
-        "spectrumNoiseFloorC",
-        "spectrumChannelRank",
-        "spectrumScanStatus",
+        "spectrumScanDuration",
+        "spectrumScanAction",
     ],
     "snmp_migrate_radio_frequency": [
         "migrateCarrierFrequency",

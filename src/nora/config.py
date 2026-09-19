@@ -122,6 +122,34 @@ class Settings(BaseSettings):
     # `PromptRegistry.from_settings` reads this field; `None` (or a
     # non-existent path) skips the tool-spec dir without raising.
     nora_tool_specs_dir: Path | None = Path("docs/tool_specs")
+    # --- Slice 4 — spectrum sweep SET/GET poll (PR 4 / issue #62 WU-3) ---
+    # Default sweep duration in seconds. The hard [1, 600] bound is
+    # enforced by the validator below and by the FastMCP tool wiring
+    # (snmp_run_spectrum_analysis accepts an optional override at call
+    # time). Mirrors the ICMP probe config layout.
+    #
+    # 30s is the operator's recommended production baseline (2026-09-19)
+    # for "sufficient RF sampling across unforeseen noise bursts". It also
+    # covers the TDD buffer flush latency observed on physical PMP 450i
+    # radios (1.5-2.5s on firmware 25.0.1) so the spectrum poll loop's
+    # startup guard `elapsed >= sweep_duration_seconds` is always safely
+    # larger than the radio's pre-state window.
+    nora_spectrum_sweep_duration_seconds: int = 30
+    # Inter-poll interval. 1.0s mirrors the Cambium WHISP-BOX-MIBV2-MIB
+    # recommendation; the WU-3 helper defaults to this.
+    nora_spectrum_sweep_poll_interval_seconds: float = 1.0
+    # Hard upper bound on a single sweep (poll loop). Default 150s covers
+    # the operator-observed Cambium PMP 450i AP "timed sector spectrum
+    # analysis" cycle of ~95-105s plus re-association slack (~15s); the
+    # AP initiates a sector-coordinated sweep that takes ~7x the duration
+    # SET value, regardless of the parameter. SM sweeps finish in ~15s
+    # and re-associate in ~20s, so 150s covers both AP and SM paths with
+    # headroom. Operator-overridable per-call via
+    # snmp_run_spectrum_analysis(sweep_duration_seconds=...) — note that
+    # only the duration SET is overridable; the timeout stays a Settings
+    # knob (the sweep_duration_seconds tool param controls the SET value,
+    # not the poll timeout).
+    nora_spectrum_sweep_timeout_seconds: int = 150
 
     loaded_from: LoadSource = "defaults"
 
@@ -153,6 +181,31 @@ class Settings(BaseSettings):
 
         values["loaded_from"] = "defaults"
         return values
+
+    @model_validator(mode="after")
+    def _validate_spectrum_sweep_duration_bounds(self) -> "Settings":
+        """Bound ``nora_spectrum_sweep_duration_seconds`` to the documented [1, 600] range.
+
+        Issue #62 / WU-3: the FastMCP tool wiring accepts an optional
+        ``sweep_duration_seconds`` override at call time, but the
+        stored default and the runtime override must BOTH land in
+        ``[1, 600]`` so the helper never SETs a duration outside the
+        Cambium WHISP-BOX-MIBV2-MIB's supported range. Mirrors the
+        ICMP probe ``_validate_icmp_duration_bounds`` pattern.
+
+        Raising here keeps the contract fail-closed: a misconfigured
+        boot (``NORA_SPECTRUM_SWEEP_DURATION_SECONDS=0``) is caught
+        before the first sweep rather than silently emitting an
+        out-of-range SET frame against ``.220.0``.
+        """
+        duration = int(self.nora_spectrum_sweep_duration_seconds)
+        if duration < 1 or duration > 600:
+            raise ValueError(
+                f"nora_spectrum_sweep_duration_seconds={duration} "
+                f"is outside the documented [1, 600] range; "
+                f"see Settings.nora_spectrum_sweep_duration_seconds"
+            )
+        return self
 
     def __init__(self, **values: Any) -> None:
         """Detect the source of values BEFORE merging, then delegate to super.
