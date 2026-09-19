@@ -281,17 +281,26 @@ def _sm_session_table() -> list[tuple[str, str | int]]:
             86400,
         ),  # smSessionUptime
         (f"{base}.74.1", 25),  # smCinr (dB)
-        (f"{base}.19.1", "LINKED"),  # smLinkStatus
+        # Issue #58 (2026-09-19): ``linkSessState`` is an INTEGER
+        # enum (``idle=0``, ``inSession=1``, ``clearing=2``, etc.)
+        # per WHISP-APS-MIB. The radio never returns the legacy
+        # ``"LINKED"`` string. ``1`` (``inSession``) is the
+        # canonical active value.
+        (f"{base}.19.1", 1),  # smLinkStatus: inSession
         (f"{base}.1.1", "001"),  # smLuid
         # SM 2 — ACTIVE_DEGRADED: low CINR.
         (f"{base}.46.2", 43200),
         (f"{base}.74.2", 12),  # cinr < 18 → degraded
-        (f"{base}.19.2", "LINKED"),
+        (f"{base}.19.2", 1),  # inSession (still active, but degraded signal)
         (f"{base}.1.2", "002"),
         # SM 3 — PRE_EXISTING_OFFLINE (uptime == 0).
         (f"{base}.46.3", 0),
         (f"{base}.74.3", 0),
-        (f"{base}.19.3", "DOWN"),
+        # ``0`` (``idle``) is the canonical offline value; the
+        # fold helper maps it to ``"idle"`` and
+        # ``categorize_subscribers`` routes it to
+        # ``PRE_EXISTING_OFFLINE``.
+        (f"{base}.19.3", 0),  # smLinkStatus: idle
         (f"{base}.1.3", "003"),
     ]
     return rows
@@ -375,7 +384,9 @@ def test_sm_table_categorizes_active_degraded_low_cinr(
     rows = [
         (f"{base}.46.1", 43200),  # uptime > 0
         (f"{base}.74.1", 12),  # cinr 12 dB (< 18)
-        (f"{base}.19.1", "LINKED"),
+        # Issue #58 (2026-09-19): ``linkSessState`` is an INTEGER enum;
+        # ``1`` = ``inSession``.
+        (f"{base}.19.1", 1),
         (f"{base}.1.1", "002"),
     ]
     canned = _FakeSnmpClient(
@@ -441,12 +452,16 @@ def test_sm_table_categorizes_pre_existing_offline(
         # SM 1 — ONLINE_ACTIVE.
         (f"{base}.46.1", 86400),
         (f"{base}.74.1", 25),
-        (f"{base}.19.1", "LINKED"),
+        # Issue #58 (2026-09-19): ``linkSessState`` INTEGER enum;
+        # ``1`` = ``inSession``.
+        (f"{base}.19.1", 1),
         (f"{base}.1.1", "001"),
-        # SM 3 — known pre-existing offline (history cross-check).
+        # SM 3 — recovered from a prior intervention: uptime > 0,
+        # inSession, healthy CINR. Was down at intervention time
+        # (``pre_existing_list`` records it), but is back online now.
         (f"{base}.46.3", 86400),  # uptime > 0
         (f"{base}.74.3", 22),
-        (f"{base}.19.3", "LINKED"),
+        (f"{base}.19.3", 1),  # inSession
         (f"{base}.1.3", "003"),
     ]
     canned = _FakeSnmpClient(
@@ -462,12 +477,18 @@ def test_sm_table_categorizes_pre_existing_offline(
     pre_existing_luids = [r["luid"] for r in dumped["pre_existing_offline"]]
     online_active_luids = [r["luid"] for r in dumped["online_active"]]
 
-    assert "003" in pre_existing_luids, (
-        f"Expected SM 003 in PRE_EXISTING_OFFLINE via cross-check; got "
+    # Issue #58 (2026-09-19): a recovered subscriber (uptime > 0,
+    # inSession) MUST be categorised by signal health, NOT
+    # condemned to PRE_EXISTING_OFFLINE by the intervention-memory
+    # cross-check. The previous test expected SM 003 in the
+    # pre_existing bucket; that was the bug WU-E fixed.
+    assert "003" not in pre_existing_luids, (
+        f"Recovered SM 003 must NOT be condemned to PRE_EXISTING_OFFLINE; got "
         f"pre_existing={pre_existing_luids} online={online_active_luids}"
     )
+    assert "003" in online_active_luids
     assert "001" in online_active_luids
-    assert dumped["baseline_size"] == 1
+    assert dumped["baseline_size"] == 2
 
 
 # ---------------------------------------------------------------------------
@@ -503,17 +524,19 @@ def test_sm_table_unbiased_baseline_excludes_pre_existing(
         # SM 1 — ONLINE_ACTIVE.
         (f"{base}.46.1", 86400),
         (f"{base}.74.1", 25),
-        (f"{base}.19.1", "LINKED"),
+        # Issue #58 (2026-09-19): ``linkSessState`` INTEGER enum.
+        (f"{base}.19.1", 1),  # inSession
         (f"{base}.1.1", "001"),
         # SM 2 — ACTIVE_DEGRADED.
         (f"{base}.46.2", 43200),
         (f"{base}.74.2", 12),
-        (f"{base}.19.2", "LINKED"),
+        (f"{base}.19.2", 1),  # inSession (active but degraded signal)
         (f"{base}.1.2", "002"),
         # SM 3 — PRE_EXISTING_OFFLINE.
         (f"{base}.46.3", 0),
         (f"{base}.74.3", 0),
-        (f"{base}.19.3", "DOWN"),
+        # ``0`` = ``idle`` (canonical offline value).
+        (f"{base}.19.3", 0),
         (f"{base}.1.3", "003"),
     ]
     canned = _FakeSnmpClient(
@@ -743,6 +766,53 @@ class _HermeticSettings:
 
 
 # ---------------------------------------------------------------------------
+# Issue #58 (2026-09-19) — recovered-subscriber invariant.
+# ---------------------------------------------------------------------------
+
+
+def test_recovered_subscriber_not_condemned_to_pre_existing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``session_uptime > 0`` overrides the intervention-memory cross-check.
+
+    Regression guard for the bias described in issue #58: a
+    subscriber recorded as ``pre_existing_offline`` in a prior
+    intervention must NOT be condemned to ``PRE_EXISTING_OFFLINE``
+    forever. When the radio reports ``session_uptime > 0`` AND a
+    non-offline ``linkSessState``, the categorisation uses live
+    signal evidence (CINR + modulation) instead of the historical
+    blacklist.
+
+    Scenario: a single SM recovered from a prior outage. Its LUID
+    (``004``) is in the cross-checked ``pre_existing_list``; live
+    wire shows 24 h uptime, ``inSession`` (1), 22 dB CINR, 8X
+    modulation. The expected bucket is ``ONLINE_ACTIVE``.
+    """
+    from nora.drivers.snmp_pmp450i.subscribers import (
+        LINK_SESS_STATE_NAMES,
+        SubscriberRecord,
+        categorize_subscribers,
+    )
+
+    assert LINK_SESS_STATE_NAMES[1] == "inSession"
+    assert LINK_SESS_STATE_NAMES[0] == "idle"
+
+    row = SubscriberRecord(
+        luid="004",
+        session_uptime=86400,
+        cinr_db=22,
+        link_status="inSession",
+        modulation="8X",
+    )
+    buckets = categorize_subscribers([row], frozenset({"004"}))
+
+    assert len(buckets["ONLINE_ACTIVE"]) == 1
+    assert buckets["ONLINE_ACTIVE"][0].luid == "004"
+    assert buckets["PRE_EXISTING_OFFLINE"] == []
+    assert buckets["ACTIVE_DEGRADED"] == []
+
+
+# ---------------------------------------------------------------------------
 # Slice-3 named tests above; subscribers module is exercised end-to-end.
 # Additional defensive-path coverage is exercised in the dedicated
 # ``tests/test_snmp_subscribers_defensive.py`` module (out of scope for
@@ -755,6 +825,7 @@ __all__ = [
     "test_sm_table_categorizes_online_active",
     "test_sm_table_categorizes_active_degraded_low_cinr",
     "test_sm_table_categorizes_pre_existing_offline",
+    "test_recovered_subscriber_not_condemned_to_pre_existing",
     "test_sm_table_unbiased_baseline_excludes_pre_existing",
     "test_sm_detailed_diagnostics_typed_for_luid",
     "test_get_intervention_history_called_before_categorize",

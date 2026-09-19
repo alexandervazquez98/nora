@@ -146,10 +146,17 @@ def _sm_subtree_rows(
 
     Each SM occupies four OID rows in the public Cambium branch
     (smSessionUptime, smCinr, smLinkStatus, smLuid). ONLINE_ACTIVE
-    rows carry uptime > 0 AND linked modulation AND healthy CINR.
-    ACTIVE_DEGRADED rows carry uptime > 0 AND CINR < 18. PRE_EXISTING_OFFLINE
-    rows carry uptime == 0 (the central categoriser treats this as
-    pre-existing offline even without history).
+    rows carry uptime > 0 AND inSession (``linkSessState = 1``)
+    AND healthy CINR. ACTIVE_DEGRADED rows carry uptime > 0 AND
+    inSession AND CINR < 18. PRE_EXISTING_OFFLINE rows carry uptime
+    == 0 (the central categoriser treats this as pre-existing offline
+    even without history).
+
+    Issue #58 (2026-09-19): ``linkSessState`` is an INTEGER enum per
+    WHISP-APS-MIB (``idle=0``, ``inSession=1``, ``clearing=2``, ...).
+    The fixture used to emit the legacy ``"LINKED"`` / ``"DOWN"``
+    strings — the radio never returns those. ``1`` is the active
+    value; ``0`` is the offline value.
     """
     base = "1.3.6.1.4.1.161.19.3.1.4.1"
     rows: list[tuple[str, str | int]] = []
@@ -159,7 +166,7 @@ def _sm_subtree_rows(
             [
                 (f"{base}.46.{sm_index}", 86400),
                 (f"{base}.74.{sm_index}", 25),
-                (f"{base}.19.{sm_index}", "LINKED"),
+                (f"{base}.19.{sm_index}", 1),  # inSession
                 (f"{base}.1.{sm_index}", luid),
             ]
         )
@@ -169,7 +176,7 @@ def _sm_subtree_rows(
             [
                 (f"{base}.46.{sm_index}", 43200),
                 (f"{base}.74.{sm_index}", 12),
-                (f"{base}.19.{sm_index}", "LINKED"),
+                (f"{base}.19.{sm_index}", 1),  # inSession (degraded signal)
                 (f"{base}.1.{sm_index}", luid),
             ]
         )
@@ -179,7 +186,7 @@ def _sm_subtree_rows(
             [
                 (f"{base}.46.{sm_index}", 0),
                 (f"{base}.74.{sm_index}", 0),
-                (f"{base}.19.{sm_index}", "DOWN"),
+                (f"{base}.19.{sm_index}", 0),  # idle
                 (f"{base}.1.{sm_index}", luid),
             ]
         )
