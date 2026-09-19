@@ -354,13 +354,15 @@ def snmp_migrate_radio_frequency(
     device_id: str,
     approval_token: str,
     target_frequency_mhz: float,
+    sm_communities: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Migrate a PMP 450i AP to ``target_frequency_mhz`` (HITL-gated).
 
     Returns a :class:`MigrationResult` carrying ``rolled_back``,
     ``reason``, ``pre_existing_offline_excluded``,
     ``online_active_migrated``, ``active_degraded_migrated``,
-    ``target_frequency_mhz``, and ``device_id``.
+    ``target_frequency_mhz``, ``device_id``, and — when per-SM
+    community overrides were supplied — ``sm_community_overrides_used``.
 
     Per `pmp450i-radio-tools/spec.md` sub-cluster 3 requirements
     "Approval Token Contract", "Rollback Watchdog With Timeout",
@@ -370,6 +372,20 @@ def snmp_migrate_radio_frequency(
     (ONLINE_ACTIVE → ACTIVE_DEGRADED → AP carrier), and emits one
     ``POST_MIGRATION`` intervention record per completion (success
     or rollback).
+
+    WU-4 (issue #62) — per-SM community overrides. The optional
+    ``sm_communities`` parameter is a ``dict[str, str]`` keyed by
+    either the SM's IP address OR its LUID. The resolver tries IP
+    first, then LUID, then falls back to the SM's inventory
+    community (operator decision 2026-09-19). ``None`` (default)
+    or ``{}`` keeps the legacy behaviour where every SM uses its
+    inventory community. The aggregated count of overrides that
+    actually matched an SM is returned on
+    ``MigrationResult.sm_community_overrides_used`` and recorded in
+    the audit trail; ``SmPreFlightResult.community_source`` on each
+    per-SM outcome tells the operator which credential won. The
+    community string itself NEVER travels into the audit record —
+    only the source label.
     """
     from nora.drivers.snmp_pmp450i.migrate import fetch_migrate
 
@@ -381,6 +397,7 @@ def snmp_migrate_radio_frequency(
         approval_token=approval_token,
         target_frequency_mhz=target_frequency_mhz,
         settings=settings,
+        sm_communities=sm_communities,
     )
     return result
 

@@ -47,9 +47,9 @@ import logging
 import threading
 import time
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from nora.drivers.exceptions import (
     CommunityValidationFailed,
@@ -88,6 +88,21 @@ MIGRATION_OID_NAMES: tuple[str, ...] = (
 )
 
 
+# ---------------------------------------------------------------------------
+# WU-4 (issue #62) — per-SM community source label.
+#
+# The ``_resolve_sm_community`` helper returns one of these labels so
+# the pre-flight report records which credential was used per SM
+# (operator auditability). ``INVENTORY`` is the legacy path; the two
+# ``OVERRIDE_*`` values come from the new ``sm_communities`` operator
+# parameter. The string value itself NEVER travels into the audit
+# trail — only the label.
+# ---------------------------------------------------------------------------
+
+
+CommunitySource = Literal["OVERRIDE_IP", "OVERRIDE_LUID", "INVENTORY"]
+
+
 class MigrationResult(BaseModel):
     """Typed migration result — slice 4 read/write tool return.
 
@@ -111,6 +126,11 @@ class MigrationResult(BaseModel):
       have emitted in dry-run mode. Empty on real migrations. The
       value type is ``str | int | float``; carrier-frequency SETs
       carry a ``float`` MHz value.
+    * ``sm_community_overrides_used`` — count of SMs whose community
+      string came from the operator-supplied ``sm_communities`` map
+      instead of the inventory. ``0`` when no overrides were
+      supplied or none matched (operator decision 2026-09-19;
+      resolution order: IP first, then LUID, then inventory).
 
     The ``dry_run`` / ``would_set`` contract seam (WU-3, PR #44
     follow-ups): when the SNMP client lacks ``apply_oid`` — e.g. the
@@ -140,6 +160,11 @@ class MigrationResult(BaseModel):
     # reboot is required (per ``radioFreqCarrier``: "As of release
     # 16.1, this OID no longer requires reboot to take affect").
     band_crossing: bool = False
+    # WU-4 (issue #62) — count of SMs whose community came from the
+    # operator-supplied ``sm_communities`` map instead of the
+    # inventory. Aggregated from
+    # ``SmPreFlightResult.community_source`` in ``fetch_migrate``.
+    sm_community_overrides_used: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +199,13 @@ class SmPreFlightResult(BaseModel):
       on the success path.
     * ``error_message`` — verbatim driver message (no Pydantic coercion);
       sanitised at the tool boundary per Zero-Leakage.
+    * ``community_source`` — WU-4 (issue #62) audit label. One of
+      ``"OVERRIDE_IP"`` (operator-supplied community keyed by IP),
+      ``"OVERRIDE_LUID"`` (operator-supplied community keyed by
+      LUID), or ``"INVENTORY"`` (legacy path; community from the
+      device's inventory entry). The string value NEVER travels in
+      this field — only the label. Defaults to ``"INVENTORY"`` for
+      backward compatibility with the WU-A contract.
 
     The model is frozen so the MCP tool boundary can serialise via
     ``model_dump(mode="json")`` without mutation risk.
@@ -187,6 +219,7 @@ class SmPreFlightResult(BaseModel):
     community_accepted: bool = False
     error_class: str | None = None
     error_message: str | None = None
+    community_source: CommunitySource = "INVENTORY"
 
 
 class PreFlightReport(BaseModel):
@@ -221,6 +254,7 @@ def _validate_sm_communities(
     sm_luids: list[str],
     client_factory: Callable[[Any], "SnmpClient"],
     sysdescr_oid: str = "1.3.6.1.2.1.1.1.0",
+    sm_communities: "dict[str, str] | None" = None,
 ) -> PreFlightReport:
     """Issue one ``sysDescr`` GET against every SM and the AP.
 
@@ -232,6 +266,13 @@ def _validate_sm_communities(
             ``SnmpClient`` per SM so the per-SM community is used.
         sysdescr_oid: RFC 1213 ``sysDescr`` OID; default
             ``1.3.6.1.2.1.1.1.0``. Parameterised for hermetic tests.
+        sm_communities: WU-4 (issue #62) operator-supplied per-SM
+            community overrides. Keys may be the SM's IP
+            (``sm_device.host``) OR the LUID. The resolver tries IP
+            first, then LUID, then falls back to the inventory
+            community (operator decision 2026-09-19). ``None`` or
+            ``{}`` keeps the legacy WU-A behaviour where every SM
+            uses its inventory community.
 
     Returns:
         ``PreFlightReport`` aggregating AP reachability + per-SM
@@ -245,10 +286,22 @@ def _validate_sm_communities(
     * If the SM's LUID has no matching ``device_id`` in the inventory,
       the result carries ``error_class='MISSING_INVENTORY_ENTRY'`` and
       the LUID is also collected into ``missing_inventory_luids``.
+    * If the resolved community string is ``None`` (no inventory
+      community and no override), the result carries
+      ``error_class='InvalidCommunity'`` and ``community_source='INVENTORY'``
+      so the orchestrator knows the SM has no usable credentials.
     * Wire failures are translated to typed exceptions:
 
       * ``OSError`` / ``TimeoutError`` → ``DeviceUnreachable(host)``
       * ``puresnmp.exc.SnmpError``    → ``InvalidCommunity(community)``
+
+    When an override applies (source ``OVERRIDE_IP`` or
+    ``OVERRIDE_LUID``), the helper threads a synthetic
+    ``Device.model_copy(update={"community": SecretStr(override)})``
+    into ``client_factory`` so the SNMP wire frame carries the
+    operator-supplied community instead of the inventory one. The
+    ``SmPreFlightResult.community_source`` label records which
+    credential won; the string itself NEVER travels in the result.
     """
     import puresnmp.exc
 
@@ -308,14 +361,54 @@ def _validate_sm_communities(
                         f"LUID {luid!r} reported by AP SM-table but absent "
                         f"from inventory; register via register_device first"
                     ),
+                    community_source="INVENTORY",
                 )
             )
             continue
 
         host = str(getattr(sm_device, "host", None) or "")
 
+        # WU-4 (issue #62) — resolve the SM community via IP / LUID /
+        # inventory precedence. The resolver returns ``(None,
+        # "INVENTORY")`` when no credentials are available, in which
+        # case we surface an ``InvalidCommunity`` result instead of
+        # issuing an SNMP frame the agent would reject anyway.
+        community, community_source = _resolve_sm_community(
+            sm_device=sm_device,
+            sm_luid=luid,
+            sm_communities=sm_communities,
+        )
+        if community is None:
+            sm_results.append(
+                SmPreFlightResult(
+                    luid=luid,
+                    host=host,
+                    reachable=False,
+                    community_accepted=False,
+                    error_class="InvalidCommunity",
+                    error_message=(
+                        f"no community available for {host} (LUID {luid}); "
+                        "supply via sm_communities or inventory"
+                    ),
+                    community_source=community_source,
+                )
+            )
+            continue
+
+        # When the resolver picked an override, build a synthetic
+        # ``Device`` carrying the override community so the SNMP
+        # frame uses the operator-supplied credential. The Device
+        # model is Pydantic-frozen; ``model_copy`` returns a new
+        # instance and skips the validator (acceptable: we already
+        # know the override is a non-empty string from the resolver
+        # contract).
+        if community_source in ("OVERRIDE_IP", "OVERRIDE_LUID"):
+            effective_device = sm_device.model_copy(update={"community": SecretStr(community)})
+        else:
+            effective_device = sm_device
+
         try:
-            sm_client = client_factory(sm_device)
+            sm_client = client_factory(effective_device)
         except (OSError, TimeoutError, SnmpTimeoutError) as exc:
             sm_results.append(
                 SmPreFlightResult(
@@ -325,6 +418,7 @@ def _validate_sm_communities(
                     community_accepted=False,
                     error_class="DeviceUnreachable",
                     error_message=f"{host}: {exc!s}",
+                    community_source=community_source,
                 )
             )
             continue
@@ -337,6 +431,7 @@ def _validate_sm_communities(
                     community_accepted=False,
                     error_class="InvalidCommunity",
                     error_message=f"auth rejected for {host}: {exc!s}",
+                    community_source=community_source,
                 )
             )
             continue
@@ -352,6 +447,7 @@ def _validate_sm_communities(
                         community_accepted=True,
                         error_class=None,
                         error_message=None,
+                        community_source=community_source,
                     )
                 )
             except (OSError, TimeoutError, SnmpTimeoutError) as exc:
@@ -363,6 +459,7 @@ def _validate_sm_communities(
                         community_accepted=False,
                         error_class="DeviceUnreachable",
                         error_message=f"{host}: {exc!s}",
+                        community_source=community_source,
                     )
                 )
             except (puresnmp.exc.SnmpError, NetworkUnreachableError) as exc:
@@ -374,6 +471,7 @@ def _validate_sm_communities(
                         community_accepted=False,
                         error_class="InvalidCommunity",
                         error_message=f"auth rejected for {host}: {exc!s}",
+                        community_source=community_source,
                     )
                 )
         finally:
@@ -417,6 +515,56 @@ def _resolve_sm_device(driver: Any, luid: str) -> Any | None:
                 except Exception:
                     continue
         return None
+
+
+def _resolve_sm_community(
+    *,
+    sm_device: Any | None,
+    sm_luid: str,
+    sm_communities: "dict[str, str] | None",
+) -> tuple[str | None, CommunitySource]:
+    """Resolve the community string for one SM.
+
+    Returns a ``(community, source)`` tuple. ``source`` is one of
+    :data:`CommunitySource` and travels into
+    :class:`SmPreFlightResult.community_source` so the audit trail
+    records which credential won. The community string itself
+    NEVER travels in the audit record — only the label.
+
+    Resolution order (operator decision 2026-09-19):
+
+    1. If ``sm_communities`` is not ``None`` and ``str(sm_device.host)``
+       is a key, return ``(dict[ip], "OVERRIDE_IP")``.
+    2. Else if ``sm_communities`` is not ``None`` and ``sm_luid`` is
+       a key, return ``(dict[luid], "OVERRIDE_LUID")``.
+    3. Else fall back to ``sm_device.community.get_secret_value()``;
+       return ``(community, "INVENTORY")``. When ``sm_device`` is
+       ``None`` or has no community attribute, return
+       ``(None, "INVENTORY")`` — the caller treats ``(None, _)`` as
+       "no credentials available" and surfaces an
+       :class:`InvalidCommunity` result.
+
+    The resolver is a pure function (no I/O, no side effects); it
+    is also exercised directly by the WU-4 test suite so the
+    precedence rules are pinned at the unit level.
+    """
+    if sm_communities is not None:
+        host = str(getattr(sm_device, "host", None) or "") if sm_device is not None else ""
+        if host and host in sm_communities:
+            return str(sm_communities[host]), "OVERRIDE_IP"
+        if sm_luid in sm_communities:
+            return str(sm_communities[sm_luid]), "OVERRIDE_LUID"
+
+    if sm_device is None:
+        return None, "INVENTORY"
+    community = getattr(sm_device, "community", None)
+    if community is None:
+        return None, "INVENTORY"
+    secret = getattr(community, "get_secret_value", None)
+    if secret is None:
+        # Plain string fallback (rare; tests sometimes use bare strings).
+        return str(community), "INVENTORY"
+    return secret(), "INVENTORY"
 
 
 # ---------------------------------------------------------------------------
@@ -551,6 +699,7 @@ def fetch_migrate(
     approval_token: str | None,
     target_frequency_mhz: float,
     settings: "Settings | None" = None,
+    sm_communities: "dict[str, str] | None" = None,
 ) -> dict[str, Any]:
     """Run the HITL-gated RF migration for ``device_id``.
 
@@ -565,6 +714,18 @@ def fetch_migrate(
         settings: Optional :class:`Settings` instance (carries
             ``nora_hitl_rollback_timeout_seconds`` and
             ``nora_hitl_signing_key``).
+        sm_communities: WU-4 (issue #62) per-SM community overrides.
+            Keys may be IPs OR LUIDs; the resolver tries IP first,
+            then LUID, then falls back to the inventory community
+            (operator decision 2026-09-19). ``None`` (default) or
+            an empty dict keeps the legacy WU-A behaviour where
+            every SM uses its inventory community. The aggregated
+            count of overrides that actually matched an SM is
+            returned on :attr:`MigrationResult.sm_community_overrides_used`
+            and written to the intervention record so the audit
+            trail sees how many SMs migrated with non-inventory
+            credentials. The community string itself NEVER travels
+            into the audit trail — only the source label.
 
     Returns:
         A dict matching the :class:`MigrationResult` schema. On
@@ -609,6 +770,11 @@ def fetch_migrate(
         if settings is not None
         else True
     )
+    # WU-4 (issue #62) — default to ``0`` so the legacy path (pre-flight
+    # disabled) still produces a well-formed MigrationResult. The
+    # aggregate is recomputed inside the ``if preflight_enabled:``
+    # block when the pre-flight actually runs.
+    override_count = 0
     if preflight_enabled:
         sm_summary = fetch_sm_table(driver=driver, device_id=device_id, settings=settings)
         candidate_luids = sorted(
@@ -620,10 +786,21 @@ def fetch_migrate(
             device=device,
             sm_luids=candidate_luids,
             client_factory=driver._client_factory,  # noqa: SLF001 — internal API
+            sm_communities=sm_communities,
         )
         failed_results = [r for r in preflight_report.sm_results if r.error_class is not None]
         if not preflight_report.ap_reachable or failed_results:
             raise CommunityValidationFailed(report=preflight_report)
+
+        # WU-4 (issue #62) — aggregate the count of SMs whose
+        # community came from the operator-supplied overrides instead
+        # of the inventory. The label travels on every per-SM result;
+        # this is just the aggregate for the MigrationResult return.
+        override_count = sum(
+            1
+            for r in preflight_report.sm_results
+            if r.community_source in ("OVERRIDE_IP", "OVERRIDE_LUID")
+        )
 
     # 3. HITL gate — fires AFTER the pre-flight. The signing key is
     # sourced from `Settings.nora_hitl_signing_key`; lazy fail-closed
@@ -801,6 +978,12 @@ def fetch_migrate(
                     "reason": reason,
                     "dry_run": dry_run,
                     "would_set": [list(item) for item in would_set],
+                    # WU-4 (issue #62) — count of SMs whose
+                    # community came from the operator-supplied
+                    # ``sm_communities`` map instead of the
+                    # inventory. The string value NEVER travels in
+                    # the audit record — only this count.
+                    "sm_community_overrides_used": override_count,
                 },
             )
         except Exception:  # pragma: no cover - writer has its own status codes
@@ -827,6 +1010,11 @@ def fetch_migrate(
                 prior_carrier,
                 float(target_frequency_mhz),
             ),
+            # WU-4 (issue #62) — aggregated count of SMs whose
+            # community came from the operator-supplied
+            # ``sm_communities`` map instead of the inventory. ``0``
+            # when no overrides were supplied or none matched.
+            sm_community_overrides_used=override_count,
         ).model_dump(mode="json")
     finally:
         try:
@@ -851,4 +1039,11 @@ __all__ = [
     "SmPreFlightResult",
     "_validate_sm_communities",
     "_resolve_sm_device",
+    # WU-4 (issue #62) — per-SM community overrides. ``CommunitySource``
+    # is the audit label carried on ``SmPreFlightResult.community_source``;
+    # ``_resolve_sm_community`` is the pure helper that implements the
+    # IP-first / LUID-second / inventory-fallback precedence rule
+    # (operator decision 2026-09-19).
+    "CommunitySource",
+    "_resolve_sm_community",
 ]
