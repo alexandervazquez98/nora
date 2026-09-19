@@ -55,6 +55,9 @@ Direct execution; orchestrator may invoke immediately. No operator interaction, 
 | `correlate_sector_interference` | [correlate_sector_interference.md](./correlate_sector_interference.md) |
 | `get_device_lifecycle_summary` | [get_device_lifecycle_summary.md](./get_device_lifecycle_summary.md) |
 | `icmp_list_probe_runs` | [icmp_list_probe_runs.md](./icmp_list_probe_runs.md) |
+| `icmp_run_sector_stability_probe` | [icmp_run_sector_stability_probe.md](./icmp_run_sector_stability_probe.md) |
+| `icmp_get_sector_stability_progress` | [icmp_get_sector_stability_progress.md](./icmp_get_sector_stability_progress.md) |
+| `icmp_cancel_sector_stability_probe` | [icmp_cancel_sector_stability_probe.md](./icmp_cancel_sector_stability_probe.md) |
 | `nora_get_tool_spec` | [nora_get_tool_spec.md](./nora_get_tool_spec.md) |
 | `search_intervention_history` | [search_intervention_history.md](./search_intervention_history.md) |
 | `snmp_get_ap_summary` | [snmp_get_ap_summary.md](./snmp_get_ap_summary.md) |

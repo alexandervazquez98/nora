@@ -25,6 +25,7 @@ from nora.probes.models import (
     ProbeTargetRole,
 )
 from nora.probes.probe import ProbeConfigurationError, generate_run_id, run_probe
+from nora.probes.state import ProbeRunRegistry, RunState, RunStatus, start_probe_run
 
 __all__ = [
     "DiscoveryResult",
@@ -34,12 +35,16 @@ __all__ = [
     "IcmpTimeoutError",
     "IcmpUnreachableError",
     "ProbeConfigurationError",
+    "ProbeRunRegistry",
     "ProbeRunSettings",
     "ProbeRunStarted",
     "ProbeTarget",
     "ProbeTargetRole",
+    "RunState",
+    "RunStatus",
     "UnprivilegedIcmpPinger",
     "discover_targets",
     "generate_run_id",
     "run_probe",
+    "start_probe_run",
 ]

@@ -39,11 +39,13 @@ from nora.drivers.mutable_inventory import MutableInventory  # noqa: E402
 from nora.drivers.oid_catalog import OidCatalogRegistry  # noqa: E402
 from nora.drivers.registry import set_driver  # noqa: E402
 from nora.drivers.snmp_pmp450i import Pmp450iDriver  # noqa: E402
+from nora.probes.state import ProbeRunRegistry  # noqa: E402
 from nora.prompts.registry import PromptRegistry  # noqa: E402
 from nora.server import (  # noqa: E402
     configure_logging,
     mcp,
     register_tool_log_middleware,
+    set_probe_registry,
     set_prompt_registry,
     set_runtime_state,
     verify_tools_are_catalogued,
@@ -250,6 +252,12 @@ def main(argv: Sequence[str] | None = None) -> None:
             catalog_registry=catalog_registry,
         )
     )
+    # Issue #61 / PR1 WU-1.5d: install the in-process probe-run registry
+    # so `icmp_run_sector_stability_probe` / `icmp_get_..._progress` /
+    # `icmp_cancel_..._probe` can resolve it via `get_probe_registry()`.
+    # Mirrors the `set_runtime_state` / `set_driver` pattern: a
+    # module-level slot filled exactly once at boot.
+    set_probe_registry(ProbeRunRegistry(ttl_seconds=3600))
     # PR 5 (slice 5): refuse any `@mcp.tool` whose name is not in
     # `OidCatalogRegistry.REQUIRED_OIDS_BY_TOOL[(vendor, model)]`. The
     # guard runs BEFORE `mcp.run()` so a rogue registration aborts the

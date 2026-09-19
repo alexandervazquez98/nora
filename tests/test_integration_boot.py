@@ -190,17 +190,23 @@ def test_subprocess_nora_mcp_exposes_fifteen_tools(
         "register_device",
         "hitl_mint_token",
         "snmp_reboot_radio",
+        # Issue #61 / PR1 WU-1.5 — ICMP stability probe (Tier 0).
+        "icmp_run_sector_stability_probe",
+        "icmp_get_sector_stability_progress",
+        "icmp_cancel_sector_stability_probe",
+        # Issue #72 / PR #73 follow-up — nora_get_tool_spec bridge.
         "nora_get_tool_spec",
     ]
     assert tool_names == expected, (
-        f"`nora-mcp` (HTTP) must expose exactly the 15 thin tools in order; got {tool_names!r}"
+        f"`nora-mcp` (HTTP) must expose exactly the 18 thin tools in order; got {tool_names!r}"
+    )
     )
 
 
 def test_subprocess_python_dash_m_nora_exposes_same_tools(
     mcp_http_client: McpHttpClient,
 ) -> None:
-    """`python -m nora` and the shared HTTP server expose the same 15 tools."""
+    """`python -m nora` and the shared HTTP server expose the same 18 tools."""
     mcp_http_client.initialize()
     mcp_http_client.initialized()
     parsed = mcp_http_client.tools_list()
@@ -221,15 +227,21 @@ def test_subprocess_python_dash_m_nora_exposes_same_tools(
         "register_device",
         "hitl_mint_token",
         "snmp_reboot_radio",
+        # Issue #61 / PR1 WU-1.5 — ICMP stability probe (Tier 0).
+        "icmp_run_sector_stability_probe",
+        "icmp_get_sector_stability_progress",
+        "icmp_cancel_sector_stability_probe",
+        # Issue #72 / PR #73 follow-up — nora_get_tool_spec bridge.
         "nora_get_tool_spec",
     ]
     assert tool_names == expected, (
-        f"`python -m nora` (HTTP) must expose 15 thin tools in order; got {tool_names!r}"
+        f"`python -m nora` (HTTP) must expose exactly the 18 thin tools in order; got {tool_names!r}"
+    )
     )
 
 
 def test_subprocess_both_entry_points_expose_identical_tool_lists(tmp_path: Path) -> None:
-    """`nora-mcp` and `python -m nora` expose the thirteen-tool surface in the SAME order."""
+    """`nora-mcp` and `python -m nora` expose the eighteen-tool surface in the SAME order."""
     py = _venv_python()
     nora_mcp = PROJECT_ROOT / ".venv" / "bin" / "nora-mcp"
     if not nora_mcp.exists():
