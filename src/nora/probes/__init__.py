@@ -10,18 +10,24 @@ which requires the operator to put the running user's gid in
 
 from __future__ import annotations
 
+from nora.probes.discovery import discover_targets
 from nora.probes.exceptions import (
     IcmpEngineError,
     IcmpTimeoutError,
     IcmpUnreachableError,
 )
 from nora.probes.icmp import IcmpPinger, IcmpSample, UnprivilegedIcmpPinger
+from nora.probes.models import DiscoveryResult, ProbeTarget, ProbeTargetRole
 
 __all__ = [
+    "DiscoveryResult",
     "IcmpEngineError",
     "IcmpPinger",
     "IcmpSample",
     "IcmpTimeoutError",
     "IcmpUnreachableError",
+    "ProbeTarget",
+    "ProbeTargetRole",
     "UnprivilegedIcmpPinger",
+    "discover_targets",
 ]
