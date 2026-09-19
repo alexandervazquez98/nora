@@ -37,10 +37,13 @@ Make-before-break order (ONLINE_ACTIVE → ACTIVE_DEGRADED → AP carrier) with 
 | `device_id` | `string` | yes | Inventory device id (the AP). |
 | `approval_token` | `string` | yes | JSON-encoded `HitlApprovalToken` minted by `nora hitl mint`. |
 | `target_frequency_mhz` | `float` | yes | Requested carrier frequency in MHz. |
+| `sm_communities` | `dict[str, str] \| null` | no | Per-SM community overrides for heterogeneous sectors (issue #62 WU-4). Keys may be SM **IP addresses** OR **LUIDs**; resolution order is **IP first, then LUID, then inventory** (operator decision 2026-09-19 — the MCP tool emits IP-targeted SETs, so IP is the natural key). `None` or `{}` falls back to the legacy behaviour (inventory communities only). Each override replaces the SM's inventory community for the wire path only — inventory state is NOT mutated. |
 
 ## Outputs
 
-Typed dict matching `MigrationResult`: `rolled_back`, `reason`, `pre_existing_offline_excluded`, `online_active_migrated`, `active_degraded_migrated`, `target_frequency_mhz`, `device_id`.
+Typed dict matching `MigrationResult`: `rolled_back`, `reason`, `pre_existing_offline_excluded`, `online_active_migrated`, `active_degraded_migrated`, `target_frequency_mhz`, `device_id`, `sm_community_overrides_used`, `band_crossing`.
+
+`sm_community_overrides_used` (int) aggregates how many SMs were migrated with non-inventory credentials; useful for audit and for the orchestrator to surface a per-migration summary. The resolved community **string** itself never travels to the intervention record — only the per-SM `community_source` label (`OVERRIDE_IP` / `OVERRIDE_LUID` / `INVENTORY`) does.
 
 ## Failure modes
 
