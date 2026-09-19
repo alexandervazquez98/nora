@@ -51,7 +51,10 @@ _INTEGRATION_CATALOG_OIDS: dict[str, str] = {
     "radioDownlinkRate": "1.3.6.1.4.1.161.19.3.1.1.1.0",
     "radioUplinkRate": "1.3.6.1.4.1.161.19.3.1.1.2.0",
     "signalStrengthRx": "1.3.6.1.4.1.161.19.3.1.1.3.0",
-    "signalStrengthTx": "1.3.6.1.4.1.161.19.3.1.1.4.0",
+    # Issue #54 (2026-09-19): ``signalStrengthTx`` dropped (broken on
+    # production firmware — ``maxSMTxPwr`` engineering-only + tabular).
+    # Sector-level active EIRP placeholder for the hermetic integration sample.
+    "eirp": "1.3.6.1.4.1.161.19.3.1.1.4.0",
     "ssr": "1.3.6.1.4.1.161.19.3.1.1.5.0",
     "modulationMode": "1.3.6.1.4.1.161.19.3.1.1.6.0",
     "channelBandwidth": "1.3.6.1.4.1.161.19.3.1.1.7.0",
@@ -71,10 +74,13 @@ _INTEGRATION_CATALOG_OIDS: dict[str, str] = {
     "smCinr": "1.3.6.1.4.1.161.19.3.2.1.71.0",
     "smLinkStatus": "1.3.6.1.4.1.161.19.3.2.1.72.0",
     "smLuid": "1.3.6.1.4.1.161.19.3.2.1.73.0",
-    "smJitter": "1.3.6.1.4.1.161.19.3.2.1.80.0",
-    "smRetransmits": "1.3.6.1.4.1.161.19.3.2.1.81.0",
-    "smRxLevel": "1.3.6.1.4.1.161.19.3.2.1.82.0",
-    "smTxLevel": "1.3.6.1.4.1.161.19.3.2.1.83.0",
+    # Issue #54 (2026-09-19): ``smJitter`` (FSK-only linkAveJitter)
+    # and ``smTxLevel`` (engineering-only maxSMTxPwr) dropped; OFDM-
+    # correct per-LUID metrics added.
+    "smSnrH": "1.3.6.1.4.1.161.19.3.2.1.80.0",
+    "ssrLink": "1.3.6.1.4.1.161.19.3.2.1.81.0",
+    "smRetransmits": "1.3.6.1.4.1.161.19.3.2.1.82.0",
+    "smRxLevel": "1.3.6.1.4.1.161.19.3.2.1.83.0",
     "spectrumNoiseFloorA": "1.3.6.1.4.1.161.19.3.1.1.90.0",
     "spectrumNoiseFloorB": "1.3.6.1.4.1.161.19.3.1.1.91.0",
     "spectrumNoiseFloorC": "1.3.6.1.4.1.161.19.3.1.1.92.0",
@@ -113,11 +119,14 @@ _INTEGRATION_CATALOG_TOOLS: dict[str, list[str]] = {
         "smLuid",
     ],
     "snmp_get_sm_detailed_diagnostics": [
-        "smJitter",
+        # Issue #54 (2026-09-19): dropped FSK-only ``smJitter`` and
+        # engineering-only ``smTxLevel``; added OFDM-correct per-LUID
+        # metrics ``smSnrH`` / ``ssrLink``.
         "smCinr",
+        "smSnrH",
+        "ssrLink",
         "smRetransmits",
         "smRxLevel",
-        "smTxLevel",
     ],
     "snmp_run_spectrum_analysis": [
         "spectrumNoiseFloorA",
@@ -141,10 +150,12 @@ _INTEGRATION_CATALOG_TOOLS: dict[str, list[str]] = {
     # fixture mirrors the production re-signed catalog envelope so
     # the rogue-tool guard test below finds the rogue FIRST.
     "snmp_get_pmp450i_radio_metrics": [
+        # Issue #54 (2026-09-19): ``signalStrengthTx`` dropped (broken
+        # ``maxSMTxPwr``); sector-level active EIRP (``eirp``) replaces it.
         "radioDownlinkRate",
         "radioUplinkRate",
         "signalStrengthRx",
-        "signalStrengthTx",
+        "eirp",
         "ssr",
         "modulationMode",
         "sysDescr",

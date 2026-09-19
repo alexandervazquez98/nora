@@ -69,7 +69,11 @@ _REQUIRED_OIDS_BY_VENDOR_MODEL: Final[dict[tuple[str, str], frozenset[str]]] = {
             "radioDownlinkRate",
             "radioUplinkRate",
             "signalStrengthRx",
-            "signalStrengthTx",
+            # Issue #54 (2026-09-19): ``signalStrengthTx`` dropped —
+            # it pointed at ``maxSMTxPwr`` (engineering-only + tabular,
+            # returns empty on production firmware). Sector-level
+            # active EIRP (``whispBoxActiveEIRP``) replaces it.
+            "eirp",
             "ssr",
             "modulationMode",
             # Read-summary additions (PR 2 — slice 2).
@@ -83,10 +87,14 @@ _REQUIRED_OIDS_BY_VENDOR_MODEL: Final[dict[tuple[str, str], frozenset[str]]] = {
             "smLinkStatus",
             "smLuid",
             # PR 3 — slice 3 SM diagnostics additions.
-            "smJitter",
+            # Issue #54 (2026-09-19): ``smJitter`` (FSK-only
+            # linkAveJitter, broken on OFDM/MIMO) and ``smTxLevel``
+            # (engineering-only maxSMTxPwr) dropped; OFDM-correct
+            # per-LUID metrics added.
+            "smSnrH",
+            "ssrLink",
             "smRetransmits",
             "smRxLevel",
-            "smTxLevel",
             # PR 4 — slice 4 spectrum-sweep additions.
             "spectrumNoiseFloorA",
             "spectrumNoiseFloorB",
@@ -113,7 +121,10 @@ REQUIRED_OIDS: Final[frozenset[str]] = frozenset(
         "radioDownlinkRate",
         "radioUplinkRate",
         "signalStrengthRx",
-        "signalStrengthTx",
+        # Issue #54 (2026-09-19): ``signalStrengthTx`` dropped (broken
+        # on production firmware — maxSMTxPwr engineering-only + tabular).
+        # Sector-level active EIRP (``eirp``, ``whispBoxActiveEIRP``) replaces it.
+        "eirp",
         "ssr",
         "modulationMode",
     }

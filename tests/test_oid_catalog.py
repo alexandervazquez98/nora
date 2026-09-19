@@ -41,7 +41,10 @@ _SAMPLE_BUILTIN_OIDS: dict[str, str] = {
     "radioDownlinkRate": "1.3.6.1.4.1.161.19.3.1.1.1.0",
     "radioUplinkRate": "1.3.6.1.4.1.161.19.3.1.1.2.0",
     "signalStrengthRx": "1.3.6.1.4.1.161.19.3.1.1.3.0",
-    "signalStrengthTx": "1.3.6.1.4.1.161.19.3.1.1.4.0",
+    # Issue #54 (2026-09-19): ``signalStrengthTx`` dropped (broken on
+    # production firmware — ``maxSMTxPwr`` engineering-only + tabular).
+    # Sector-level active EIRP placeholder for the hermetic sample.
+    "eirp": "1.3.6.1.4.1.161.19.3.1.1.4.0",
     "ssr": "1.3.6.1.4.1.161.19.3.1.1.5.0",
     "modulationMode": "1.3.6.1.4.1.161.19.3.1.1.6.0",
     # PR 2 — slice 2 read-summary additions.
@@ -55,10 +58,13 @@ _SAMPLE_BUILTIN_OIDS: dict[str, str] = {
     "smLinkStatus": "1.3.6.1.4.1.161.19.3.2.1.72.0",
     "smLuid": "1.3.6.1.4.1.161.19.3.2.1.73.0",
     # PR 3 — slice 3 SM diagnostics additions.
-    "smJitter": "1.3.6.1.4.1.161.19.3.2.1.80.0",
-    "smRetransmits": "1.3.6.1.4.1.161.19.3.2.1.81.0",
-    "smRxLevel": "1.3.6.1.4.1.161.19.3.2.1.82.0",
-    "smTxLevel": "1.3.6.1.4.1.161.19.3.2.1.83.0",
+    # Issue #54 (2026-09-19): ``smJitter`` (FSK-only linkAveJitter)
+    # and ``smTxLevel`` (engineering-only maxSMTxPwr) dropped; OFDM-
+    # correct per-LUID metrics added.
+    "smSnrH": "1.3.6.1.4.1.161.19.3.2.1.80.0",
+    "ssrLink": "1.3.6.1.4.1.161.19.3.2.1.81.0",
+    "smRetransmits": "1.3.6.1.4.1.161.19.3.2.1.82.0",
+    "smRxLevel": "1.3.6.1.4.1.161.19.3.2.1.83.0",
     # PR 4 — slice 4 spectrum-sweep additions.
     "spectrumNoiseFloorA": "1.3.6.1.4.1.161.19.3.1.1.90.0",
     "spectrumNoiseFloorB": "1.3.6.1.4.1.161.19.3.1.1.91.0",
@@ -79,17 +85,21 @@ SAMPLE_CATALOG_KEY: str = "test-catalog-signing-key-do-not-use-in-prod"
 def test_required_oids_is_non_empty_frozenset() -> None:
     """REQUIRED_OIDS is a frozenset; the v1 schema covers at least the
     six well-known RF metrics that the driver folds into a typed report.
+    Issue #54 (2026-09-19): ``signalStrengthTx`` was replaced by
+    ``eirp`` (sector-level active EIRP).
     """
     assert isinstance(REQUIRED_OIDS, frozenset)
     expected_subset = {
         "radioDownlinkRate",
         "radioUplinkRate",
         "signalStrengthRx",
-        "signalStrengthTx",
+        "eirp",
         "ssr",
         "modulationMode",
     }
     assert expected_subset.issubset(REQUIRED_OIDS)
+    # Issue #54 regression guard: ``signalStrengthTx`` no longer in REQUIRED_OIDS.
+    assert "signalStrengthTx" not in REQUIRED_OIDS
 
 
 # ---------------------------------------------------------------------------
@@ -390,16 +400,27 @@ class TestMultiRoot:
         assert ("cambium", "pmp450i") in _REQUIRED_OIDS_BY_VENDOR_MODEL
         pmp450i_required = _REQUIRED_OIDS_BY_VENDOR_MODEL[("cambium", "pmp450i")]
         assert isinstance(pmp450i_required, frozenset)
-        # Six well-known RF metrics the driver folds into a typed report.
+        # Issue #54 (2026-09-19): ``signalStrengthTx`` dropped (broken on
+        # production firmware), ``eirp`` (sector-level active EIRP) added.
+        # ``smJitter`` / ``smTxLevel`` dropped (FSK-only / engineering-only),
+        # ``smSnrH`` / ``ssrLink`` added as OFDM-correct per-LUID metrics.
         expected = {
             "radioDownlinkRate",
             "radioUplinkRate",
             "signalStrengthRx",
-            "signalStrengthTx",
+            "eirp",
             "ssr",
             "modulationMode",
+            "smSnrH",
+            "ssrLink",
+            "smRetransmits",
+            "smRxLevel",
         }
         assert expected.issubset(pmp450i_required)
+        # Issue #54 regression guards — broken OIDs no longer required.
+        assert "signalStrengthTx" not in pmp450i_required
+        assert "smJitter" not in pmp450i_required
+        assert "smTxLevel" not in pmp450i_required
 
     def test_required_oids_alias_is_radio_metrics_subset(self) -> None:
         """`REQUIRED_OIDS` is the radio-metrics subset of the PMP 450i triple.
@@ -418,7 +439,9 @@ class TestMultiRoot:
                 "radioDownlinkRate",
                 "radioUplinkRate",
                 "signalStrengthRx",
-                "signalStrengthTx",
+                # Issue #54 (2026-09-19): ``signalStrengthTx`` dropped,
+                # ``eirp`` added (sector-level active EIRP).
+                "eirp",
                 "ssr",
                 "modulationMode",
             }

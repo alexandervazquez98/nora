@@ -28,7 +28,12 @@ _OID_NAME_TO_FIELD: Final[dict[str, str]] = {
     "radioDownlinkRate": "radio_dl_rate_bps",
     "radioUplinkRate": "radio_ul_rate_bps",
     "signalStrengthRx": "rx_signal_dbm",
-    "signalStrengthTx": "tx_signal_dbm",
+    # Issue #54 (2026-09-19): ``signalStrengthTx`` (the legacy
+    # ``maxSMTxPwr`` engineering-only + tabular OID) was replaced by
+    # ``eirp`` (``whispBoxActiveEIRP``, ``.306.0``). ``eirp`` returns
+    # a DisplayString like ``"44 dBm"``; the parser strips the suffix
+    # and stores the integer dBm value in ``eirp_dbm``.
+    "eirp": "eirp_dbm",
     "ssr": "ssr",
     "modulationMode": "modulation",
 }
@@ -45,7 +50,10 @@ class RadioMetricsReport(BaseModel):
     radio_dl_rate_bps: int
     radio_ul_rate_bps: int
     rx_signal_dbm: int
-    tx_signal_dbm: int
+    # Issue #54 (2026-09-19): ``tx_signal_dbm`` was replaced by
+    # ``eirp_dbm`` (sector-level active EIRP in dBm). The wire value
+    # is a DisplayString (``"44 dBm"``) — the parser strips the unit.
+    eirp_dbm: int
     ssr: int
     modulation: str
 
@@ -62,6 +70,12 @@ class RadioMetricsReport(BaseModel):
 
         `values` is keyed by dotted OID. Missing required values raise
         `NetworkUnreachableError` (typed wire-level fault).
+
+        Issue #54 (2026-09-19): the ``eirp`` OID
+        (``whispBoxActiveEIRP``, ``.306.0``) returns a DisplayString
+        like ``"44 dBm"``; ``_coerce_eirp_dbm`` strips the unit and
+        stores the integer dBm value. Non-parseable strings surface
+        as ``NetworkUnreachableError`` (typed wire-level fault).
         """
         kwargs: dict[str, object] = {
             "device_id": device.device_id,
@@ -81,6 +95,8 @@ class RadioMetricsReport(BaseModel):
                 )
             if field_name == "modulation":
                 kwargs[field_name] = str(raw)
+            elif field_name == "eirp_dbm":
+                kwargs[field_name] = _coerce_eirp_dbm(raw, oid, device.host)
             else:
                 kwargs[field_name] = _coerce_int(raw, oid, device.host)
         return cls.model_validate(kwargs)
@@ -95,6 +111,38 @@ def _coerce_int(raw: str | int, oid: str, host: str) -> int:
     except (TypeError, ValueError) as exc:
         raise NetworkUnreachableError(
             f"{host}: non-numeric SNMP value for {oid!r}: {raw!r}"
+        ) from exc
+
+
+def _coerce_eirp_dbm(raw: str | int, oid: str, host: str) -> int:
+    """Parse ``whispBoxActiveEIRP`` DisplayString to integer dBm.
+
+    Cambium returns the sector EIRP as a DisplayString like ``"44 dBm"``;
+    some firmware revisions return ``"44"`` (bare integer) or
+    ``"44.0 dBm"`` (fractional). The parser strips the unit and
+    returns the integer dBm value. Non-parseable shapes surface as
+    ``NetworkUnreachableError``.
+
+    Issue #54 (2026-09-19): replaces the broken ``signalStrengthTx``
+    (``maxSMTxPwr`` engineering-only + tabular) which returned empty
+    on production firmware.
+    """
+    if isinstance(raw, int):
+        return raw
+    text = str(raw).strip()
+    # Strip a trailing unit token ("dBm", "dBmV", etc.) if present.
+    if text.endswith("dBm"):
+        text = text[: -len("dBm")].strip()
+    elif text.endswith("dBmV"):
+        text = text[: -len("dBmV")].strip()
+    # Trim a trailing ".0" fractional suffix.
+    if text.endswith(".0"):
+        text = text[:-2]
+    try:
+        return int(float(text))
+    except (TypeError, ValueError) as exc:
+        raise NetworkUnreachableError(
+            f"{host}: non-parseable EIRP DisplayString for {oid!r}: {raw!r}"
         ) from exc
 
 

@@ -43,7 +43,10 @@ _SAMPLE_CATALOG_PAYLOAD: dict[str, str] = {
     "radioDownlinkRate": "1.3.6.1.4.1.161.19.3.1.1.1.0",
     "radioUplinkRate": "1.3.6.1.4.1.161.19.3.1.1.2.0",
     "signalStrengthRx": "1.3.6.1.4.1.161.19.3.1.1.3.0",
-    "signalStrengthTx": "1.3.6.1.4.1.161.19.3.1.1.4.0",
+    # Issue #54 (2026-09-19): ``signalStrengthTx`` dropped (broken on
+    # production firmware — ``maxSMTxPwr`` engineering-only + tabular).
+    # Sector-level active EIRP placeholder for the hermetic sample.
+    "eirp": "1.3.6.1.4.1.161.19.3.1.1.4.0",
     "ssr": "1.3.6.1.4.1.161.19.3.1.1.5.0",
     "modulationMode": "1.3.6.1.4.1.161.19.3.1.1.6.0",
     # PR 2 — slice 2 read-summary additions.
@@ -57,10 +60,13 @@ _SAMPLE_CATALOG_PAYLOAD: dict[str, str] = {
     "smLinkStatus": "1.3.6.1.4.1.161.19.3.2.1.72.0",
     "smLuid": "1.3.6.1.4.1.161.19.3.2.1.73.0",
     # PR 3 — slice 3 SM diagnostics additions.
-    "smJitter": "1.3.6.1.4.1.161.19.3.2.1.80.0",
-    "smRetransmits": "1.3.6.1.4.1.161.19.3.2.1.81.0",
-    "smRxLevel": "1.3.6.1.4.1.161.19.3.2.1.82.0",
-    "smTxLevel": "1.3.6.1.4.1.161.19.3.2.1.83.0",
+    # Issue #54 (2026-09-19): ``smJitter`` (FSK-only linkAveJitter)
+    # and ``smTxLevel`` (engineering-only maxSMTxPwr) dropped. OFDM-
+    # correct per-LUID metrics added: vertical/horizontal CINR + SSR.
+    "smSnrH": "1.3.6.1.4.1.161.19.3.2.1.80.0",
+    "ssrLink": "1.3.6.1.4.1.161.19.3.2.1.81.0",
+    "smRetransmits": "1.3.6.1.4.1.161.19.3.2.1.82.0",
+    "smRxLevel": "1.3.6.1.4.1.161.19.3.2.1.83.0",
     # PR 4 — slice 4 spectrum-sweep additions.
     "spectrumNoiseFloorA": "1.3.6.1.4.1.161.19.3.1.1.90.0",
     "spectrumNoiseFloorB": "1.3.6.1.4.1.161.19.3.1.1.91.0",

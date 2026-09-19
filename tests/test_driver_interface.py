@@ -76,11 +76,14 @@ def _build_catalog() -> OidCatalogRegistry:
         vendor="cambium",
         model="pmp450i",
         firmware="15.2.1",
+        # Issue #54 (2026-09-19): ``signalStrengthTx`` (broken
+        # ``maxSMTxPwr``) replaced by ``eirp`` (``whispBoxActiveEIRP``,
+        # ``.306.0``). Hermetic stub here.
         oids={
             "radioDownlinkRate": "1.3.6.1.4.1.161.19.3.1.1.1.0",
             "radioUplinkRate": "1.3.6.1.4.1.161.19.3.1.1.2.0",
             "signalStrengthRx": "1.3.6.1.4.1.161.19.3.1.1.3.0",
-            "signalStrengthTx": "1.3.6.1.4.1.161.19.3.1.1.4.0",
+            "eirp": "1.3.6.1.4.1.161.19.3.1.1.4.0",
             "ssr": "1.3.6.1.4.1.161.19.3.1.1.5.0",
             "modulationMode": "1.3.6.1.4.1.161.19.3.1.1.6.0",
         },
@@ -206,7 +209,7 @@ def test_report_firmware_returns_typed_version(tmp_path: Path) -> None:
         radio_dl_rate_bps=54000000,
         radio_ul_rate_bps=21000000,
         rx_signal_dbm=-58,
-        tx_signal_dbm=23,
+        eirp_dbm=44,
         ssr=75,
         modulation="256QAM",
     )
@@ -222,11 +225,15 @@ def test_report_firmware_returns_typed_version(tmp_path: Path) -> None:
                 return self._sys_descr
             # Mirror the same canned values used elsewhere for the
             # radio-metrics OIDs so the driver is exercised too.
+            # Issue #54 (2026-09-19): ``eirp`` (``.1.1.4.0`` here as a
+            # hermetic stub of ``whispBoxActiveEIRP`` ``.306.0``)
+            # returns a DisplayString like ``"44 dBm"``; the fold
+            # parser strips the unit.
             return {
                 "1.3.6.1.4.1.161.19.3.1.1.1.0": str(canned_report.radio_dl_rate_bps),
                 "1.3.6.1.4.1.161.19.3.1.1.2.0": str(canned_report.radio_ul_rate_bps),
                 "1.3.6.1.4.1.161.19.3.1.1.3.0": str(canned_report.rx_signal_dbm),
-                "1.3.6.1.4.1.161.19.3.1.1.4.0": str(canned_report.tx_signal_dbm),
+                "1.3.6.1.4.1.161.19.3.1.1.4.0": f"{canned_report.eirp_dbm} dBm",
                 "1.3.6.1.4.1.161.19.3.1.1.5.0": str(canned_report.ssr),
                 "1.3.6.1.4.1.161.19.3.1.1.6.0": canned_report.modulation,
             }[oid]

@@ -102,7 +102,10 @@ def _radio_seed_oids() -> dict[str, str]:
         "radioDownlinkRate": "1.3.6.1.4.1.161.19.3.1.4.1.36.0",
         "radioUplinkRate": "1.3.6.1.4.1.161.19.3.1.4.1.38.0",
         "signalStrengthRx": "1.3.6.1.4.1.161.19.3.1.4.1.34.0",
-        "signalStrengthTx": "1.3.6.1.4.1.161.19.3.1.4.1.89.0",
+        # Issue #54 (2026-09-19): ``signalStrengthTx`` (broken
+        # ``maxSMTxPwr``) replaced by ``eirp`` (``whispBoxActiveEIRP``,
+        # ``.306.0``).
+        "eirp": "1.3.6.1.4.1.161.19.3.3.1.306.0",
         "ssr": "1.3.6.1.4.1.161.19.3.1.4.1.86.0",
         "modulationMode": "1.3.6.1.4.1.161.19.3.1.4.1.40.0",
     }
@@ -155,15 +158,23 @@ def _sm_table_oids() -> dict[str, str]:
 def _sm_diagnostics_oids() -> dict[str, str]:
     """SM diagnostics OID names + dotted OIDs (synthesised public refs).
 
-    Columns under whispLinkTable (.3.1.4.1): ``.22`` = linkAveJitter,
-    ``.150`` = retransmittedFragmentsCount, ``.34`` = avgPowerLevel
-    (per-SM Rx dBm), ``.89`` = maxSMTxPwr.
+    Issue #54 (2026-09-19): ``smJitter`` (``linkAveJitter`` FSK-only,
+    broken on OFDM/MIMO hardware) and ``smTxLevel`` (``maxSMTxPwr``
+    engineering-only + tabular) were removed. ``smSnrH`` and
+    ``ssrLink`` were added as OFDM-correct per-LUID metrics.
+
+    Columns under whispLinkTable (.3.1.4.1): ``.74`` =
+    linkRadioAggrSmVCalculatedSnr (vertical CINR), ``.84`` =
+    linkRadioAggrSmHCalculatedSnr (horizontal CINR), ``.86`` =
+    linkRadioAggrSignalStrengthRatio, ``.34`` = avgPowerLevel
+    (per-SM Rx dBm), ``.150`` = retransmittedFragmentsCount.
     """
     return {
-        "smJitter": "1.3.6.1.4.1.161.19.3.1.4.1.22.0",
+        "smCinr": "1.3.6.1.4.1.161.19.3.1.4.1.74.0",
+        "smSnrH": "1.3.6.1.4.1.161.19.3.1.4.1.84.0",
+        "ssrLink": "1.3.6.1.4.1.161.19.3.1.4.1.86.0",
         "smRetransmits": "1.3.6.1.4.1.161.19.3.1.4.1.150.0",
         "smRxLevel": "1.3.6.1.4.1.161.19.3.1.4.1.34.0",
-        "smTxLevel": "1.3.6.1.4.1.161.19.3.1.4.1.89.0",
     }
 
 
@@ -536,8 +547,14 @@ def test_sm_detailed_diagnostics_typed_for_luid(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """``snmp_get_sm_detailed_diagnostics`` returns a typed
-    ``SmDetailedDiagnostics`` carrying jitter, CINR, Rx/Tx levels,
-    retransmits, and interface error counters.
+    ``SmDetailedDiagnostics`` carrying OFDM modulation metrics
+    queried at the SM's LUID (issue #54).
+
+    The fake client returns canned values keyed by the **per-LUID**
+    OID form (the driver's strip-`.0` + append-`.<luid>` dispatch).
+    Every reachable SM populates the full metric set; ``smCinr``
+    shares its OID with the SM-table walk so the canned dict uses
+    the diagnostics form here (the per-LUID suffix ``.2``).
     """
     from nora.drivers.snmp_pmp450i.subscribers import SmDetailedDiagnostics
 
@@ -549,28 +566,33 @@ def test_sm_detailed_diagnostics_typed_for_luid(
     )
 
     diag_oids = _sm_diagnostics_oids()
-    table_oids = _sm_table_oids()
+    target_luid = "002"
+    per_luid = {name: oid[:-2] + f".{target_luid}" for name, oid in diag_oids.items()}
     canned = _FakeSnmpClient(
         values={
-            diag_oids["smJitter"]: 3,
-            table_oids["smCinr"]: 22,  # CINR shared with the table OID set
-            diag_oids["smRetransmits"]: 12,
-            diag_oids["smRxLevel"]: -65,
-            diag_oids["smTxLevel"]: 21,
+            per_luid["smCinr"]: 22,
+            per_luid["smSnrH"]: 10,
+            per_luid["ssrLink"]: 6,
+            per_luid["smRetransmits"]: 12,
+            per_luid["smRxLevel"]: -65,
         }
     )
     driver = _build_driver(inventory=inv, registry=registry, canned=canned)
 
-    diagnostics = driver.fetch_sm_detailed_diagnostics("ap-7400-01", luid="002")
+    diagnostics = driver.fetch_sm_detailed_diagnostics("ap-7400-01", luid=target_luid)
 
     assert isinstance(diagnostics, SmDetailedDiagnostics)
     dumped = diagnostics.model_dump(mode="json")
-    assert dumped["luid"] == "002"
-    assert dumped["jitter_ms"] == 3
-    assert dumped["cinr_db"] == 22
+    assert dumped["luid"] == target_luid
+    assert dumped["snr_v_db"] == 22
+    assert dumped["snr_h_db"] == 10
+    assert dumped["ssr_link_db"] == 6
     assert dumped["rx_level_dbm"] == -65
-    assert dumped["tx_level_dbm"] == 21
     assert dumped["retransmits"] == 12
+    # ``jitter_ms`` / ``tx_level_dbm`` are gone in the OFDM model
+    # (issue #54 RCA: FSK-only / engineering-only).
+    assert "jitter_ms" not in dumped
+    assert "tx_level_dbm" not in dumped
 
 
 # ---------------------------------------------------------------------------

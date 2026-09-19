@@ -91,18 +91,37 @@ class SubscriberRecord(BaseModel):
 class SmDetailedDiagnostics(BaseModel):
     """Per-LUID diagnostics — slice 3 read tool return.
 
-    Carries jitter, CINR, Rx/Tx levels, retransmits, and interface
-    error counters for one SM. Free-text fields (none in this model)
-    are sanitised at the MCP layer; typed scalars bypass.
+    Carries OFDM modulation metrics for one SM (issue #54):
+
+    * ``snr_v_db`` / ``snr_h_db`` — vertical / horizontal CINR
+      (``linkRadioAggrSmVCalculatedSnr`` / ``linkRadioAggrSmHCalculatedSnr``).
+    * ``ssr_link_db`` — signal-strength ratio
+      (``linkRadioAggrSignalStrengthRatio``).
+    * ``rx_level_dbm`` — average Rx power
+      (``linkRadioAggrSmVRecPwr``).
+    * ``retransmits`` — retransmitted fragments
+      (``linkRetransmittedFragCount``).
+    * ``interface_errors`` — reserved for a future
+      ``smInterfaceErrors`` OID; stays ``None``.
+
+    Free-text fields (none in this model) are sanitised at the MCP
+    layer; typed scalars bypass.
+
+    Issue #54 (2026-09-19): the previous ``jitter_ms`` (FSK-only
+    ``linkAveJitter``, returns ``noSuchInstance`` on OFDM/MIMO
+    hardware) and ``tx_level_dbm`` (engineering-only
+    ``maxSMTxPwr``, tabular + unpopulated on production firmware)
+    fields were removed. The driver now appends ``.<luid>`` to every
+    ``whispLinkEntry`` column it queries.
     """
 
     model_config = ConfigDict(frozen=True)
 
     luid: str
-    jitter_ms: int | None = None
-    cinr_db: int | None = None
+    snr_v_db: int | None = None
+    snr_h_db: int | None = None
+    ssr_link_db: int | None = None
     rx_level_dbm: int | None = None
-    tx_level_dbm: int | None = None
     retransmits: int | None = None
     interface_errors: int | None = None
 
@@ -136,6 +155,15 @@ class SubscriberSummary(BaseModel):
 # mapping between OID names and the row fold. The four SM-table OIDs
 # share a single subtree branch; the four diagnostics OIDs each
 # resolve to a single ``get_oid`` value.
+#
+# Issue #54 (2026-09-19): ``smJitter`` (``linkAveJitter``) and
+# ``smTxLevel`` (``maxSMTxPwr``) were dropped from the SM
+# diagnostics set — both are broken on PMP 450i (OFDM/MIMO):
+# ``linkAveJitter`` returns ``noSuchInstance`` (FSK-only),
+# ``maxSMTxPwr`` is engineering-only + tabular and unpopulated on
+# production firmware. ``smSnrH`` (``linkRadioAggrSmHCalculatedSnr``)
+# and ``ssrLink`` (``linkRadioAggrSignalStrengthRatio``) were added
+# as OFDM-correct per-LUID metrics.
 # ---------------------------------------------------------------------------
 
 SM_TABLE_OID_NAMES: tuple[str, ...] = (
@@ -146,11 +174,11 @@ SM_TABLE_OID_NAMES: tuple[str, ...] = (
 )
 
 SM_DIAGNOSTICS_OID_NAMES: tuple[str, ...] = (
-    "smJitter",
     "smCinr",
-    "smRetransmits",
+    "smSnrH",
+    "ssrLink",
     "smRxLevel",
-    "smTxLevel",
+    "smRetransmits",
 )
 
 # Subtree base — the SM-table subtree starts at this dotted OID.
@@ -166,10 +194,17 @@ SM_DIAGNOSTICS_OID_NAMES: tuple[str, ...] = (
 # ``whispLinkTable`` (the per-link, per-LUID column table). The
 # correct subtree is ``whispApsLinkTable`` rooted at
 # ``1.3.6.1.4.1.161.19.3.1.4.1``, the same root the WHISP-APS-MIB
-# uses for ``whispLinkEntry``. The per-SM diagnostic columns
-# (``smLuid``, ``smCinr``, ``smJitter``, ``smRxLevel``, ``smTxLevel``,
-# ``smSessionUptime``, ``smLinkStatus``, ``smRetransmits``) all live
-# under this subtree with a ``.<LUID>`` instance appended.
+# uses for ``whispLinkEntry``.
+#
+# Issue #54 (2026-09-19): every per-SM diagnostic column lives
+# under this subtree with a ``.<LUID>`` instance appended
+# (``.34`` = ``linkRadioAggrSmVRecPwr``, ``.74`` =
+# ``linkRadioAggrSmVCalculatedSnr``, ``.84`` =
+# ``linkRadioAggrSmHCalculatedSnr``, ``.86`` =
+# ``linkRadioAggrSignalStrengthRatio``, ``.150`` =
+# ``linkRetransmittedFragCount``). The catalog stores the scalar
+# ``.0`` form; ``fetch_sm_detailed_diagnostics`` strips ``.0`` and
+# appends ``.<luid>`` per query.
 SM_TABLE_BASE_OID: str = "1.3.6.1.4.1.161.19.3.1.4.1"
 
 # Map each SM-table OID name to the slot it fills in the per-SM
@@ -447,6 +482,12 @@ def _resolve_sm_diagnostics_oids(catalog: "OidCatalog") -> dict[str, str]:
     look up individual values by name. Missing names raise
     ``LookupError`` (the catalog verification gate rejects catalogs
     missing any of them).
+
+    The catalog stores the canonical scalar ``.0`` form. Issue #54
+    (2026-09-19): every name returned here is a ``whispLinkEntry``
+    column — the diagnostics helper must strip the ``.0`` suffix
+    and append ``.<luid>`` per query. See
+    :func:`_per_luid_oid` for the dispatch.
     """
     dotted: dict[str, str] = {}
     for name in SM_DIAGNOSTICS_OID_NAMES:
@@ -457,6 +498,34 @@ def _resolve_sm_diagnostics_oids(catalog: "OidCatalog") -> dict[str, str]:
             )
         dotted[name] = catalog.oids[name]
     return dotted
+
+
+def _per_luid_oid(dotted: str, luid: str) -> str:
+    """Convert a scalar ``whispLinkEntry`` column OID into its per-LUID form.
+
+    Cambium's WHISP-APS-MIB defines per-SM diagnostics as columns of
+    ``whispLinkEntry`` rooted at ``1.3.6.1.4.1.161.19.3.1.4.1``;
+    each leaf carries a ``.<column>.<instance>`` suffix where
+    ``<instance>`` is the SM's LUID. The catalog stores the canonical
+    scalar form (``.0`` instance) for the schema gate; per-LUID
+    queries require stripping ``.0`` and appending ``.<luid>``.
+
+    Issue #54 (2026-09-19): querying the scalar form against
+    PMP 450i firmware 25.x returns ``noSuchInstance`` because the
+    ``whispLinkEntry`` table is columnar — the AP populates one
+    instance per registered SM and rejects the ``.0`` probe.
+
+    Args:
+        dotted: A catalog OID string ending in ``.0`` (e.g.
+            ``"1.3.6.1.4.1.161.19.3.1.4.1.74.0"``).
+        luid: Subscriber LUID, e.g. ``"002"`` or ``"3"``.
+
+    Returns:
+        The per-LUID form, e.g. ``"1.3.6.1.4.1.161.19.3.1.4.1.74.3"``.
+    """
+    if not dotted.endswith(".0"):
+        raise ValueError(f"per-LUID dispatch expects a scalar OID ending in '.0'; got {dotted!r}")
+    return dotted[:-2] + f".{luid}"
 
 
 def _utc_now_iso() -> str:
@@ -573,11 +642,18 @@ def fetch_sm_detailed_diagnostics(
 ) -> SmDetailedDiagnostics:
     """Read per-LUID diagnostics via ``Pmp450iSnmpDriver``.
 
-    Fetches four OIDs via individual ``get_oid`` calls (one per OID
-    name in :data:`SM_DIAGNOSTICS_OID_NAMES`) and folds the values into
-    a typed :class:`SmDetailedDiagnostics`. Missing fields become
-    ``None`` so a partially-unreachable SM still returns a typed
-    payload.
+    Fetches one ``get_oid`` call per name in
+    :data:`SM_DIAGNOSTICS_OID_NAMES`, dispatching each query against
+    the SM's LUID via :func:`_per_luid_oid`. The result folds into a
+    typed :class:`SmDetailedDiagnostics` carrying OFDM modulation
+    metrics (issue #54). Missing fields become ``None`` so a
+    partially-unreachable SM still returns a typed payload.
+
+    Issue #54 (2026-09-19): PMP 450i's WHISP-APS-MIB stores every
+    per-SM diagnostic as a ``whispLinkEntry`` column. Querying the
+    scalar ``.0`` form returns ``noSuchInstance`` on production
+    firmware — the AP populates one instance per registered SM.
+    The helper appends ``.<luid>`` per query.
     """
     device = driver._inventory.get(device_id)  # noqa: SLF001 — internal API
     catalog = driver._catalog_registry.resolve(  # noqa: SLF001 — internal API
@@ -585,13 +661,19 @@ def fetch_sm_detailed_diagnostics(
     )
     dotted = _resolve_sm_diagnostics_oids(catalog)
 
+    # Per-LUID dispatch — every OID in `SM_DIAGNOSTICS_OID_NAMES` is a
+    # ``whispLinkEntry`` column. The strip-`.0` + append-`.<luid>`
+    # idiom makes the LUID explicit at every wire call (no scalar
+    # form ever leaves this function).
+    per_luid = {name: _per_luid_oid(dotted[name], luid) for name in SM_DIAGNOSTICS_OID_NAMES}
+
     client = driver._client_factory(device)  # noqa: SLF001 — internal API
     try:
-        jitter_value = client.get_oid(dotted["smJitter"])
-        cinr_value = client.get_oid(dotted["smCinr"])
-        rx_value = client.get_oid(dotted["smRxLevel"])
-        tx_value = client.get_oid(dotted["smTxLevel"])
-        retransmits_value = client.get_oid(dotted["smRetransmits"])
+        snr_v = client.get_oid(per_luid["smCinr"])
+        snr_h = client.get_oid(per_luid["smSnrH"])
+        ssr_link = client.get_oid(per_luid["ssrLink"])
+        rx_level = client.get_oid(per_luid["smRxLevel"])
+        retransmits = client.get_oid(per_luid["smRetransmits"])
     finally:
         try:
             client.close()
@@ -600,14 +682,14 @@ def fetch_sm_detailed_diagnostics(
 
     return SmDetailedDiagnostics(
         luid=luid,
-        jitter_ms=_coerce_optional_int(jitter_value),
-        cinr_db=_coerce_optional_int(cinr_value),
-        rx_level_dbm=_coerce_optional_int(rx_value),
-        tx_level_dbm=_coerce_optional_int(tx_value),
-        retransmits=_coerce_optional_int(retransmits_value),
+        snr_v_db=_coerce_optional_int(snr_v),
+        snr_h_db=_coerce_optional_int(snr_h),
+        ssr_link_db=_coerce_optional_int(ssr_link),
+        rx_level_dbm=_coerce_optional_int(rx_level),
+        retransmits=_coerce_optional_int(retransmits),
         # ``interface_errors`` is reserved for the future
         # ``smInterfaceErrors`` OID; the slice-3 catalog carries only
-        # the four counters above. The field stays ``None`` rather
+        # the per-LUID counters above. The field stays ``None`` rather
         # than a placeholder mapped to a different OID.
         interface_errors=None,
     )

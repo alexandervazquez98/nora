@@ -72,10 +72,13 @@ def snmpsim_v3(tmp_path: Path) -> dict[str, Any]:
     user_data.write_text(
         "\n".join(
             [
+                # Issue #54 (2026-09-19): ``eirp`` (``.306.0``) returns a
+                # DisplayString like ``"44 dBm"``; the fold parser strips the
+                # unit. The wire form is a STRING, not INTEGER.
                 "1.3.6.1.4.1.161.19.3.1.4.1.36.0|INTEGER|87000000",  # radioDownlinkRate
                 "1.3.6.1.4.1.161.19.3.1.4.1.38.0|INTEGER|31000000",  # radioUplinkRate
                 "1.3.6.1.4.1.161.19.3.1.4.1.34.0|INTEGER|-62",  # signalStrengthRx
-                "1.3.6.1.4.1.161.19.3.1.4.1.89.0|INTEGER|19",  # signalStrengthTx
+                "1.3.6.1.4.1.161.19.3.3.1.306.0|STRING|44 dBm",  # eirp (whispBoxActiveEIRP)
                 "1.3.6.1.4.1.161.19.3.1.4.1.86.0|INTEGER|73",  # ssr
                 "1.3.6.1.4.1.161.19.3.1.4.1.40.0|STRING|64QAM",  # modulationMode
                 "",
@@ -158,7 +161,10 @@ def _build_v3_driver(
             "radioDownlinkRate": "1.3.6.1.4.1.161.19.3.1.4.1.36.0",
             "radioUplinkRate": "1.3.6.1.4.1.161.19.3.1.4.1.38.0",
             "signalStrengthRx": "1.3.6.1.4.1.161.19.3.1.4.1.34.0",
-            "signalStrengthTx": "1.3.6.1.4.1.161.19.3.1.4.1.89.0",
+            # Issue #54 (2026-09-19): ``signalStrengthTx`` (broken
+            # ``maxSMTxPwr``) replaced by ``eirp`` (``whispBoxActiveEIRP``,
+            # ``.306.0``).
+            "eirp": "1.3.6.1.4.1.161.19.3.3.1.306.0",
             "ssr": "1.3.6.1.4.1.161.19.3.1.4.1.86.0",
             "modulationMode": "1.3.6.1.4.1.161.19.3.1.4.1.40.0",
         },

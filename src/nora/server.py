@@ -270,11 +270,14 @@ def snmp_get_sm_table(device_id: str) -> dict[str, Any]:
 def snmp_get_sm_detailed_diagnostics(device_id: str, luid: str) -> dict[str, Any]:
     """Read the typed per-LUID diagnostics for one SM under ``device_id``.
 
-    Returns an ``SmDetailedDiagnostics`` carrying jitter, CINR, Rx/Tx
-    levels, retransmits, and (reserved) interface error counters for
-    one SM. ``luid`` identifies the SM within the AP sector managed
-    by ``device_id``; the tool fetches one wire GET per diagnostics
-    OID name.
+    Returns an ``SmDetailedDiagnostics`` carrying OFDM modulation
+    metrics — vertical/horizontal CINR (``snr_v_db`` / ``snr_h_db``),
+    signal-strength ratio (``ssr_link_db``), Rx level
+    (``rx_level_dbm``), and retransmitted fragments
+    (``retransmits``) — for one SM. ``luid`` identifies the SM
+    within the AP sector managed by ``device_id``; the tool fetches
+    one wire GET per diagnostics OID name, dispatched at
+    ``<base>.<column>.<luid>`` (issue #54).
 
     Per `pmp450i-radio-tools/spec.md` sub-cluster 2 scenario "typed
     diagnostics for one LUID".
