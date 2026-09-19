@@ -208,6 +208,8 @@ def test_python_dash_m_nora_emits_deprecation_warning(tmp_path: Path) -> None:
         "icmp_run_sector_stability_probe",
         "icmp_get_sector_stability_progress",
         "icmp_cancel_sector_stability_probe",
+        # Issue #61 / PR3 WU-3.7 — list probe runs.
+        "icmp_list_probe_runs",
     }
     assert tool_names == expected, (
         f"`python -m nora` must expose the same 14 tools as nora-mcp; got {tool_names}"

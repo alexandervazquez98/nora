@@ -71,6 +71,8 @@ def test_server_exposes_exactly_fourteen_tools() -> None:
         "icmp_run_sector_stability_probe",
         "icmp_get_sector_stability_progress",
         "icmp_cancel_sector_stability_probe",
+        # Issue #61 / PR3 WU-3.7 — list probe runs.
+        "icmp_list_probe_runs",
     }
     assert names == expected, (
         f"Expected exactly 14 tools; got {sorted(names)} "
@@ -479,6 +481,8 @@ def test_mcp_instance_exposes_all_thirteen_tools() -> None:  # noqa: F811 — al
         "icmp_run_sector_stability_probe",
         "icmp_get_sector_stability_progress",
         "icmp_cancel_sector_stability_probe",
+        # Issue #61 / PR3 WU-3.7 — list probe runs.
+        "icmp_list_probe_runs",
     }
     assert names == expected, f"Expected exactly 14 tools after WU-4 + WU-C; got: {sorted(names)}"
 
