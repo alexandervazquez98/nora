@@ -102,8 +102,73 @@ class DiscoveryResult(BaseModel):
         return [ap_target, *self.sm_targets]
 
 
+class ProbeRunSettings(BaseModel):
+    """Snapshot of the configuration used for a run.
+
+    The coordinator (PR1 WU-1.3) freezes the effective duration /
+    interval / payload / per-packet timeout into this envelope so the
+    MCP wrapper (PR1 WU-1.5) and the PR2 metrics aggregator can log /
+    persist the run settings verbatim without re-reading
+    :class:`Settings`.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    duration_seconds: int = Field(
+        description=(
+            "Effective probe duration for the run, in seconds "
+            "(validated against the Settings bounds)."
+        ),
+    )
+    interval_seconds: float = Field(
+        description=(
+            "Effective inter-packet interval for the run, in seconds "
+            "(one packet per destination per interval)."
+        ),
+    )
+    packet_size_bytes: int = Field(
+        description="Effective ICMP echo payload size for the run, in bytes.",
+    )
+    per_packet_timeout_seconds: float = Field(
+        description="Effective per-packet wait_for timeout for the run, in seconds.",
+    )
+
+
+class ProbeRunStarted(BaseModel):
+    """Snapshot at the moment the coordinator started.
+
+    Captures the run id, the device, the AP baseline target, the
+    wall-clock start, and the effective :class:`ProbeRunSettings`.
+    The MCP wrapper (PR1 WU-1.5) uses this to surface a "started"
+    payload without awaiting the first sample.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    run_id: str = Field(
+        description="8 hex chars from secrets.token_hex(4); stable identifier for the run.",
+    )
+    device_id: str = Field(
+        description="Inventory device id (e.g. 'ap-7400-01') the probe is bound to.",
+    )
+    ap_host: str = Field(
+        description="IPv4 literal of the AP (the ΔRTT/ΔJitter baseline target) at run start.",
+    )
+    started_at_unix: float = Field(
+        description="time.time() at the moment the coordinator entered run_probe().",
+    )
+    settings: ProbeRunSettings = Field(
+        description=(
+            "Effective configuration for the run "
+            "(duration / interval / payload / per-packet timeout)."
+        ),
+    )
+
+
 __all__ = [
     "DiscoveryResult",
+    "ProbeRunSettings",
+    "ProbeRunStarted",
     "ProbeTarget",
     "ProbeTargetRole",
 ]

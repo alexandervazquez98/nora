@@ -17,7 +17,14 @@ from nora.probes.exceptions import (
     IcmpUnreachableError,
 )
 from nora.probes.icmp import IcmpPinger, IcmpSample, UnprivilegedIcmpPinger
-from nora.probes.models import DiscoveryResult, ProbeTarget, ProbeTargetRole
+from nora.probes.models import (
+    DiscoveryResult,
+    ProbeRunSettings,
+    ProbeRunStarted,
+    ProbeTarget,
+    ProbeTargetRole,
+)
+from nora.probes.probe import ProbeConfigurationError, generate_run_id, run_probe
 
 __all__ = [
     "DiscoveryResult",
@@ -26,8 +33,13 @@ __all__ = [
     "IcmpSample",
     "IcmpTimeoutError",
     "IcmpUnreachableError",
+    "ProbeConfigurationError",
+    "ProbeRunSettings",
+    "ProbeRunStarted",
     "ProbeTarget",
     "ProbeTargetRole",
     "UnprivilegedIcmpPinger",
     "discover_targets",
+    "generate_run_id",
+    "run_probe",
 ]
