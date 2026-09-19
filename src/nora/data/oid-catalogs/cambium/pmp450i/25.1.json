@@ -7,7 +7,6 @@
     "radioDownlinkRate": "1.3.6.1.4.1.161.19.3.1.4.1.36.0",
     "radioUplinkRate": "1.3.6.1.4.1.161.19.3.1.4.1.38.0",
     "signalStrengthRx": "1.3.6.1.4.1.161.19.3.1.4.1.34.0",
-    "signalStrengthTx": "1.3.6.1.4.1.161.19.3.1.4.1.89.0",
     "ssr": "1.3.6.1.4.1.161.19.3.1.4.1.86.0",
     "modulationMode": "1.3.6.1.4.1.161.19.3.1.4.1.40.0",
     "channelBandwidth": "1.3.6.1.4.1.161.19.3.3.2.83.0",
@@ -27,10 +26,8 @@
     "smCinr": "1.3.6.1.4.1.161.19.3.1.4.1.74.0",
     "smLinkStatus": "1.3.6.1.4.1.161.19.3.1.4.1.19.0",
     "smLuid": "1.3.6.1.4.1.161.19.3.1.4.1.1.0",
-    "smJitter": "1.3.6.1.4.1.161.19.3.1.4.1.22.0",
     "smRetransmits": "1.3.6.1.4.1.161.19.3.1.4.1.150.0",
     "smRxLevel": "1.3.6.1.4.1.161.19.3.1.4.1.34.0",
-    "smTxLevel": "1.3.6.1.4.1.161.19.3.1.4.1.89.0",
     "spectrumNoiseFloorA": "1.3.6.1.4.1.161.19.3.3.2.221.1",
     "spectrumNoiseFloorB": "1.3.6.1.4.1.161.19.3.3.2.221.2",
     "spectrumNoiseFloorC": "1.3.6.1.4.1.161.19.3.3.2.221.3",
@@ -43,7 +40,11 @@
     "reboot": "1.3.6.1.4.1.161.19.3.3.3.2.0",
     "rebootIfRequired": "1.3.6.1.4.1.161.19.3.3.3.4.0",
     "radioFrequencyBand": "1.3.6.1.4.1.161.19.3.3.16.1.1.2",
-    "whispBoxRFPhysicalRadioFrequencies": "1.3.6.1.4.1.161.19.3.3.15.3"
+    "whispBoxRFPhysicalRadioFrequencies": "1.3.6.1.4.1.161.19.3.3.15.3",
+    "eirp": "1.3.6.1.4.1.161.19.3.3.1.306.0",
+    "activeTxPowerDbh": "1.3.6.1.4.1.161.19.3.3.1.233.0",
+    "smSnrH": "1.3.6.1.4.1.161.19.3.1.4.1.84.0",
+    "ssrLink": "1.3.6.1.4.1.161.19.3.1.4.1.86.0"
   },
   "tools": {
     "snmp_get_ap_summary": [
@@ -65,11 +66,11 @@
       "smLuid"
     ],
     "snmp_get_sm_detailed_diagnostics": [
-      "smJitter",
       "smCinr",
-      "smRetransmits",
+      "smSnrH",
+      "ssrLink",
       "smRxLevel",
-      "smTxLevel"
+      "smRetransmits"
     ],
     "snmp_run_spectrum_analysis": [
       "spectrumNoiseFloorA",
@@ -89,7 +90,7 @@
       "radioDownlinkRate",
       "radioUplinkRate",
       "signalStrengthRx",
-      "signalStrengthTx",
+      "eirp",
       "ssr",
       "modulationMode",
       "sysDescr"
@@ -99,7 +100,7 @@
       "rebootIfRequired"
     ]
   },
-  "hmac_sha256": "ccce3cab6dd810344a2f5cb04bbe247ae450ccd9be6ceb79122ba8ca62382777",
+  "hmac_sha256": "62a206a939310250c792705cb21b7e4fb8577d783c5df73a2f59f448011620a9",
   "_provenance": {
     "source": "WHISP-BOX-MIBV2-MIB and WHISP-APS-MIB from operator's ~/Downloads/PMP450 Series 25.1 MIBS.zip (extracted 2026-09-18). Cross-checked MIB object positions against shipped 25.1.0 baseline; no zero-drift differences found.",
     "verification_date": "2026-09-18",
@@ -108,6 +109,6 @@
       "WHISP-APS-MIB (whispApsRFConfigRadioEntry.radioFreqCarrier, whispApsConfig.rfFreqCarrier deprecated, whispApsFrUtlStats, whispLinkTable)",
       "WHISP-GLOBAL-REG-MIB (enterprises.161.19.3 root)"
     ],
-    "notes": "New v2 catalog shipped by feat/multi-community-band-reboot. Built from local MIB bundles. Firmware string is '25.1' (NOT '25.1.0') to match what the operator's field SMs advertise via apFirmwareVersion \u2014 the operator can confirm at deploy time and we can re-sign with '25.1.0' as alias if needed. Same OID set as the rest of the v2 envelopes."
+    "notes": "New v2 catalog shipped by feat/multi-community-band-reboot. Built from local MIB bundles. Firmware string is '25.1' (NOT '25.1.0') to match what the operator's field SMs advertise via apFirmwareVersion \u2014 the operator can confirm at deploy time and we can re-sign with '25.1.0' as alias if needed. Same OID set as the rest of the v2 envelopes. Issue #54 fix (2026-09-19): dropped FSK-only smJitter (.22 linkAveJitter returns noSuchInstance on OFDM/MIMO hardware) and engineering-only maxSMTxPwr (.89, tabular). Added eirp (.306 whispBoxActiveEIRP), activeTxPowerDbh (.233 whispBoxActiveTxPowerInHundredthsDbm), smSnrH (.84 linkRadioAggrSmHCalculatedSnr), and ssrLink (.86 linkRadioAggrSignalStrengthRatio). Subscribers.fetch_sm_detailed_diagnostics appends .<luid> to every whispLinkEntry column query."
   }
 }

@@ -97,11 +97,17 @@ TOOLS_V1: dict[str, list[str]] = {
         "smLuid",
     ],
     "snmp_get_sm_detailed_diagnostics": [
-        "smJitter",
+        # Issue #54 (2026-09-19): dropped FSK-only ``smJitter`` (linkAveJitter,
+        # returns noSuchInstance on OFDM/MIMO hardware) and engineering-only
+        # ``smTxLevel`` (maxSMTxPwr, tabular + unpopulated on production).
+        # Added per-LUID OFDM metrics: ``smSnrH`` (horizontal CINR) and
+        # ``ssrLink`` (signal strength ratio). Every column is queried
+        # with ``.<luid>`` appended by the driver.
         "smCinr",
-        "smRetransmits",
+        "smSnrH",
+        "ssrLink",
         "smRxLevel",
-        "smTxLevel",
+        "smRetransmits",
     ],
     "snmp_run_spectrum_analysis": [
         "spectrumNoiseFloorA",
@@ -122,14 +128,15 @@ TOOLS_V1: dict[str, list[str]] = {
     "register_device": ["sysDescr"],
     # Slice-1 radio-metrics tool — promoted from the legacy
     # `_ALLOWED_UNCATALOGUED_TOOLS` allow-list. Same OID-set as the
-    # legacy driver path: `report_firmware` reads `sysDescr` and the
-    # other five radio-metrics OIDs. Re-signing the catalog with this
-    # envelope retires the explicit allow-list entry in `server.py:626`.
+    # legacy driver path minus the broken ``signalStrengthTx`` (issue
+    # #54: pointed at ``maxSMTxPwr`` which is engineering-only +
+    # tabular, returns empty on production firmware). Sector-level
+    # active EIRP (``eirp``, ``whispBoxActiveEIRP``) replaces it.
     "snmp_get_pmp450i_radio_metrics": [
         "radioDownlinkRate",
         "radioUplinkRate",
         "signalStrengthRx",
-        "signalStrengthTx",
+        "eirp",
         "ssr",
         "modulationMode",
         "sysDescr",
