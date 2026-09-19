@@ -217,10 +217,14 @@ def test_spectrum_happy_path_runs_set_then_poll_returns_completed(
     """Spectrum sweep emits SET sequence and returns ``scan_outcome="COMPLETED"``.
 
     Real Cambium WHISP-BOX-MIBV2-MIB protocol: SET duration → SET 8
-    (arm) → SET 1 (start) → GET-poll ``.221.0`` until ``0`` (idle).
-    The fake client returns ``1`` once (running) then ``0`` (idle) so
-    the helper reaches the SUCCESS branch and folds the timeline into
-    a typed ``SpectrumSweepResult``.
+    (arm) → SET 1 (start) → GET-poll ``.221.0`` until one of the
+    completion sentinels in ``_SWEEP_COMPLETION_STATUSES`` (``{0, 3,
+    4}``). Per the operator's physical-hardware verification on
+    firmware 25.0.1, the GET-idle success sentinel is ``4``
+    (``idleCompleteSpectrumAnalysis``). The fake returns ``5`` once
+    (in-progress), then ``4`` (idle, results available) so the helper
+    reaches the SUCCESS branch and folds the timeline into a typed
+    ``SpectrumSweepResult`` with ``final_status=4``.
     """
     from nora.drivers.snmp_pmp450i.spectrum import (
         SpectrumSweepResult,
@@ -231,9 +235,10 @@ def test_spectrum_happy_path_runs_set_then_poll_returns_completed(
     registry = _build_catalog(firmware="15.2.1", include_spectrum_oids=True)
     spec_oids = _spectrum_oids()
 
-    # Polled status sequence: 1 (running) → 0 (idle). The fake pops in
-    # order so the helper sees 1, sleeps, polls again, gets 0, returns.
-    fake = _FakeWritableSnmpClient(get_responses=[1, 0])
+    # Polled status sequence: 5 (in-progress) → 4 (idle, results
+    # available). The fake pops in order so the helper sees 5, sleeps,
+    # polls again, gets 4, returns.
+    fake = _FakeWritableSnmpClient(get_responses=[5, 4])
     driver = _build_driver(inventory=inv, registry=registry, fake_client=fake)
     settings = _settings_no_window()
 
@@ -246,7 +251,7 @@ def test_spectrum_happy_path_runs_set_then_poll_returns_completed(
 
     assert isinstance(result, SpectrumSweepResult)
     assert result.scan_outcome == "COMPLETED"
-    assert result.final_status == 0
+    assert result.final_status == 4  # idle-complete (real-hardware sentinel)
     assert result.device_id == "192.0.2.10"
     assert result.sweep_duration_seconds == 15
     # Empty per-bin decoding fields (future slice).
@@ -263,12 +268,12 @@ def test_spectrum_happy_path_runs_set_then_poll_returns_completed(
         (spec_oids["spectrumScanAction"], 1),
     ], f"Expected the documented SET sequence; got {fake.set_calls!r}"
 
-    # The action OID was GET'd at least once (the fake returned 1 then 0).
+    # The action OID was GET'd at least once (the fake returned 5 then 4).
     assert all(call == spec_oids["spectrumScanAction"] for call in fake.get_calls), (
         f"All GETs must hit the action OID; got {fake.get_calls!r}"
     )
     assert len(fake.get_calls) >= 2, (
-        f"Happy path polls at least twice (1, then 0); got {len(fake.get_calls)} GETs"
+        f"Happy path polls at least twice (5, then 4); got {len(fake.get_calls)} GETs"
     )
 
     # Client lifecycle: close() invoked exactly once on the happy path.
@@ -281,13 +286,16 @@ def test_spectrum_happy_path_runs_set_then_poll_returns_completed(
 
 
 def test_spectrum_timeout_raises_spectrum_sweep_timeout(tmp_path: Path) -> None:
-    """Poll never reaches idle within the configured timeout → typed exception.
+    """Poll never reaches a completion sentinel within the timeout → typed exception.
 
     Issue #62 (2026-09-19) decision #6: the helper raises a typed
     ``SpectrumSweepTimeout`` (carrying ``device_id``,
     ``duration_seconds``, ``last_status``) instead of silently
-    consuming a partial sweep. The fake keeps returning ``1``
-    (running) so the poll loop exhausts the deadline and raises.
+    consuming a partial sweep. Per the operator's physical-hardware
+    verification on firmware 25.0.1, ``5`` is
+    ``inProgressTimedSpectrumAnalysis`` — NOT in
+    ``_SWEEP_COMPLETION_STATUSES`` (``{0, 3, 4}``). The fake keeps
+    returning ``5`` so the poll loop exhausts the deadline and raises.
     """
     from nora.drivers.exceptions import SpectrumSweepTimeout
     from nora.drivers.snmp_pmp450i.spectrum import fetch_spectrum
@@ -295,9 +303,9 @@ def test_spectrum_timeout_raises_spectrum_sweep_timeout(tmp_path: Path) -> None:
     inv = _build_inventory(tmp_path)
     registry = _build_catalog(firmware="15.2.1", include_spectrum_oids=True)
 
-    # Poll interval 0 keeps the test fast. The fake returns 1 every
+    # Poll interval 0 keeps the test fast. The fake returns 5 every
     # time so the helper exhausts the timeout and raises.
-    fake = _FakeWritableSnmpClient(get_responses=[1] * 1000)
+    fake = _FakeWritableSnmpClient(get_responses=[5] * 1000)
     driver = _build_driver(inventory=inv, registry=registry, fake_client=fake)
     settings = Settings(
         _env_file=None,
@@ -321,8 +329,8 @@ def test_spectrum_timeout_raises_spectrum_sweep_timeout(tmp_path: Path) -> None:
     exc = exc_info.value
     assert exc.device_id == "192.0.2.10"
     assert exc.duration_seconds == 15  # Settings default
-    assert exc.last_status == 1  # last polled (running) — not idle
-    assert "last_status=1" in str(exc)
+    assert exc.last_status == 5  # last polled (in-progress) — NOT in {0, 3, 4}
+    assert "last_status=5" in str(exc)
 
     # SET sequence still happened (arm+start succeeded); GET-poll
     # exhausted the timeout; client was close()d on the exception path.
@@ -663,6 +671,202 @@ def test_spectrum_sweep_result_is_frozen_and_serialisable(tmp_path: Path) -> Non
     assert dumped["device_id"] == "192.0.2.10"
 
 
+# ---------------------------------------------------------------------------
+# PR #66 review follow-up — completion sentinel set (issue #62 WU-3)
+#
+# The original WU-3 helper assumed the GET-side completion sentinel
+# was 0 (``stopSpectrumAnalysis``). Per the official Cambium
+# WHISP-BOX-MIBV2-MIB and the operator's physical-hardware
+# verification on firmware 25.0.1, the actual GET-idle sentinels are
+# 3 (``idleNoSpectrumAnalysis`` — no results) and 4
+# (``idleCompleteSpectrumAnalysis`` — results ready); 0 is the SET
+# abort command and 5 is ``inProgressTimedSpectrumAnalysis``. The
+# helper now accepts ``last_status in {0, 3, 4}`` defensively (some
+# agents return 0 by GET post-completion). These tests pin the
+# expanded sentinel set against every documented value.
+# ---------------------------------------------------------------------------
+
+
+def test_sweep_completes_with_status_3_idle_no_results(tmp_path: Path) -> None:
+    """GET-poll returns 3 (``idleNoSpectrumAnalysis``) → ``COMPLETED``.
+
+    Operator hardware verification (firmware 25.0.1): the AP can
+    complete a sweep without producing usable results; ``.221.0``
+    returns 3 in that case. The helper must accept 3 as a completion
+    sentinel and surface ``final_status=3`` in the result.
+    """
+    from nora.drivers.snmp_pmp450i.spectrum import fetch_spectrum
+
+    inv = _build_inventory(tmp_path)
+    registry = _build_catalog(firmware="15.2.1", include_spectrum_oids=True)
+    # 5 (in-progress) → 3 (idle, no results).
+    fake = _FakeWritableSnmpClient(get_responses=[5, 3])
+    driver = _build_driver(inventory=inv, registry=registry, fake_client=fake)
+    settings = _settings_no_window()
+
+    result = fetch_spectrum(
+        driver=driver,
+        device_id="ap-7400-01",
+        settings=settings,
+        operator_confirmed=True,
+    )
+
+    assert result.scan_outcome == "COMPLETED"
+    assert result.final_status == 3
+    assert result.device_id == "192.0.2.10"
+    assert fake.closed is True
+
+
+def test_sweep_completes_with_status_4_idle_complete(tmp_path: Path) -> None:
+    """GET-poll returns 4 (``idleCompleteSpectrumAnalysis``) → ``COMPLETED``.
+
+    Operator hardware verification (firmware 25.0.1): the success
+    sentinel for a sweep that produced usable results is 4. This is
+    the value the real AP returns after a successful sector sweep.
+    """
+    from nora.drivers.snmp_pmp450i.spectrum import fetch_spectrum
+
+    inv = _build_inventory(tmp_path)
+    registry = _build_catalog(firmware="15.2.1", include_spectrum_oids=True)
+    # 5 (in-progress) → 4 (idle, results ready).
+    fake = _FakeWritableSnmpClient(get_responses=[5, 4])
+    driver = _build_driver(inventory=inv, registry=registry, fake_client=fake)
+    settings = _settings_no_window()
+
+    result = fetch_spectrum(
+        driver=driver,
+        device_id="ap-7400-01",
+        settings=settings,
+        operator_confirmed=True,
+    )
+
+    assert result.scan_outcome == "COMPLETED"
+    assert result.final_status == 4
+    assert result.device_id == "192.0.2.10"
+    assert fake.closed is True
+
+
+def test_sweep_completes_with_status_0_post_abort(tmp_path: Path) -> None:
+    """GET-poll returns 0 (defensive — some agents return 0 by GET post-completion).
+
+    The Cambium MIB declares 0 as the ``stopSpectrumAnalysis`` SET
+    command (not a GET-side value), but the operator's firmware
+    observation note flags that some agents DO return 0 by GET
+    immediately after a sweep settles. The helper accepts 0
+    defensively so those agents do not produce false-positive
+    ``SpectrumSweepTimeout`` exceptions.
+    """
+    from nora.drivers.snmp_pmp450i.spectrum import fetch_spectrum
+
+    inv = _build_inventory(tmp_path)
+    registry = _build_catalog(firmware="15.2.1", include_spectrum_oids=True)
+    # 5 (in-progress) → 0 (defensive completion sentinel).
+    fake = _FakeWritableSnmpClient(get_responses=[5, 0])
+    driver = _build_driver(inventory=inv, registry=registry, fake_client=fake)
+    settings = _settings_no_window()
+
+    result = fetch_spectrum(
+        driver=driver,
+        device_id="ap-7400-01",
+        settings=settings,
+        operator_confirmed=True,
+    )
+
+    assert result.scan_outcome == "COMPLETED"
+    assert result.final_status == 0
+    assert fake.closed is True
+
+
+def test_sweep_timeout_when_poll_sees_status_5_in_progress(tmp_path: Path) -> None:
+    """GET-poll returns 5 (``inProgressTimedSpectrumAnalysis``) repeatedly → timeout.
+
+    5 is NOT in ``_SWEEP_COMPLETION_STATUSES`` (``{0, 3, 4}``); the
+    helper must keep polling until the deadline, then raise
+    ``SpectrumSweepTimeout`` carrying ``last_status=5``.
+    """
+    from nora.drivers.exceptions import SpectrumSweepTimeout
+    from nora.drivers.snmp_pmp450i.spectrum import fetch_spectrum
+
+    inv = _build_inventory(tmp_path)
+    registry = _build_catalog(firmware="15.2.1", include_spectrum_oids=True)
+    # 1000 polls of 5 — well over the 1s timeout budget.
+    fake = _FakeWritableSnmpClient(get_responses=[5] * 1000)
+    driver = _build_driver(inventory=inv, registry=registry, fake_client=fake)
+    settings = Settings(
+        _env_file=None,
+        _env_file_encoding=None,
+        nora_maintenance_window_minutes=0,
+        nora_spectrum_sweep_timeout_seconds=1,
+        nora_spectrum_sweep_poll_interval_seconds=0.0,
+    )
+
+    with pytest.raises(SpectrumSweepTimeout) as exc_info:
+        fetch_spectrum(
+            driver=driver,
+            device_id="ap-7400-01",
+            settings=settings,
+            operator_confirmed=True,
+        )
+
+    assert exc_info.value.last_status == 5
+    assert fake.closed is True
+
+
+def test_sweep_timeout_when_poll_sees_sentinel_minus_1(tmp_path: Path) -> None:
+    """GET-poll raises consistently → ``last_status=-1`` (never polled).
+
+    The poll loop's ``except`` clause collapses wire / type errors to
+    ``-1`` (the "never polled" sentinel). When the deadline elapses
+    with no successful GET, the helper must raise
+    ``SpectrumSweepTimeout`` with ``last_status=-1`` so the operator
+    sees the wire was never reachable (as opposed to "polled, but
+    never completed").
+    """
+    from nora.drivers.exceptions import SpectrumSweepTimeout
+    from nora.drivers.snmp_pmp450i.spectrum import fetch_spectrum
+
+    inv = _build_inventory(tmp_path)
+    registry = _build_catalog(firmware="15.2.1", include_spectrum_oids=True)
+
+    # Empty queue + ``repeat_last_response=False`` → every GET raises
+    # ``KeyError`` → ``last_status`` collapses to ``-1`` every cycle.
+    fake = _FakeWritableSnmpClient(get_responses=[], repeat_last_response=False)
+    driver = _build_driver(inventory=inv, registry=registry, fake_client=fake)
+    settings = Settings(
+        _env_file=None,
+        _env_file_encoding=None,
+        nora_maintenance_window_minutes=0,
+        nora_spectrum_sweep_timeout_seconds=1,
+        nora_spectrum_sweep_poll_interval_seconds=0.0,
+    )
+
+    with pytest.raises(SpectrumSweepTimeout) as exc_info:
+        fetch_spectrum(
+            driver=driver,
+            device_id="ap-7400-01",
+            settings=settings,
+            operator_confirmed=True,
+        )
+
+    assert exc_info.value.last_status == -1
+    assert fake.closed is True
+
+
+def test_sweep_completion_constants_exported() -> None:
+    """``_SWEEP_COMPLETION_STATUSES`` is exported and equals ``{0, 3, 4}``.
+
+    The constant must be importable from the module's public surface
+    (added to ``__all__``) so downstream consumers + tests can
+    reference the sentinel set without re-declaring it. The frozenset
+    equality pins every accepted value (defending against accidental
+    additions / removals during future refactors).
+    """
+    from nora.drivers.snmp_pmp450i.spectrum import _SWEEP_COMPLETION_STATUSES
+
+    assert isinstance(_SWEEP_COMPLETION_STATUSES, frozenset)
+    assert _SWEEP_COMPLETION_STATUSES == frozenset({0, 3, 4})
+
+
 __all__ = [
     "test_spectrum_happy_path_runs_set_then_poll_returns_completed",
     "test_spectrum_timeout_raises_spectrum_sweep_timeout",
@@ -682,4 +886,11 @@ __all__ = [
     "test_spectrum_sweep_timeout_inherits_driver_error",
     # Frozen / serialisable
     "test_spectrum_sweep_result_is_frozen_and_serialisable",
+    # PR #66 review follow-up — expanded sentinel set
+    "test_sweep_completes_with_status_3_idle_no_results",
+    "test_sweep_completes_with_status_4_idle_complete",
+    "test_sweep_completes_with_status_0_post_abort",
+    "test_sweep_timeout_when_poll_sees_status_5_in_progress",
+    "test_sweep_timeout_when_poll_sees_sentinel_minus_1",
+    "test_sweep_completion_constants_exported",
 ]

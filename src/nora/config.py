@@ -131,10 +131,18 @@ class Settings(BaseSettings):
     # Inter-poll interval. 1.0s mirrors the Cambium WHISP-BOX-MIBV2-MIB
     # recommendation; the WU-3 helper defaults to this.
     nora_spectrum_sweep_poll_interval_seconds: float = 1.0
-    # Hard upper bound on a single sweep (poll loop). 60s matches the
-    # Cambium reference implementation; sweeps longer than this should
-    # raise SpectrumSweepTimeout and let the orchestrator decide.
-    nora_spectrum_sweep_timeout_seconds: int = 60
+    # Hard upper bound on a single sweep (poll loop). Default 150s covers
+    # the operator-observed Cambium PMP 450i AP "timed sector spectrum
+    # analysis" cycle of ~95-105s plus re-association slack (~15s); the
+    # AP initiates a sector-coordinated sweep that takes ~7x the duration
+    # SET value, regardless of the parameter. SM sweeps finish in ~15s
+    # and re-associate in ~20s, so 150s covers both AP and SM paths with
+    # headroom. Operator-overridable per-call via
+    # snmp_run_spectrum_analysis(sweep_duration_seconds=...) — note that
+    # only the duration SET is overridable; the timeout stays a Settings
+    # knob (the sweep_duration_seconds tool param controls the SET value,
+    # not the poll timeout).
+    nora_spectrum_sweep_timeout_seconds: int = 150
 
     loaded_from: LoadSource = "defaults"
 

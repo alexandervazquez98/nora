@@ -19,15 +19,34 @@ The slice-4 helper :func:`fetch_spectrum` now:
    ``driver._writable_client_factory`` (Driver-R2 carve-out).
 4. SETs the duration, then SETs the action ``8`` (arm) and ``1`` (start).
 5. GET-polls ``.221.0`` every ``nora_spectrum_sweep_poll_interval_seconds``
-   until the scalar returns ``0`` (idle) OR
-   ``nora_spectrum_sweep_timeout_seconds`` elapses.
-6. On idle: returns a typed :class:`SpectrumSweepResult` with
-   ``scan_outcome="COMPLETED"``, ``final_status=0``, and empty
-   ``ranked_clean_frequencies`` / ``noise_floor_dbm`` (real per-bin
-   noise decoding is a future slice).
+   until the scalar returns ONE OF the completion sentinels in
+   :data:`_SWEEP_COMPLETION_STATUSES` (``{0, 3, 4}``) OR
+   ``nora_spectrum_sweep_timeout_seconds`` elapses. The actual GET-idle
+   sentinels on physical Cambium WHISP-BOX-MIBV2-MIB firmware 25.0.1
+   are ``3`` (``idleNoSpectrumAnalysis`` — sweep ran, no results
+   available) and ``4`` (``idleCompleteSpectrumAnalysis`` — sweep ran,
+   results available); ``0`` is the ``stopSpectrumAnalysis`` SET
+   command but some agents return it by GET post-completion, so it is
+   accepted defensively. ``5`` is
+   ``inProgressTimedSpectrumAnalysis`` (still sweeping).
+6. On completion: returns a typed :class:`SpectrumSweepResult` with
+   ``scan_outcome="COMPLETED"``, ``final_status`` echoing the LAST
+   polled completion value (typically ``4`` on real hardware), and
+   empty ``ranked_clean_frequencies`` / ``noise_floor_dbm`` (real
+   per-bin noise decoding is a future slice).
 7. On timeout: raises :class:`SpectrumSweepTimeout` carrying the
-   ``device_id``, ``duration_seconds``, and ``last_status`` so the
-   orchestrator can see WHERE the sweep got stuck.
+   ``device_id``, ``duration_seconds``, and ``last_status`` (the last
+   polled value, typically ``5`` while still in progress, or ``-1``
+   when nothing was polled) so the orchestrator can see WHERE the
+   sweep got stuck.
+
+Operator-observed AP sweep timing (firmware 25.0.1): the AP initiates
+a sector-coordinated sweep that takes ~95-105s regardless of the
+``duration_seconds`` parameter SET on ``.220.0`` — the SET value is
+NOT the wall-clock duration. SM sweeps complete in ~15s and
+re-associate in ~20s. The default
+``nora_spectrum_sweep_timeout_seconds=150`` covers both AP and SM
+paths with headroom.
 
 Tier-1 ``operator_confirmed`` gate FIRST (preserved from slice 4);
 the real protocol emits SET frames against the spectrum-scan scalars
@@ -69,6 +88,24 @@ logger = logging.getLogger("nora.drivers.snmp_pmp450i.spectrum")
 ScanOutcome = Literal["COMPLETED", "TIMEOUT", "ABORTED"]
 
 
+# WHISP-BOX-MIBV2-MIB `whispBoxSpectrumScanAction` (.221.0) GET-side
+# completion sentinels. Per the official MIB + empirical hardware
+# verification on firmware 25.0.1:
+#   - 0  stopSpectrumAnalysis              (SET-only abort command;
+#                                          some agents return 0 by GET
+#                                          post-completion — accepted
+#                                          defensively)
+#   - 3  idleNoSpectrumAnalysis            (GET; idle, no results)
+#   - 4  idleCompleteSpectrumAnalysis      (GET; idle, results ready)
+# Values NOT in this set are NOT a completion (notably 5
+# `inProgressTimedSpectrumAnalysis` indicates an active sweep). The
+# helper accepts the WHOLE set defensively because firmware revisions
+# differ in which GET-idle value they emit; the operator's
+# physical-hardware observation is that 4 is the success sentinel on
+# 25.0.1 but 3 also occurs.
+_SWEEP_COMPLETION_STATUSES: frozenset[int] = frozenset({0, 3, 4})
+
+
 class SpectrumSweepResult(BaseModel):
     """Typed spectrum sweep result — issue #62 WU-3.
 
@@ -82,12 +119,16 @@ class SpectrumSweepResult(BaseModel):
       - device_id: the inventory device the sweep ran against.
       - scan_started_at: UTC ISO-8601 timestamp marking the SET-arm call.
       - scan_completed_at: UTC ISO-8601 timestamp marking the moment
-        .221.0 returned 0 (idle). On TIMEOUT this is the timeout
+        .221.0 returned a completion sentinel from
+        `_SWEEP_COMPLETION_STATUSES`. On TIMEOUT this is the timeout
         instant; on ABORTED this is the abort instant.
       - sweep_duration_seconds: the duration value SET on .220.0
         (echoes the operator's request so the audit trail is self-contained).
-      - final_status: the last value read from .221.0 (typically 0 on
-        COMPLETED, the last polled value on TIMEOUT).
+      - final_status: the last value read from .221.0 (typically 4 on
+        a real-hardware COMPLETED sweep, 0/3 in firmware revisions
+        that emit the alternative idle sentinels; the last polled
+        value on TIMEOUT — e.g. 5 in-progress, or -1 if nothing was
+        polled before the wire failed).
       - scan_outcome: COMPLETED | TIMEOUT | ABORTED.
       - ranked_clean_frequencies: empty list in WU-3 (real per-bin
         noise decoding is a future slice); kept as a field so the
@@ -157,10 +198,17 @@ def _poll_sweep_status(
     poll_interval_seconds: float,
     timeout_seconds: int,
 ) -> int:
-    """GET-poll .221.0 until it returns 0 (idle) or timeout elapses.
+    """GET-poll .221.0 until one of the completion sentinels or timeout.
 
-    Returns the last polled status code. Callers raise
-    SpectrumSweepTimeout if the returned value is not 0.
+    Completion sentinels (WHISP-BOX-MIBV2-MIB::whispBoxSpectrumScanAction):
+      - 0 stopSpectrumAnalysis (SET-only; some agents return 0 by GET
+        post-completion — accept defensively)
+      - 3 idleNoSpectrumAnalysis (GET; idle, no results available)
+      - 4 idleCompleteSpectrumAnalysis (GET; idle, results available)
+
+    Returns the LAST polled value (could be a completion sentinel or an
+    in-progress sentinel like 5). Callers check membership in
+    `_SWEEP_COMPLETION_STATUSES` to decide success vs. timeout.
     """
     deadline = time.monotonic() + timeout_seconds
     last_status = -1  # sentinel: never polled
@@ -169,8 +217,8 @@ def _poll_sweep_status(
             last_status = int(client.get_oid(action_oid))
         except (KeyError, ValueError, TypeError):
             last_status = -1
-        if last_status == 0:
-            return 0
+        if last_status in _SWEEP_COMPLETION_STATUSES:
+            return last_status
         time.sleep(poll_interval_seconds)
     return last_status
 
@@ -188,7 +236,7 @@ def fetch_spectrum(
     operator_confirmed: bool = False,
     sweep_duration_seconds: int | None = None,
 ) -> SpectrumSweepResult:
-    """Run the real Cambium sweep: SET duration → SET 8 → SET 1 → GET-poll until 0.
+    """Run the real Cambium sweep: SET duration → SET 8 → SET 1 → GET-poll until completion.
 
     Gates (preserve existing behavior):
       1. Tier-1 operator_confirmed gate FIRST (raises Tier1ClearanceRequired).
@@ -196,11 +244,32 @@ def fetch_spectrum(
       3. Catalog resolution (raises LookupError on missing OID names).
       4. Open a WritableSnmpClient via driver._writable_client_factory.
       5. SET duration → SET 8 → SET 1.
-      6. GET-poll .221.0 every poll_interval_seconds until 0 or timeout.
+      6. GET-poll .221.0 every poll_interval_seconds until one of the
+         completion sentinels in `_SWEEP_COMPLETION_STATUSES`
+         (``{0, 3, 4}``) or timeout elapses.
       7. On timeout: raise SpectrumSweepTimeout.
       8. On success: return SpectrumSweepResult with COMPLETED outcome,
-         final_status=0, and empty ranked_clean_frequencies (real
-         per-bin noise decoding is a future slice).
+         final_status echoing the actual polled completion value
+         (typically 4 on real-hardware firmware 25.0.1), and empty
+         ranked_clean_frequencies (real per-bin noise decoding is a
+         future slice).
+
+    Completion sentinel semantics (WHISP-BOX-MIBV2-MIB::
+    whispBoxSpectrumScanAction, per official MIB + operator's
+    physical-hardware verification on firmware 25.0.1):
+      - 0 stopSpectrumAnalysis (SET-only abort; some agents return 0
+        by GET post-completion — accepted defensively)
+      - 3 idleNoSpectrumAnalysis (GET; idle, no results available)
+      - 4 idleCompleteSpectrumAnalysis (GET; idle, results available)
+      - 5 inProgressTimedSpectrumAnalysis (GET; sweep still running)
+
+    Operator-observed AP sweep timing: ~95-105s regardless of the
+    ``duration_seconds`` parameter (the AP initiates a sector-coordinated
+    sweep). SM sweeps complete in ~15s and re-associate in ~20s. The
+    default ``nora_spectrum_sweep_timeout_seconds=150`` covers both
+    paths with headroom. The Settings knob is the only way to override
+    the poll-loop timeout — ``sweep_duration_seconds`` controls the
+    ``.220.0`` SET value, NOT the poll-loop timeout.
 
     Per issue #43 ADDED requirement "Tier-1 Operator Clearance Gate":
     ``operator_confirmed`` defaults to ``False`` (fail-closed). The
@@ -293,7 +362,7 @@ def fetch_spectrum(
             pass
 
     completed_at = datetime.now(timezone.utc)
-    if last_status != 0:
+    if last_status not in _SWEEP_COMPLETION_STATUSES:
         raise SpectrumSweepTimeout(
             device_id=str(getattr(device, "host", device_id)),
             duration_seconds=effective_duration,
@@ -305,7 +374,7 @@ def fetch_spectrum(
         scan_started_at=now.isoformat(),
         scan_completed_at=completed_at.isoformat(),
         sweep_duration_seconds=effective_duration,
-        final_status=last_status,
+        final_status=last_status,  # now actually 0/3/4, not always 0
         scan_outcome="COMPLETED",
         ranked_clean_frequencies=[],
         noise_floor_dbm={},
@@ -319,4 +388,5 @@ __all__ = [
     "ScanOutcome",
     "_arm_sweep",
     "_poll_sweep_status",
+    "_SWEEP_COMPLETION_STATUSES",
 ]

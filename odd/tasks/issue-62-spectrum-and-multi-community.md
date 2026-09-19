@@ -164,3 +164,21 @@ The real Cambium sweep protocol requires SET frames (write duration, arm, start)
 
 - `odd/tasks/multi-community-migration-and-band-reboot.md` (planned, branch not created) — the original multi-community + band-reboot scope. This issue #62 fix ships the **`sm_communities` operator-facing parameter** only; the band-reboot tool + band-crossing signal are still pending in that task.
 - `odd/tasks/pmp450i-25.0.1-hardening.md` (closed via PR #59) — the catalog baseline this work builds on.
+
+## Status log
+
+- **2026-09-19 — PR #66 review follow-up**: Owner deployed to physical PMP 450i
+  hardware (firmware 25.0.1) and discovered two production-critical bugs the
+  unit tests did not catch: (1) the MIB state machine for
+  whispBoxSpectrumScanAction (.221.0) treats 0 as `stopSpectrumAnalysis`
+  (SET-only) — the actual GET-idle sentinels are 3 (`idleNoSpectrumAnalysis`)
+  and 4 (`idleCompleteSpectrumAnalysis`); 5 is in-progress. The previous code
+  waited for 0 by GET, which never returns, causing false-positive timeouts on
+  every successful sweep. (2) AP sweeps take ~95-105s regardless of the
+  duration parameter (the AP triggers a sector-coordinated sweep); SM sweeps
+  take ~15s + ~20s re-association. Default
+  `nora_spectrum_sweep_timeout_seconds=60` was too short for AP sweeps.
+  Fixes (in this follow-up): (a) accept `last_status in {0, 3, 4}` as
+  completion sentinels; (b) bump default to 150s. New tests pin both
+  sentinels and the AP/SM timing reality. Pre-existing `commit 18ceb75`
+  (operator-pushed) already fixed the X690Type ASN.1 wrapping.
