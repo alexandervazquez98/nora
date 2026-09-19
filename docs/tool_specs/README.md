@@ -36,6 +36,7 @@ Direct execution; orchestrator may invoke immediately. No operator interaction, 
 | `icmp_run_sector_stability_probe` | [icmp_run_sector_stability_probe.md](./icmp_run_sector_stability_probe.md) |
 | `icmp_get_sector_stability_progress` | [icmp_get_sector_stability_progress.md](./icmp_get_sector_stability_progress.md) |
 | `icmp_cancel_sector_stability_probe` | [icmp_cancel_sector_stability_probe.md](./icmp_cancel_sector_stability_probe.md) |
+| `icmp_list_probe_runs` | [icmp_list_probe_runs.md](./icmp_list_probe_runs.md) |
 
 ### Tier 1 — Potentially Disruptive / Active Telemetry
 
