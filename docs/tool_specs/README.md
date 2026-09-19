@@ -33,6 +33,9 @@ Direct execution; orchestrator may invoke immediately. No operator interaction, 
 | `search_intervention_history` | [search_intervention_history.md](./search_intervention_history.md) |
 | `get_device_lifecycle_summary` | [get_device_lifecycle_summary.md](./get_device_lifecycle_summary.md) |
 | `correlate_sector_interference` | [correlate_sector_interference.md](./correlate_sector_interference.md) |
+| `icmp_run_sector_stability_probe` | [icmp_run_sector_stability_probe.md](./icmp_run_sector_stability_probe.md) |
+| `icmp_get_sector_stability_progress` | [icmp_get_sector_stability_progress.md](./icmp_get_sector_stability_progress.md) |
+| `icmp_cancel_sector_stability_probe` | [icmp_cancel_sector_stability_probe.md](./icmp_cancel_sector_stability_probe.md) |
 
 ### Tier 1 — Potentially Disruptive / Active Telemetry
 

@@ -190,9 +190,13 @@ def test_subprocess_nora_mcp_exposes_fourteen_tools(
         "register_device",
         "hitl_mint_token",
         "snmp_reboot_radio",
+        # Issue #61 / PR1 WU-1.5.
+        "icmp_run_sector_stability_probe",
+        "icmp_get_sector_stability_progress",
+        "icmp_cancel_sector_stability_probe",
     ]
     assert tool_names == expected, (
-        f"`nora-mcp` (HTTP) must expose exactly the 14 thin tools in order; got {tool_names!r}"
+        f"`nora-mcp` (HTTP) must expose the 16 thin tools (post PR1) in order; got {tool_names!r}"
     )
 
 
@@ -220,9 +224,13 @@ def test_subprocess_python_dash_m_nora_exposes_same_tools(
         "register_device",
         "hitl_mint_token",
         "snmp_reboot_radio",
+        # Issue #61 / PR1 WU-1.5.
+        "icmp_run_sector_stability_probe",
+        "icmp_get_sector_stability_progress",
+        "icmp_cancel_sector_stability_probe",
     ]
     assert tool_names == expected, (
-        f"`python -m nora` (HTTP) must expose 14 thin tools in order; got {tool_names!r}"
+        f"`python -m nora` (HTTP) must expose 16 thin tools (post PR1) in order; got {tool_names!r}"
     )
 
 
