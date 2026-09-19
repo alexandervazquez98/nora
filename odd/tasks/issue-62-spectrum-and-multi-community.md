@@ -182,3 +182,25 @@ The real Cambium sweep protocol requires SET frames (write duration, arm, start)
   completion sentinels; (b) bump default to 150s. New tests pin both
   sentinels and the AP/SM timing reality. Pre-existing `commit 18ceb75`
   (operator-pushed) already fixed the X690Type ASN.1 wrapping.
+- **2026-09-19 — PR #66 review follow-up #2**: Owner re-deployed after `6a59546`
+  and found two more bugs the unit tests missed:
+  (1) **Pre-state race**: the radio's SNMP agent returns the pre-existing
+      idle state (e.g. 4 from a previous sweep) for ~10-50ms after the SET
+      before transitioning to 5 (in-progress). The previous poll loop
+      accepted the pre-state as completion and reported success in ~50ms,
+      while the radio was still about to start the sweep.
+  (2) **Mid-sweep DriverError not caught**: during an active sweep the radio
+      goes off-channel and `client.get_oid` raises `SnmpTimeoutError` /
+      `NetworkUnreachableError` (subclasses of `DriverError`). The previous
+      `except (KeyError, ValueError, TypeError)` did not catch these and
+      an unhandled exception would abort the helper mid-poll.
+  Fixes (in this follow-up):
+    (a) Module-level `_MIN_STARTUP_GUARD_SECONDS = 1.0` constant; `_poll_sweep_status`
+        only accepts completion sentinels after `min(1.0, sweep_duration_seconds)`
+        seconds have elapsed since the SET.
+    (b) Expanded the polling exception handler to `except (KeyError, ValueError,
+        TypeError, DriverError): last_status = -1` so transient wire
+        failures during the sweep do not abort the helper.
+    (c) New tests pin the pre-state race (completion NOT accepted before the
+        startup guard elapses), the minimum-one-second guard for short
+        sweeps, and the mid-sweep DriverError swallow.

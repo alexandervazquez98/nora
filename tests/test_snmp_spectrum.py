@@ -37,6 +37,7 @@ import pytest
 import yaml
 
 from nora.config import Settings
+from nora.drivers.exceptions import SnmpTimeoutError
 from nora.drivers.inventory import Inventory
 from nora.drivers.oid_catalog import OidCatalog, OidCatalogRegistry
 
@@ -179,6 +180,39 @@ class _FakeWritableSnmpClient:
 
     def close(self) -> None:
         self.closed = True
+
+
+class _FakeErrorInjectingSnmpClient(_FakeWritableSnmpClient):
+    """Fake that raises ``SnmpTimeoutError`` for the first ``n_error_polls`` GETs.
+
+    PR #66 review follow-up #2: pins the
+    ``_poll_sweep_status`` ``except DriverError`` swallow against the
+    operator's observed mid-sweep wire failures. Each GET increments a
+    counter; while the counter is non-zero, the fake raises
+    :class:`SnmpTimeoutError` (a ``DriverError`` subclass) instead of
+    popping from ``get_responses``. Once the counter reaches zero the
+    fake falls through to the normal queue + ``repeat_last_response``
+    behaviour.
+
+    The counter tracks ONLY error polls; regular polls (after the
+    counter is zeroed) are not counted.
+    """
+
+    def __init__(
+        self,
+        *args: Any,
+        n_error_polls: int = 0,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self._n_error_polls_remaining = n_error_polls
+
+    def get_oid(self, oid: str) -> str | int:
+        self.get_calls.append(oid)
+        if self._n_error_polls_remaining > 0:
+            self._n_error_polls_remaining -= 1
+            raise SnmpTimeoutError(oid)
+        return super().get_oid(oid)
 
 
 def _build_driver(
@@ -867,6 +901,261 @@ def test_sweep_completion_constants_exported() -> None:
     assert _SWEEP_COMPLETION_STATUSES == frozenset({0, 3, 4})
 
 
+# ---------------------------------------------------------------------------
+# PR #66 review follow-up #2 — pre-state race + mid-sweep DriverError
+#
+# After commit `6a59546` widened completion sentinels to `{0, 3, 4}` and
+# bumped the default timeout to 150s, the operator re-deployed to
+# physical PMP 450i hardware and observed two more bugs the unit tests
+# missed:
+#
+#   1. Pre-state race: the radio's SNMP agent returns the PRE-EXISTING
+#      idle state (typically 4 from a previous sweep) for ~10-50ms
+#      after the SET arm+start, before transitioning to 5 (in-progress).
+#      The poll loop accepted the pre-state as completion and reported
+#      false-positive success in ~50ms while the radio was still about
+#      to start the sweep.
+#
+#   2. Mid-sweep DriverError: during an active sweep the radio goes
+#      off-channel and `client.get_oid` raises `SnmpTimeoutError` /
+#      `NetworkUnreachableError` (subclasses of `DriverError`). The
+#      previous `except (KeyError, ValueError, TypeError)` did NOT
+#      catch these, so a single mid-sweep packet loss would abort the
+#      helper.
+#
+# Fixes (in this follow-up):
+#   (a) Module-level `_MIN_STARTUP_GUARD_SECONDS = 1.0` constant;
+#       `_poll_sweep_status` only accepts completion sentinels after
+#       `min(1.0, sweep_duration_seconds)` seconds have elapsed since
+#       the SET.
+#   (b) Expanded the polling exception handler to
+#       `except (KeyError, ValueError, TypeError, DriverError):
+#        last_status = -1` so transient wire failures during the sweep
+#       do not abort the helper.
+#
+# The tests below pin both behaviours against the documented
+# operator-observed scenarios.
+# ---------------------------------------------------------------------------
+
+
+def test_sweep_does_not_complete_prematurely_on_pre_state_4(tmp_path: Path) -> None:
+    """Pre-existing state 4 from a previous sweep must NOT trigger completion.
+
+    Operator observation on physical Cambium PMP 450i firmware 25.0.1:
+    after the SET arm+start, the SNMP agent can return the
+    PRE-EXISTING idle state (typically 4 from a previous sweep) for
+    ~10-50ms before transitioning to 5 (in-progress). The previous
+    poll loop accepted the pre-state as completion and reported
+    success in ~50ms while the radio was still about to start.
+
+    The startup guard (``_MIN_STARTUP_GUARD_SECONDS = 1.0``) ensures
+    the helper does NOT return on a stale pre-state. With
+    ``sweep_duration_seconds=15`` the guard is
+    ``min(1.0, 15.0) = 1.0``; completion sentinels are only accepted
+    after 1.0s elapsed.
+
+    Queue design: pre-state 4 for ~25 polls (with poll_interval=0.05
+    this is ~1.25s — well past the guard), then 5 (real in-progress,
+    proving the radio has actually started), then 4 (real completion).
+    The fake queue is exhausted after 36 polls; ``repeat_last_response``
+    keeps returning 4 thereafter. The helper must NOT return on the
+    first pre-state 4 (``elapsed < 1.0``); it must poll past the
+    guard, see the real in-progress 5, and then accept 4 as
+    completion.
+    """
+    import time
+
+    from nora.drivers.snmp_pmp450i.spectrum import fetch_spectrum
+
+    inv = _build_inventory(tmp_path)
+    registry = _build_catalog(firmware="15.2.1", include_spectrum_oids=True)
+
+    # Pre-state 4 for ~25 polls (~1.25s with poll_interval=0.05), then
+    # 5 (in-progress), then 4 (real completion). 36 responses total.
+    fake = _FakeWritableSnmpClient(get_responses=[4] * 25 + [5] * 10 + [4])
+    driver = _build_driver(inventory=inv, registry=registry, fake_client=fake)
+    settings = Settings(
+        _env_file=None,
+        _env_file_encoding=None,
+        nora_maintenance_window_minutes=0,
+        nora_spectrum_sweep_poll_interval_seconds=0.05,
+        nora_spectrum_sweep_timeout_seconds=10,
+    )
+
+    start = time.monotonic()
+    result = fetch_spectrum(
+        driver=driver,
+        device_id="ap-7400-01",
+        settings=settings,
+        operator_confirmed=True,
+    )
+    elapsed = time.monotonic() - start
+
+    # The helper polled past the 1.0s startup guard before accepting
+    # completion — the pre-state 4 on the first poll did NOT trigger
+    # an early return.
+    assert result.scan_outcome == "COMPLETED"
+    assert result.final_status == 4
+    assert elapsed >= 1.0, (
+        f"helper returned too early at {elapsed:.2f}s; the 1.0s startup guard was bypassed"
+    )
+    # And it didn't time out (which would have taken ~10s).
+    assert elapsed < 5.0, f"helper took {elapsed:.2f}s — should not approach the 10s timeout"
+    # The fake polled well past the guard (proves the helper kept
+    # polling past the pre-state 4 leak). With poll_interval=0.05 the
+    # helper needs ~15-20 polls to reach the 1.0s guard floor;
+    # depending on OS scheduling the exact count varies. 15 is a
+    # conservative floor that still proves the helper polled past
+    # many pre-state 4s before accepting.
+    assert len(fake.get_calls) >= 15, (
+        f"expected >=15 GETs past the 1.0s guard; got {len(fake.get_calls)} GETs"
+    )
+    # Client lifecycle still honoured.
+    assert fake.closed is True
+
+
+def test_sweep_startup_guard_respects_minimum_one_second(tmp_path: Path) -> None:
+    """The startup guard enforces a 1.0s floor for any sweep_duration_seconds >= 1.
+
+    With the default ``sweep_duration_seconds=15``, the guard is
+    ``min(_MIN_STARTUP_GUARD_SECONDS=1.0, 15) = 1.0``. A queue yielding
+    a completion sentinel immediately (e.g. ``[4]``) must NOT cause
+    the helper to return at ``t≈0``; the helper must wait until at
+    least 1.0s has elapsed before accepting the completion sentinel.
+
+    This pins the floor of 1.0s which covers the operator's observed
+    ~10-50ms pre-state race window with a 20-100x margin. (For very
+    short sweeps ``sweep_duration_seconds < 1.0``, the guard is
+    capped to ``sweep_duration_seconds`` so the sweep still has time
+    to complete within its natural window.)
+    """
+    import time
+
+    from nora.drivers.snmp_pmp450i.spectrum import fetch_spectrum
+
+    inv = _build_inventory(tmp_path)
+    registry = _build_catalog(firmware="15.2.1", include_spectrum_oids=True)
+
+    # Queue: just [4] — every poll returns 4. Without the startup
+    # guard, the helper would return at t=0 (false-positive). With
+    # the guard, the helper must wait >=1.0s before accepting.
+    fake = _FakeWritableSnmpClient(get_responses=[4])
+    driver = _build_driver(inventory=inv, registry=registry, fake_client=fake)
+    settings = Settings(
+        _env_file=None,
+        _env_file_encoding=None,
+        nora_maintenance_window_minutes=0,
+        nora_spectrum_sweep_poll_interval_seconds=0.05,
+        nora_spectrum_sweep_timeout_seconds=10,
+    )
+
+    start = time.monotonic()
+    result = fetch_spectrum(
+        driver=driver,
+        device_id="ap-7400-01",
+        settings=settings,
+        operator_confirmed=True,
+    )
+    elapsed = time.monotonic() - start
+
+    assert result.scan_outcome == "COMPLETED"
+    assert result.final_status == 4
+    # The startup guard is 1.0s minimum; the helper waited at least
+    # 1.0s before accepting the completion sentinel.
+    assert elapsed >= 1.0, (
+        f"helper returned too early at {elapsed:.2f}s; the 1.0s startup guard was not respected"
+    )
+    # Sanity: didn't approach the 10s timeout.
+    assert elapsed < 5.0, f"helper took {elapsed:.2f}s — should not approach the 10s timeout"
+    assert fake.closed is True
+
+
+def test_sweep_driver_error_mid_poll_is_swallowed(tmp_path: Path) -> None:
+    """Mid-sweep ``SnmpTimeoutError`` (``DriverError`` subclass) is swallowed.
+
+    Operator observation on physical PMP 450i: during an active sweep
+    the radio goes off-channel and ``client.get_oid`` raises
+    ``SnmpTimeoutError`` / ``NetworkUnreachableError`` (subclasses of
+    ``DriverError``). The previous ``except (KeyError, ValueError,
+    TypeError)`` block did NOT catch these, so a single mid-sweep
+    packet loss would abort the helper with an unhandled exception.
+
+    The expanded ``except (KeyError, ValueError, TypeError, DriverError)``
+    handler collapses transient wire failures to ``last_status = -1``
+    and keeps polling. This test injects ``SnmpTimeoutError`` for the
+    first 5 polls, then a normal completion sentinel for the 6th. The
+    helper must NOT propagate the exception; it must eventually
+    complete with ``final_status=4``.
+    """
+    import time
+
+    from nora.drivers.snmp_pmp450i.spectrum import fetch_spectrum
+
+    inv = _build_inventory(tmp_path)
+    registry = _build_catalog(firmware="15.2.1", include_spectrum_oids=True)
+
+    # First 5 polls raise ``SnmpTimeoutError`` (a ``DriverError``
+    # subclass); then ``[4]`` queue serves completion. The startup
+    # guard ensures we poll past 1.0s before accepting the 4.
+    fake = _FakeErrorInjectingSnmpClient(
+        get_responses=[4],
+        n_error_polls=5,
+    )
+    driver = _build_driver(inventory=inv, registry=registry, fake_client=fake)
+    settings = Settings(
+        _env_file=None,
+        _env_file_encoding=None,
+        nora_maintenance_window_minutes=0,
+        nora_spectrum_sweep_poll_interval_seconds=0.05,
+        nora_spectrum_sweep_timeout_seconds=10,
+    )
+
+    start = time.monotonic()
+    # The expanded exception handler swallows the DriverError; the
+    # helper does NOT propagate the SnmpTimeoutError to the caller.
+    result = fetch_spectrum(
+        driver=driver,
+        device_id="ap-7400-01",
+        settings=settings,
+        operator_confirmed=True,
+    )
+    elapsed = time.monotonic() - start
+
+    assert result.scan_outcome == "COMPLETED"
+    assert result.final_status == 4
+    # The helper waited past the 1.0s guard.
+    assert elapsed >= 1.0, (
+        f"helper returned too early at {elapsed:.2f}s; the 1.0s startup guard was bypassed"
+    )
+    # The fake was polled enough times to exhaust the 5 error polls
+    # AND wait past the startup guard.
+    assert len(fake.get_calls) >= 5, (
+        f"expected >=5 GETs (5 error polls + completion poll); got {len(fake.get_calls)}"
+    )
+    assert fake.closed is True
+
+
+def test_sweep_completion_constants_exported_with_startup_guard() -> None:
+    """``_MIN_STARTUP_GUARD_SECONDS`` is exported alongside the completion set.
+
+    The startup-guard constant must be importable from the module's
+    public surface (added to ``__all__``) so downstream consumers +
+    tests can reference the guard floor without re-declaring it. The
+    equality pins the documented ``1.0`` second floor (defending
+    against accidental changes during future refactors).
+    """
+    from nora.drivers.snmp_pmp450i.spectrum import (
+        _MIN_STARTUP_GUARD_SECONDS,
+        _SWEEP_COMPLETION_STATUSES,
+    )
+
+    assert isinstance(_MIN_STARTUP_GUARD_SECONDS, float)
+    assert _MIN_STARTUP_GUARD_SECONDS == 1.0
+    # Both constants are exported side-by-side; the existing
+    # completion-sentinel set is unchanged.
+    assert _SWEEP_COMPLETION_STATUSES == frozenset({0, 3, 4})
+
+
 __all__ = [
     "test_spectrum_happy_path_runs_set_then_poll_returns_completed",
     "test_spectrum_timeout_raises_spectrum_sweep_timeout",
@@ -886,11 +1175,16 @@ __all__ = [
     "test_spectrum_sweep_timeout_inherits_driver_error",
     # Frozen / serialisable
     "test_spectrum_sweep_result_is_frozen_and_serialisable",
-    # PR #66 review follow-up — expanded sentinel set
+    # PR #66 review follow-up #1 — expanded sentinel set
     "test_sweep_completes_with_status_3_idle_no_results",
     "test_sweep_completes_with_status_4_idle_complete",
     "test_sweep_completes_with_status_0_post_abort",
     "test_sweep_timeout_when_poll_sees_status_5_in_progress",
     "test_sweep_timeout_when_poll_sees_sentinel_minus_1",
     "test_sweep_completion_constants_exported",
+    # PR #66 review follow-up #2 — pre-state race + DriverError swallow
+    "test_sweep_does_not_complete_prematurely_on_pre_state_4",
+    "test_sweep_startup_guard_respects_minimum_one_second",
+    "test_sweep_driver_error_mid_poll_is_swallowed",
+    "test_sweep_completion_constants_exported_with_startup_guard",
 ]
