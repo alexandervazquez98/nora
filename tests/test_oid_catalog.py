@@ -66,11 +66,15 @@ _SAMPLE_BUILTIN_OIDS: dict[str, str] = {
     "smRetransmits": "1.3.6.1.4.1.161.19.3.2.1.82.0",
     "smRxLevel": "1.3.6.1.4.1.161.19.3.2.1.83.0",
     # PR 4 — slice 4 spectrum-sweep additions.
-    "spectrumNoiseFloorA": "1.3.6.1.4.1.161.19.3.1.1.90.0",
-    "spectrumNoiseFloorB": "1.3.6.1.4.1.161.19.3.1.1.91.0",
-    "spectrumNoiseFloorC": "1.3.6.1.4.1.161.19.3.1.1.92.0",
-    "spectrumChannelRank": "1.3.6.1.4.1.161.19.3.1.1.93.0",
-    "spectrumScanStatus": "1.3.6.1.4.1.161.19.3.1.1.94.0",
+    # Issue #62 (2026-09-19): replaced the synthetic noise-floor
+    # scalars (``.221.1/.2/.3/.4``) with the real Cambium sweep-
+    # protocol OIDs ``whispBoxSpectrumScanDuration`` /
+    # ``whispBoxSpectrumScanAction``. The dotted addresses stay at
+    # the file's pre-existing mock positions (``.90.0`` / ``.91.0``)
+    # — the catalog gate only checks NAMES, not OIDs, so test
+    # fixtures don't need real Cambium addresses.
+    "spectrumScanDuration": "1.3.6.1.4.1.161.19.3.1.1.90.0",
+    "spectrumScanAction": "1.3.6.1.4.1.161.19.3.1.1.91.0",
     # PR 4 — slice 4 RF-migration additions.
     "migrateCarrierFrequency": "1.3.6.1.4.1.161.19.3.1.1.95.0",
     "migratePriorCarrierFrequency": "1.3.6.1.4.1.161.19.3.1.1.96.0",
@@ -769,12 +773,16 @@ class TestMultiRoot:
         )
         assert ("cambium", "pmp450i", "15.2.1") in {tuple(ref) for ref in registry.loaded_refs}
         catalog = registry.resolve(("cambium", "pmp450i", "15.2.1"))
-        # Issue #35: verified WHISP-APS-MIB position for ``ssr`` is
-        # column 86 of ``whispLinkTable`` (.3.1.4.1), not the
-        # placeholder sequential position (.3.1.1.5) the original v1
-        # seed used. See ``data/oid-catalogs/sources/cambium/pmp450i/
-        # 15.2.1.source.json``.
-        assert catalog.oids["ssr"] == "1.3.6.1.4.1.161.19.3.1.4.1.86.0"
+        # Issue #35: verified WHISP-APS-MIB position for the SSR OID is
+        # column 86 of ``whispLinkTable`` (.3.1.4.1), not the placeholder
+        # sequential position (.3.1.1.5) the original v1 seed used.
+        # Issue #57 (2026-09-19): the legacy alias ``ssr`` was retired
+        # in favour of ``ssrLink`` (same dotted OID — the per-LUID
+        # tabular column). WU-1's re-sign of the shipped built-in
+        # baseline brings the on-disk envelope in sync with the
+        # current source JSON, so the assertion keys off ``ssrLink``.
+        # See ``data/oid-catalogs/sources/cambium/pmp450i/15.2.1.source.json``.
+        assert catalog.oids["ssrLink"] == "1.3.6.1.4.1.161.19.3.1.4.1.86.0"
 
     def test_builtin_baseline_key_and_operator_key_are_independent(
         self,

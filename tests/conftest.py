@@ -68,11 +68,12 @@ _SAMPLE_CATALOG_PAYLOAD: dict[str, str] = {
     "smRetransmits": "1.3.6.1.4.1.161.19.3.2.1.82.0",
     "smRxLevel": "1.3.6.1.4.1.161.19.3.2.1.83.0",
     # PR 4 — slice 4 spectrum-sweep additions.
-    "spectrumNoiseFloorA": "1.3.6.1.4.1.161.19.3.1.1.90.0",
-    "spectrumNoiseFloorB": "1.3.6.1.4.1.161.19.3.1.1.91.0",
-    "spectrumNoiseFloorC": "1.3.6.1.4.1.161.19.3.1.1.92.0",
-    "spectrumChannelRank": "1.3.6.1.4.1.161.19.3.1.1.93.0",
-    "spectrumScanStatus": "1.3.6.1.4.1.161.19.3.1.1.94.0",
+    # Issue #62 (2026-09-19): the synthetic noise-floor scalars
+    # were retired and replaced with the real Cambium sweep-
+    # protocol OIDs (``whispBoxSpectrumScanDuration`` /
+    # ``whispBoxSpectrumScanAction``).
+    "spectrumScanDuration": "1.3.6.1.4.1.161.19.3.1.1.90.0",
+    "spectrumScanAction": "1.3.6.1.4.1.161.19.3.1.1.91.0",
     # PR 4 — slice 4 RF-migration additions.
     "migrateCarrierFrequency": "1.3.6.1.4.1.161.19.3.1.1.95.0",
     "migratePriorCarrierFrequency": "1.3.6.1.4.1.161.19.3.1.1.96.0",

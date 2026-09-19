@@ -56,32 +56,39 @@ The two defects share no wire path or schema. We are implementing them as **two 
 
 Each WU closes with one work-unit commit on the feature branch. WUs run sequentially because each unblocks tests for the next.
 
-### WU-1: OID catalog schema migration (spectrum) — all 5 envelopes
+### WU-1: OID catalog schema migration (spectrum) — all 5 envelopes + boot-time gate
 
 **Touch**:
-- `data/oid-catalogs/cambium/pmp450i/15.2.1.json`
-- `data/oid-catalogs/cambium/pmp450i/15.3.0.json`
-- `data/oid-catalogs/cambium/pmp450i/25.0.1.json`
-- `data/oid-catalogs/cambium/pmp450i/25.1.0.json`
-- `data/oid-catalogs/cambium/pmp450i/25.1.json`
-- `scripts/sign_oid_catalog.py` (or equivalent; verify signer exists; otherwise add a one-off `tools/re_sign_catalogs.py`)
+- `data/oid-catalogs/sources/cambium/pmp450i/*.source.json` (5 files)
+- `data/oid-catalogs/cambium/pmp450i/*.json` (5 signed envelopes, regenerated via the signer)
+- `src/nora/data/oid-catalogs/cambium/pmp450i/*.json` (5 built-in baseline catalogs, regenerated via the signer — ships in every install via `importlib.resources`)
+- `scripts/sign_catalog.py` (TOOLS_V1 update)
+- `src/nora/drivers/oid_catalog.py` (boot-time `_REQUIRED_OIDS_BY_VENDOR_MODEL` table)
+- `tests/test_sign_catalog.py` (HMAC canonicalisation contract test)
+- `tests/test_oid_catalog_integration.py` (hermetic fixture + tools map)
+- `tests/test_oid_catalog.py` (its `_SAMPLE_CATALOG_PAYLOAD` fixture)
+- `tests/conftest.py` (cross-test hermetic catalog fixture)
+- `tests/test_snmp_spectrum.py` and any other spectrum-related integration test → **skip with `@pytest.mark.skip(reason="...WU-2 pending")`** until WU-2 lands; re-enable in WU-2.
 
 **Change**:
-- Remove `spectrumNoiseFloorA`, `spectrumNoiseFloorB`, `spectrumNoiseFloorC`, `spectrumChannelRank` from `oids` map and from the `snmp_run_spectrum_analysis` tool list.
+- Remove `spectrumNoiseFloorA`, `spectrumNoiseFloorB`, `spectrumNoiseFloorC`, `spectrumChannelRank` from every `oids` map and every `snmp_run_spectrum_analysis` tool list.
 - Add `spectrumScanDuration` mapped to `1.3.6.1.4.1.161.19.3.3.2.220.0`.
 - Rename `spectrumScanStatus` to `spectrumScanAction` (same dotted OID `.221.0`; new name reflects Cambium MIB and SET/GET semantics).
-- Re-sign each envelope's `hmac_sha256`.
+- Update boot-time `_REQUIRED_OIDS_BY_VENDOR_MODEL[("cambium", "pmp450i")]` to require the new OID names.
+- Re-sign every envelope (operator root + built-in baseline) with HMAC-SHA256 against the canonicalised OID map.
 
-**Tests**: catalog verification boot still passes for all 5 envelopes.
+**Tests**:
+- `pytest tests/test_sign_catalog.py tests/test_oid_catalog_integration.py tests/test_oid_catalog.py` — must pass.
+- `pytest tests/` (full suite) — must pass except for the spectrum-related tests skipped with `@pytest.mark.skip(reason="WU-2 pending")`.
+- Built-in baseline catalogs are NOT out-of-band in the sense the prior ODD doc claimed — they live in `src/nora/data/oid-catalogs/` and ARE loaded at every install via `importlib.resources`. Re-signing them in WU-1 is required because the gate MUST stay consistent across both roots or every boot path crashes.
 
 ### WU-2: Spectrum helper rewrite (`src/nora/drivers/snmp_pmp450i/spectrum.py`)
 
 **Touch**:
 - `src/nora/drivers/snmp_pmp450i/spectrum.py` (full rewrite of `fetch_spectrum`)
-- `src/nora/drivers/oid_catalog.py` (`REQUIRED_OIDS` swap)
 - `src/nora/config.py` (3 new `nora_spectrum_*` knobs + validator)
 - `src/nora/server.py` (`snmp_run_spectrum_analysis` signature — accept `sweep_duration_seconds: int | None = None`)
-- `tests/test_oid_catalog_integration.py`
+- `tests/test_snmp_spectrum.py` (rewrite against the new protocol; **un-skip the WU-1 `@pytest.mark.skip` markers here**)
 - `tests/snmp_pmp450i/test_spectrum.py` (new or rewritten)
 
 **Change**:

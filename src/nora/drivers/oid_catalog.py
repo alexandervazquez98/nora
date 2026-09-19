@@ -102,11 +102,19 @@ _REQUIRED_OIDS_BY_VENDOR_MODEL: Final[dict[tuple[str, str], frozenset[str]]] = {
             "smRetransmits",
             "smRxLevel",
             # PR 4 — slice 4 spectrum-sweep additions.
-            "spectrumNoiseFloorA",
-            "spectrumNoiseFloorB",
-            "spectrumNoiseFloorC",
-            "spectrumChannelRank",
-            "spectrumScanStatus",
+            # Issue #62 (2026-09-19): replaced the synthetic
+            # noise-floor / channel-rank scalars (which physical
+            # Cambium PMP 450i firmware does not implement and
+            # returned ``noSuchName`` against real hardware) with the
+            # real sweep-protocol OIDs: ``whispBoxSpectrumScanDuration``
+            # (.220.0, SET duration in seconds) and
+            # ``whispBoxSpectrumScanAction`` (.221.0, SET arm=8 /
+            # start=1, GET-poll until idle=0). The rename from
+            # ``spectrumScanStatus`` to ``spectrumScanAction`` mirrors
+            # the WHISP-BOX-MIBV2-MIB definition; the dotted OID is
+            # unchanged.
+            "spectrumScanDuration",
+            "spectrumScanAction",
             # PR 4 — slice 4 RF-migration additions.
             "migrateCarrierFrequency",
             "migratePriorCarrierFrequency",

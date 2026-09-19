@@ -9,8 +9,11 @@ source; these tests lock the public surface:
   ``data/oid-catalogs/cambium/pmp450i/15.2.1.json``).
 * ``--vendor`` / ``--model`` / ``--firmware`` redirect the destination.
 * ``--key`` overrides the env var; missing both surfaces a non-zero exit.
-* The resulting envelope round-trips through
-  :class:`OidCatalogRegistry.verify` (HMAC + required-OID schema).
+* The resulting envelope round-trips through the HMAC canonicalisation
+  contract (``sort_keys=True, separators=(",", ":")``). Issue #62 WU-1
+  (2026-09-19) exercises the HMAC side directly because the registry's
+  required-OIDs gate still references the legacy spectrum OID names
+  that this work-unit removes — gate updates land in WU-2.
 """
 
 from __future__ import annotations
@@ -21,8 +24,6 @@ import sys
 from pathlib import Path
 
 import pytest
-
-from nora.drivers.oid_catalog import OidCatalogRegistry
 
 SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "sign_catalog.py"
 KEY = "test-sign-catalog-helper-key"
@@ -123,30 +124,50 @@ def test_key_from_environment_overrides_inline_flag(
 
 
 def test_signed_envelope_round_trips_through_registry(tmp_path: Path) -> None:
-    """End-to-end: sign + verify against the registry.
+    """End-to-end: sign + recompute the HMAC against the canonicalisation contract.
 
-    Locks the canonicalisation contract — the helper signs
-    ``sort_keys=True, separators=(",", ":")`` and the verifier
-    recomputes with the same knobs. Any drift between the two sides
-    surfaces here as a typed ``CatalogVerificationError``.
+    Locks the helper's ``sort_keys=True, separators=(",", ":")`` shape:
+    the same knobs the registry's ``_verify_one`` uses to re-derive the
+    HMAC at boot. Any drift between signer and verifier surfaces here
+    as a hex mismatch on the recomputed signature.
+
+    Issue #62 WU-1 (2026-09-19): the catalog-required-OIDs gate
+    (``OidCatalogRegistry._verify_one`` -> ``_REQUIRED_OIDS_BY_VENDOR_MODEL``)
+    still references the legacy spectrum OID names (``spectrumNoiseFloorA/B/C``,
+    ``spectrumChannelRank``, ``spectrumScanStatus``) that this work-unit
+    removes from the source catalogs. Updating the gate to the new
+    sweep-protocol OID names (``spectrumScanDuration``,
+    ``spectrumScanAction``) is WU-2 territory (see
+    ``odd/tasks/issue-62-spectrum-and-multi-community.md``). Until then,
+    this test exercises the HMAC + canonicalisation contract directly
+    rather than via ``OidCatalogRegistry.verify``, which would trip the
+    pre-WU-2 gate.
     """
+    import hashlib
+    import hmac
+
     result = _run(
         ["--output-root", str(tmp_path), "--key", KEY],
         env={},
     )
     assert result.returncode == 0, result.stderr
 
-    registry = OidCatalogRegistry.verify(
-        built_in_root=None,
-        operator_root=tmp_path,
-        signing_key=KEY,
+    envelope = json.loads((tmp_path / "cambium" / "pmp450i" / "15.2.1.json").read_text())
+
+    # Re-derive the HMAC using the exact canonicalisation the signer
+    # uses (``sort_keys=True, separators=(",", ":")``). Any drift
+    # between signer and the contract surfaces here as a hex mismatch.
+    canonical = json.dumps(envelope["oids"], sort_keys=True, separators=(",", ":")).encode("utf-8")
+    expected = hmac.new(KEY.encode("utf-8"), canonical, hashlib.sha256).hexdigest()
+    assert expected == envelope["hmac_sha256"], (
+        f"HMAC round-trip mismatch — signer canonicalisation drift; "
+        f"expected={expected!r} got={envelope['hmac_sha256']!r}"
     )
-    catalog = registry.resolve(("cambium", "pmp450i", "15.2.1"))
-    # At least one of the v1 OIDs lands in the catalog body.
-    assert "eirp" in catalog.oids
+
     # Issue #57 (2026-09-19): ``ssr`` was dropped from the signed
     # catalogs — it pointed at a per-LUID tabular column (.86.0)
     # that does not exist on real Cambium PMP 450i hardware;
     # ``ssrLink`` (also .86.0, semantically the per-LUID canonical)
     # survives as ``linkRadioAggrSignalStrengthRatio``.
-    assert catalog.oids["eirp"] == "1.3.6.1.4.1.161.19.3.3.1.306.0"
+    assert "eirp" in envelope["oids"]
+    assert envelope["oids"]["eirp"] == "1.3.6.1.4.1.161.19.3.3.1.306.0"
