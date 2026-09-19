@@ -274,12 +274,24 @@ class WritableV3Client:
         """Emit one SNMPv3 SET frame against `oid` with `value`.
 
         Delegates to ``puresnmp.PyWrapper.set`` via the same async-run
-        plumbing as ``V3Client._call_async``. Auth + priv credentials
-        are inherited from the wrapped ``V3Client``; wire failures
-        surface as typed driver exceptions via the existing exception
-        mapping (``SnmpTimeoutError`` / ``NetworkUnreachableError``).
+        plumbing as ``V3Client._call_async``. ``puresnmp`` requires
+        typed values, so ``int`` is coerced to ``x690.types.Integer``
+        and ``str`` to ``x690.types.OctetString`` before emitting.
+        Wire failures surface as typed driver exceptions via the existing
+        exception mapping (``SnmpTimeoutError`` / ``NetworkUnreachableError``).
         """
-        result = self._inner._call_async("set", oid, value)
+        import x690.types as x690_types
+
+        if isinstance(value, x690_types.X690Type):
+            typed_val: Any = value
+        elif isinstance(value, int):
+            typed_val = x690_types.Integer(value)
+        elif isinstance(value, str):
+            typed_val = x690_types.OctetString(value.encode("ascii", errors="replace"))
+        else:
+            typed_val = value
+
+        result = self._inner._call_async("set", oid, typed_val)
         del result
 
 

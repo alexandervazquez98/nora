@@ -206,7 +206,9 @@ def test_writable_v2c_client_forwards_close() -> None:
 
 
 def test_writable_v2c_client_set_routes_through_call_async() -> None:
-    """`set` invokes `_call_async("set", oid, value)` exactly once."""
+    """`set` invokes `_call_async("set", oid, value)` exactly once with x690 typing."""
+    from x690.types import Integer
+
     inner = _FakeInner(return_value_for_set="assigned-varbind")
     adapter = WritableV2CClient(client=inner)  # type: ignore[arg-type]
 
@@ -215,18 +217,22 @@ def test_writable_v2c_client_set_routes_through_call_async() -> None:
 
     assert result is None, "WritableV2CClient.set must return None per the Protocol contract"
     assert inner.calls == [
-        ("_call_async", ("set", "1.3.6.1.4.1.161.19.3.3.2.220.0", 15)),
+        ("_call_async", ("set", "1.3.6.1.4.1.161.19.3.3.2.220.0", Integer(15))),
     ]
 
 
 def test_writable_v2c_client_accepts_string_value_for_octet_string() -> None:
     """`set` accepts `str` values too (OCTET STRING case)."""
+    from x690.types import OctetString
+
     inner = _FakeInner()
     adapter = WritableV2CClient(client=inner)  # type: ignore[arg-type]
 
     adapter.set("1.3.6.1.4.1.161.19.3.3.2.221.0", "8")
 
-    assert inner.calls == [("_call_async", ("set", "1.3.6.1.4.1.161.19.3.3.2.221.0", "8"))]
+    assert inner.calls == [
+        ("_call_async", ("set", "1.3.6.1.4.1.161.19.3.3.2.221.0", OctetString(b"8"))),
+    ]
 
 
 def test_writable_v2c_client_rejects_both_client_and_device() -> None:
@@ -260,6 +266,8 @@ def test_writable_v3_client_forwards_get_oid() -> None:
 
 
 def test_writable_v3_client_set_routes_through_call_async() -> None:
+    from x690.types import Integer
+
     inner = _FakeInner()
     adapter = WritableV3Client(client=inner)  # type: ignore[arg-type]
 
@@ -267,7 +275,7 @@ def test_writable_v3_client_set_routes_through_call_async() -> None:
 
     assert result is None
     assert inner.calls == [
-        ("_call_async", ("set", "1.3.6.1.4.1.161.19.3.3.2.220.0", 15)),
+        ("_call_async", ("set", "1.3.6.1.4.1.161.19.3.3.2.220.0", Integer(15))),
     ]
 
 
