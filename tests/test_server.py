@@ -67,6 +67,10 @@ def test_server_exposes_exactly_fourteen_tools() -> None:
         "save_intervention_record",
         "register_device",
         "hitl_mint_token",
+        # Issue #61 / PR1 WU-1.5 — ICMP stability probe (Tier 0).
+        "icmp_run_sector_stability_probe",
+        "icmp_get_sector_stability_progress",
+        "icmp_cancel_sector_stability_probe",
     }
     assert names == expected, (
         f"Expected exactly 14 tools; got {sorted(names)} "
@@ -471,6 +475,10 @@ def test_mcp_instance_exposes_all_thirteen_tools() -> None:  # noqa: F811 — al
         "save_intervention_record",
         "register_device",
         "hitl_mint_token",
+        # Issue #61 / PR1 WU-1.5 — ICMP stability probe (Tier 0).
+        "icmp_run_sector_stability_probe",
+        "icmp_get_sector_stability_progress",
+        "icmp_cancel_sector_stability_probe",
     }
     assert names == expected, f"Expected exactly 14 tools after WU-4 + WU-C; got: {sorted(names)}"
 

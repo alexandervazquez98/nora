@@ -204,6 +204,10 @@ def test_python_dash_m_nora_emits_deprecation_warning(tmp_path: Path) -> None:
         "save_intervention_record",
         "register_device",
         "hitl_mint_token",
+        # Issue #61 / PR1 WU-1.5.
+        "icmp_run_sector_stability_probe",
+        "icmp_get_sector_stability_progress",
+        "icmp_cancel_sector_stability_probe",
     }
     assert tool_names == expected, (
         f"`python -m nora` must expose the same 14 tools as nora-mcp; got {tool_names}"

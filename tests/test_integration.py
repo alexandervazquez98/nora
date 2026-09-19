@@ -245,6 +245,10 @@ def test_subprocess_responds_to_tools_list_with_fourteen_tools(
         "save_intervention_record",
         "register_device",
         "hitl_mint_token",
+        # Issue #61 / PR1 WU-1.5 — ICMP stability probe (Tier 0).
+        "icmp_run_sector_stability_probe",
+        "icmp_get_sector_stability_progress",
+        "icmp_cancel_sector_stability_probe",
     }
     assert names == expected, f"Expected exactly the 14 thin tools; got {names}"
 
