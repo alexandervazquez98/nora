@@ -14,9 +14,14 @@ on ``label``).
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+
+if TYPE_CHECKING:
+    from nora.probes.diagnostic import SectorVerdict
+    from nora.probes.metrics import NodeMetrics
+    from nora.probes.sector_delta import SectorDelta
 
 # Role literal — one of two values:
 # * ``"ap"`` — the AP itself, used as the ΔRTT/ΔJitter baseline.
@@ -165,10 +170,112 @@ class ProbeRunStarted(BaseModel):
     )
 
 
+class ProbeRunSummary(BaseModel):
+    """Compact summary stored at ``PRB-*.json`` -> ``metrics_summary`` block.
+
+    PR2 land: the summary carries the AP baseline metrics, the per-
+    SM metrics list (one per SM, in LUID-ascending order), and the
+    sector-level Δ envelope. The model is frozen so PR3 readers can
+    rely on a stable JSON shape.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    ap_metrics: NodeMetrics
+    """The AP's per-target metrics (Δ baseline)."""
+
+    sm_metrics: list[NodeMetrics]
+    """Per-SM metrics (one NodeMetrics per SM, parallel to ``sector_delta``)."""
+
+    sector_delta: list[SectorDelta]
+    """Per-SM Δ vs the AP baseline; parallel to ``sm_metrics``."""
+
+
+class ProbeRunRecord(BaseModel):
+    """One row in the ``icmp_list_probe_runs`` listing — lands at PR3.
+
+    Defined in PR2 so :mod:`nora.probes.persistence` can validate the
+    on-disk JSON shape against it. PR3's ``icmp_list_probe_runs`` will
+    read ``PRB-*.json`` files and yield ``list[ProbeRunRecord]``.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    run_id: str
+    sector: str
+    device_id: str
+    ap_ip: str
+    started_at_unix: float
+    finished_at_unix: float
+    metrics: ProbeRunSummary
+    verdict: SectorVerdict
+
+
+class ProbeRunCompleted(BaseModel):
+    """Local envelope returned by ``analyze_completed_run(state)``.
+
+    PR2's daemon hook attaches this to the run's ``RunState.result_summary``
+    field as a serialized dict (using ``.model_dump(mode="json")``), so
+    ``icmp_get_sector_stability_progress`` can surface the verdict after
+    the run finishes.
+
+    The model is the in-memory canonical envelope; the on-disk shape
+    is :class:`ProbeRunRecord` (which only keeps the persisted fields).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    run_id: str
+    metrics: ProbeRunSummary
+    verdict: SectorVerdict
+    persisted: dict[str, Any]
+    """The dict returned by :func:`save_probe_run` (status + filename + path)."""
+
+    analyzed_at_unix: float
+
+
 __all__ = [
     "DiscoveryResult",
+    "ProbeRunCompleted",
+    "ProbeRunRecord",
     "ProbeRunSettings",
     "ProbeRunStarted",
+    "ProbeRunSummary",
     "ProbeTarget",
     "ProbeTargetRole",
 ]
+
+
+# Rebuild the PR2 models so the string annotations above (resolved at
+# import time via `from __future__ import annotations`) bind to the
+# real classes when ``NodeMetrics`` / ``SectorDelta`` / ``SectorVerdict``
+# are imported. The function is idempotent — calling it multiple times
+# is a no-op — and it only matters for the forward-reference chain
+# (the PR1 models do not need it because they have no forward refs).
+def _rebuild_forward_refs() -> None:
+    from nora.probes.diagnostic import SectorVerdict
+    from nora.probes.metrics import NodeMetrics
+    from nora.probes.sector_delta import SectorDelta
+
+    ProbeRunSummary.model_rebuild(
+        _types_namespace={"NodeMetrics": NodeMetrics, "SectorDelta": SectorDelta}
+    )
+    ProbeRunRecord.model_rebuild(
+        _types_namespace={
+            "NodeMetrics": NodeMetrics,
+            "SectorDelta": SectorDelta,
+            "SectorVerdict": SectorVerdict,
+            "ProbeRunSummary": ProbeRunSummary,
+        }
+    )
+    ProbeRunCompleted.model_rebuild(
+        _types_namespace={
+            "NodeMetrics": NodeMetrics,
+            "SectorDelta": SectorDelta,
+            "SectorVerdict": SectorVerdict,
+            "ProbeRunSummary": ProbeRunSummary,
+        }
+    )
+
+
+_rebuild_forward_refs()

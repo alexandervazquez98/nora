@@ -76,6 +76,13 @@ class RunState:
     status: str = RunStatus.PENDING
     finished_at_unix: float | None = None
     last_error: str | None = None
+    result_summary: dict[str, Any] | None = None
+    """PR2 (issue #61): the post-completion ``ProbeRunCompleted`` envelope
+    serialised via ``model_dump(mode='json')``. Populated by the daemon's
+    ``else:`` branch after the iterator exhausts. ``None`` until the
+    analysis completes (or fails — in which case the failure lands on
+    ``last_error`` and ``result_summary`` stays ``None``).
+    """
     lock: threading.Lock = field(default_factory=threading.Lock)
 
     def snapshot(self, *, sample_window: int = 100) -> dict[str, Any]:
@@ -84,9 +91,12 @@ class RunState:
         ``sample_window`` caps the size of the ``last_samples`` field
         so a long-running poll does not ship the entire buffer every
         time. The default is 100 samples, mirroring the PR1 spec.
+
+        The PR2 ``result_summary`` field is exposed only when set so
+        PR1 consumers see a stable shape.
         """
         with self.lock:
-            return {
+            snap: dict[str, Any] = {
                 "run_id": self.run_id,
                 "device_id": self.device_id,
                 "ap_host": self.ap_host,
@@ -97,6 +107,9 @@ class RunState:
                 "last_samples": [s.model_dump(mode="json") for s in self.samples[-sample_window:]],
                 "last_error": self.last_error,
             }
+            if self.result_summary is not None:
+                snap["result_summary"] = self.result_summary
+            return snap
 
 
 class ProbeRunRegistry:
@@ -260,6 +273,18 @@ class _RunDaemon:
                 with self._run_state.lock:
                     self._run_state.status = RunStatus.COMPLETED
                     self._run_state.finished_at_unix = time.time()
+                # PR2 (issue #61) post-completion hook — fold the
+                # collected samples into metrics, classify the
+                # sector, persist the result, and attach the
+                # serialised ProbeRunCompleted envelope to
+                # ``self._run_state.result_summary``. The hook is
+                # lazy-imported to keep the PR1 surface free of the
+                # PR2 module graph, and wrapped in try/except so a
+                # post-completion failure never flips the run from
+                # COMPLETED back to FAILED (the data is on disk in
+                # self._run_state.samples; the analysis is a
+                # best-effort aggregation step).
+                await self._attach_post_completion_result()
         except ProbeConfigurationError as exc:
             with self._run_state.lock:
                 self._run_state.status = RunStatus.FAILED
@@ -275,6 +300,141 @@ class _RunDaemon:
                 self._run_state.status = RunStatus.FAILED
                 self._run_state.last_error = repr(exc)
                 self._run_state.finished_at_unix = time.time()
+
+    async def _attach_post_completion_result(self) -> None:
+        """Fold the run's samples into a ``ProbeRunCompleted`` envelope.
+
+        PR2 (issue #61) runs after the iterator exhausts:
+
+        1. Bucket samples by target → one ``NodeMetrics`` per target.
+        2. Split the bucket into AP + SMs using ``self._run_state.ap_host``.
+        3. ``classify_sector(...)`` → ``SectorVerdict``.
+        4. ``save_probe_run(...)`` → atomic JSON under
+           ``settings.nora_probe_results_dir``.
+        5. ``ProbeRunCompleted(...).model_dump(mode="json")`` → stored
+           on ``self._run_state.result_summary`` under the lock.
+
+        Any exception in this hook is logged + swallowed; the run
+        stays COMPLETED and ``last_error`` is left untouched (the
+        samples themselves are still on ``RunState.samples`` so a
+        future retry is possible).
+        """
+        # Lazy imports — keep the PR1 surface free of the PR2 module
+        # graph. The PR2 modules in turn re-export the underlying
+        # primitives (``IcmpSample`` / ``NodeMetrics`` / etc.) so we
+        # only depend on the runners.
+        from nora.probes.diagnostic import classify_sector
+        from nora.probes.metrics import NodeMetrics, compute_metrics
+        from nora.probes.models import (
+            ProbeRunCompleted,
+            ProbeRunSummary,
+            ProbeTarget,
+        )
+        from nora.probes.persistence import save_probe_run
+        from nora.probes.sector_delta import compute_sector_delta
+
+        try:
+            samples = list(self._run_state.samples)
+            if not samples:
+                return
+
+            # Bucket by target. The coordinator emits one bucket per
+            # destination, so we just group on the ``target`` field.
+            buckets: dict[str, list[IcmpSample]] = {}
+            for sample in samples:
+                buckets.setdefault(sample.target, []).append(sample)
+
+            ap_target = self._run_state.ap_host
+            if ap_target not in buckets:
+                logger.warning(
+                    "probes.post_completion.no_ap_samples",
+                    extra={
+                        "event": "probes.post_completion.no_ap_samples",
+                        "run_id": self._run_state.run_id,
+                        "ap_host": ap_target,
+                    },
+                )
+                return
+
+            ap_metrics = compute_metrics(buckets[ap_target], target=ap_target)
+
+            # Build ordered SM (target, metrics) pairs in LUID order.
+            # PR2 has no separate LUID table — the coordinator emits
+            # the AP host for the AP bucket and SM hosts (== LUIDs in
+            # the PR1 placeholder) for everything else. Sort
+            # lexicographically for determinism.
+            sm_pairs: list[tuple[str, NodeMetrics]] = sorted(
+                (target, compute_metrics(items, target=target))
+                for target, items in buckets.items()
+                if target != ap_target
+            )
+
+            # SectorDelta needs an explicit sm_luids list; we use the
+            # SM host (== LUID in PR1 placeholder) as the LUID. ProbeTarget
+            # is purely a typed shape for the diagnostic API.
+            sm_metrics_list = [m for _, m in sm_pairs]
+            sm_targets = [
+                ProbeTarget(role="sm", luid=t, host=t, label=f"SM {t}") for t, _ in sm_pairs
+            ]
+            sm_luids = [t for t, _ in sm_pairs]
+
+            sector_delta = compute_sector_delta(
+                ap_metrics=ap_metrics,
+                sm_metrics=sm_metrics_list,
+                sm_luids=sm_luids,
+            )
+
+            # classify_sector attaches the deltas to per-SM verdicts
+            # itself, but we ALSO need the sector_delta list in the
+            # summary. Both envelopes are derived from the same
+            # inputs so recomputing here is cheap.
+            summary = ProbeRunSummary(
+                ap_metrics=ap_metrics,
+                sm_metrics=sm_metrics_list,
+                sector_delta=sector_delta,
+            )
+
+            evaluated_at_unix = time.time()
+            verdict = classify_sector(
+                ap_metrics=ap_metrics,
+                ap_target=ap_target,
+                sm_metrics=sm_metrics_list,
+                sm_targets=sm_targets,
+                evaluated_at_unix=evaluated_at_unix,
+            )
+
+            # Build the persistence payload.
+            payload: dict[str, Any] = {
+                "run_id": self._run_state.run_id,
+                "sector": "nora",
+                "device_id": self._run_state.device_id,
+                "ap_ip": ap_target,
+                "started_at_unix": self._run_state.started_at_unix,
+                "finished_at_unix": evaluated_at_unix,
+                "metrics_summary": summary.model_dump(mode="json"),
+                "verdict": verdict.model_dump(mode="json"),
+            }
+            persisted = save_probe_run(self._settings, payload)
+
+            envelope = ProbeRunCompleted(
+                run_id=self._run_state.run_id,
+                metrics=summary,
+                verdict=verdict,
+                persisted=persisted,
+                analyzed_at_unix=evaluated_at_unix,
+            )
+            with self._run_state.lock:
+                self._run_state.result_summary = envelope.model_dump(mode="json")
+        except Exception as exc:  # noqa: BLE001 — best-effort, never fails the run
+            logger.warning(
+                "probes.post_completion.failed",
+                extra={
+                    "event": "probes.post_completion.failed",
+                    "run_id": self._run_state.run_id,
+                    "error": repr(exc),
+                },
+                exc_info=True,
+            )
 
 
 # ---------------------------------------------------------------------------

@@ -139,6 +139,11 @@ class Settings(BaseSettings):
     nora_icmp_max_duration_seconds: int = 1800
     # Hard lower bound on operator-supplied probe duration (1 min).
     nora_icmp_min_duration_seconds: int = 60
+    # PR2 (issue #61 WU-2.6): directory where the atomic JSON
+    # snapshots of completed probe runs land. Mirrors
+    # ``nora_interventions_dir`` (one-way write for OpenChat to
+    # consume). Production path: ``/var/lib/nora/probes/``.
+    nora_probe_results_dir: Path = Path("./var/probes/")
 
     loaded_from: LoadSource = "defaults"
 
