@@ -281,13 +281,19 @@ def test_spectrum_happy_path_runs_set_then_poll_returns_completed(
         device_id="ap-7400-01",
         settings=settings,
         operator_confirmed=True,
+        # PR #66 review follow-up #3: the sweep-duration-scaled guard
+        # `elapsed >= sweep_duration_seconds` needs `sweep_duration_seconds`
+        # to be small in tests so the helper reaches acceptance within a
+        # reasonable runtime budget. The happy path uses `sweep_duration_seconds=2`
+        # so completion is accepted at `elapsed >= 2.0s`.
+        sweep_duration_seconds=2,
     )
 
     assert isinstance(result, SpectrumSweepResult)
     assert result.scan_outcome == "COMPLETED"
     assert result.final_status == 4  # idle-complete (real-hardware sentinel)
     assert result.device_id == "192.0.2.10"
-    assert result.sweep_duration_seconds == 15
+    assert result.sweep_duration_seconds == 2  # tool kwarg override (not Settings default)
     # Empty per-bin decoding fields (future slice).
     assert result.ranked_clean_frequencies == []
     assert result.noise_floor_dbm == {}
@@ -295,9 +301,9 @@ def test_spectrum_happy_path_runs_set_then_poll_returns_completed(
     assert "T" in result.scan_started_at
     assert "T" in result.scan_completed_at
 
-    # Three SET frames in order: duration=15, arm=8, start=1.
+    # Three SET frames in order: duration=2 (the override), arm=8, start=1.
     assert fake.set_calls == [
-        (spec_oids["spectrumScanDuration"], 15),
+        (spec_oids["spectrumScanDuration"], 2),
         (spec_oids["spectrumScanAction"], 8),
         (spec_oids["spectrumScanAction"], 1),
     ], f"Expected the documented SET sequence; got {fake.set_calls!r}"
@@ -358,11 +364,18 @@ def test_spectrum_timeout_raises_spectrum_sweep_timeout(tmp_path: Path) -> None:
             device_id="ap-7400-01",
             settings=settings,
             operator_confirmed=True,
+            # PR #66 review follow-up #3: pass an explicit short sweep
+            # duration so the test stays independent of the
+            # `nora_spectrum_sweep_duration_seconds` Settings default
+            # (which moved 15 → 30). The timeout (1s) fires before the
+            # scaled guard would activate anyway, but the override
+            # keeps the `exc.duration_seconds` assertion stable.
+            sweep_duration_seconds=2,
         )
 
     exc = exc_info.value
     assert exc.device_id == "192.0.2.10"
-    assert exc.duration_seconds == 15  # Settings default
+    assert exc.duration_seconds == 2  # tool kwarg override (not Settings default)
     assert exc.last_status == 5  # last polled (in-progress) — NOT in {0, 3, 4}
     assert "last_status=5" in str(exc)
 
@@ -558,21 +571,33 @@ def test_spectrum_catalog_missing_action_oid_raises_lookup_error(tmp_path: Path)
 
 
 def test_spectrum_sweep_duration_seconds_override_is_honored(tmp_path: Path) -> None:
-    """``sweep_duration_seconds=30`` SETs duration to 30, not the Settings default."""
+    """Tool-kwarg ``sweep_duration_seconds`` beats the Settings default.
+
+    PR #66 review follow-up #3: the
+    ``nora_spectrum_sweep_duration_seconds`` default moved 15 → 30
+    (operator's production baseline). The override contract is
+    unchanged: the tool kwarg always wins over the Settings default.
+    The test uses an explicit override (2) on top of a different
+    Settings default (15) so it stays independent of any future
+    change to the Settings default value.
+    """
     from nora.drivers.snmp_pmp450i.spectrum import fetch_spectrum
 
     inv = _build_inventory(tmp_path)
     registry = _build_catalog(firmware="15.2.1", include_spectrum_oids=True)
     spec_oids = _spectrum_oids()
-    fake = _FakeWritableSnmpClient(get_responses=[0])
+    fake = _FakeWritableSnmpClient(get_responses=[5, 4])
     driver = _build_driver(inventory=inv, registry=registry, fake_client=fake)
 
-    # Settings default is 15 — the override of 30 wins.
+    # Settings default is 15 (explicit, NOT the field default of 30).
+    # The override of 2 wins.
     settings = Settings(
         _env_file=None,
         _env_file_encoding=None,
         nora_maintenance_window_minutes=0,
         nora_spectrum_sweep_duration_seconds=15,
+        nora_spectrum_sweep_poll_interval_seconds=0.05,
+        nora_spectrum_sweep_timeout_seconds=10,
     )
 
     result = fetch_spectrum(
@@ -580,12 +605,12 @@ def test_spectrum_sweep_duration_seconds_override_is_honored(tmp_path: Path) -> 
         device_id="ap-7400-01",
         settings=settings,
         operator_confirmed=True,
-        sweep_duration_seconds=30,
+        sweep_duration_seconds=2,
     )
 
-    assert result.sweep_duration_seconds == 30
+    assert result.sweep_duration_seconds == 2
     # First SET carries the override value, not the Settings default.
-    assert fake.set_calls[0] == (spec_oids["spectrumScanDuration"], 30), (
+    assert fake.set_calls[0] == (spec_oids["spectrumScanDuration"], 2), (
         f"Duration SET must carry the override; got {fake.set_calls[0]!r}"
     )
 
@@ -692,6 +717,9 @@ def test_spectrum_sweep_result_is_frozen_and_serialisable(tmp_path: Path) -> Non
         device_id="ap-7400-01",
         settings=settings,
         operator_confirmed=True,
+        # PR #66 review follow-up #3: short sweep duration so the
+        # scaled guard activates at t=2s, not t=30s with the new default.
+        sweep_duration_seconds=2,
     )
 
     # Frozen model — assignment raises.
@@ -701,7 +729,7 @@ def test_spectrum_sweep_result_is_frozen_and_serialisable(tmp_path: Path) -> Non
     # JSON-serialisable for the MCP tool boundary.
     dumped = result.model_dump(mode="json")
     assert dumped["scan_outcome"] == "COMPLETED"
-    assert dumped["final_status"] == 0
+    assert dumped["final_status"] == 0  # queue was [0]; helper accepts 0 at t≈2s
     assert dumped["device_id"] == "192.0.2.10"
 
 
@@ -743,6 +771,10 @@ def test_sweep_completes_with_status_3_idle_no_results(tmp_path: Path) -> None:
         device_id="ap-7400-01",
         settings=settings,
         operator_confirmed=True,
+        # PR #66 review follow-up #3: explicit short sweep duration so
+        # the guard `elapsed >= sweep_duration_seconds` activates at
+        # t=2s (not t=30s with the new default).
+        sweep_duration_seconds=2,
     )
 
     assert result.scan_outcome == "COMPLETED"
@@ -772,6 +804,7 @@ def test_sweep_completes_with_status_4_idle_complete(tmp_path: Path) -> None:
         device_id="ap-7400-01",
         settings=settings,
         operator_confirmed=True,
+        sweep_duration_seconds=2,
     )
 
     assert result.scan_outcome == "COMPLETED"
@@ -804,6 +837,7 @@ def test_sweep_completes_with_status_0_post_abort(tmp_path: Path) -> None:
         device_id="ap-7400-01",
         settings=settings,
         operator_confirmed=True,
+        sweep_duration_seconds=2,
     )
 
     assert result.scan_outcome == "COMPLETED"
@@ -902,66 +936,76 @@ def test_sweep_completion_constants_exported() -> None:
 
 
 # ---------------------------------------------------------------------------
-# PR #66 review follow-up #2 — pre-state race + mid-sweep DriverError
+# PR #66 review follow-up #3 — scaled guard + TDD buffer flush scenario
 #
-# After commit `6a59546` widened completion sentinels to `{0, 3, 4}` and
-# bumped the default timeout to 150s, the operator re-deployed to
-# physical PMP 450i hardware and observed two more bugs the unit tests
-# missed:
-#
-#   1. Pre-state race: the radio's SNMP agent returns the PRE-EXISTING
-#      idle state (typically 4 from a previous sweep) for ~10-50ms
-#      after the SET arm+start, before transitioning to 5 (in-progress).
-#      The poll loop accepted the pre-state as completion and reported
-#      false-positive success in ~50ms while the radio was still about
-#      to start the sweep.
-#
-#   2. Mid-sweep DriverError: during an active sweep the radio goes
-#      off-channel and `client.get_oid` raises `SnmpTimeoutError` /
-#      `NetworkUnreachableError` (subclasses of `DriverError`). The
-#      previous `except (KeyError, ValueError, TypeError)` did NOT
-#      catch these, so a single mid-sweep packet loss would abort the
-#      helper.
+# After commit `a607eb9` shipped the 1.0s startup guard and the
+# DriverError swallow, the operator re-deployed to physical PMP 450i
+# hardware and observed that the 1.0s guard is still insufficient:
+# the radio's SNMP agent takes 1.5-2.5s to flush TDD buffers and
+# engage sweep mode, so at t=1.087s (within the 1.0s guard) the
+# radio was STILL returning its pre-sweep status 4. The helper
+# reported false-positive completion in 1.087s while the sweep had
+# not started.
 #
 # Fixes (in this follow-up):
-#   (a) Module-level `_MIN_STARTUP_GUARD_SECONDS = 1.0` constant;
-#       `_poll_sweep_status` only accepts completion sentinels after
-#       `min(1.0, sweep_duration_seconds)` seconds have elapsed since
-#       the SET.
-#   (b) Expanded the polling exception handler to
-#       `except (KeyError, ValueError, TypeError, DriverError):
-#        last_status = -1` so transient wire failures during the sweep
-#       do not abort the helper.
+#   (a) Removed `_MIN_STARTUP_GUARD_SECONDS` constant.
+#   (b) `_poll_sweep_status` guard is now
+#       `elapsed >= float(sweep_duration_seconds)` with no minimum
+#       floor — "a timed sweep cannot physically complete before
+#       the requested duration" (operator's recommendation).
+#   (c) `nora_spectrum_sweep_duration_seconds` default 15 → 30
+#       (operator's production baseline for "sufficient RF sampling
+#       across unforeseen noise bursts").
 #
+# Tests in this section pin:
+#   - `test_sweep_does_not_complete_before_hardware_tdd_flush` — the
+#     operator's exact observed sequence: pre-state 4 for the first
+#     1.0s (5 polls × 0.2s) → 5 (in-progress, TDD flush done) → 4
+#     (idle-complete). With `sweep_duration_seconds=2` the scaled
+#     guard fires at t=2.0s and prevents the false-positive
+#     acceptance that the old 1.0s floor would have produced.
+#   - `test_sweep_guard_waits_full_sweep_duration_before_completion`
+#     — pin the scaled-guard semantics at `sweep_duration_seconds=2`:
+#     completion sentinels are NOT accepted before t=2.0s regardless
+#     of what the radio returns.
+#   - `test_sweep_guard_scales_with_sweep_duration_seconds` — verify
+#     linearity: the guard floor scales with `sweep_duration_seconds`
+#     (3s sweep → 3s floor).
+#   - `test_sweep_driver_error_mid_poll_is_swallowed` — updated to
+#     use the new scaled guard (2s instead of the old 1.0s floor).
+#
+# ---------------------------------------------------------------------------
+
 # The tests below pin both behaviours against the documented
 # operator-observed scenarios.
 # ---------------------------------------------------------------------------
 
 
-def test_sweep_does_not_complete_prematurely_on_pre_state_4(tmp_path: Path) -> None:
-    """Pre-existing state 4 from a previous sweep must NOT trigger completion.
+def test_sweep_does_not_complete_before_hardware_tdd_flush(tmp_path: Path) -> None:
+    """Simulates the operator's TDD buffer flush scenario (PR #66 follow-up #3).
 
-    Operator observation on physical Cambium PMP 450i firmware 25.0.1:
-    after the SET arm+start, the SNMP agent can return the
-    PRE-EXISTING idle state (typically 4 from a previous sweep) for
-    ~10-50ms before transitioning to 5 (in-progress). The previous
-    poll loop accepted the pre-state as completion and reported
-    success in ~50ms while the radio was still about to start.
+    After re-deploying ``a607eb9`` to physical PMP 450i hardware
+    (firmware 25.0.1), the operator observed that the radio's SNMP
+    agent takes 1.5-2.5s to flush TDD buffers and engage sweep mode.
+    At t=1.087s (within the 1.0s guard floor) the radio was STILL
+    returning its pre-sweep status 4, and the helper reported
+    false-positive completion while the sweep had not started.
 
-    The startup guard (``_MIN_STARTUP_GUARD_SECONDS = 1.0``) ensures
-    the helper does NOT return on a stale pre-state. With
-    ``sweep_duration_seconds=15`` the guard is
-    ``min(1.0, 15.0) = 1.0``; completion sentinels are only accepted
-    after 1.0s elapsed.
+    This test pins the scaled-guard replacement against the
+    operator's exact observed sequence:
 
-    Queue design: pre-state 4 for ~25 polls (with poll_interval=0.05
-    this is ~1.25s — well past the guard), then 5 (real in-progress,
-    proving the radio has actually started), then 4 (real completion).
-    The fake queue is exhausted after 36 polls; ``repeat_last_response``
-    keeps returning 4 thereafter. The helper must NOT return on the
-    first pre-state 4 (``elapsed < 1.0``); it must poll past the
-    guard, see the real in-progress 5, and then accept 4 as
-    completion.
+      - First 5 polls (every 0.2s → covers the first 1.0s) return
+        pre-state 4 (the radio has not yet engaged sweep mode).
+      - 6th poll returns 5 (in-progress — TDD buffer flush
+        completed and the radio entered sweep mode).
+      - 7th poll returns 4 (idle-complete — sweep finished).
+
+    With ``sweep_duration_seconds=2`` and ``poll_interval_seconds=0.2``,
+    the scaled guard `elapsed >= sweep_duration_seconds` activates at
+    t=2.0s. The helper MUST poll past the pre-state 4 window (which
+    would have falsely tripped the old 1.0s guard), observe the
+    in-progress 5, and accept the completion 4 only after the scaled
+    guard elapses. Runtime: ~2s.
     """
     import time
 
@@ -970,15 +1014,16 @@ def test_sweep_does_not_complete_prematurely_on_pre_state_4(tmp_path: Path) -> N
     inv = _build_inventory(tmp_path)
     registry = _build_catalog(firmware="15.2.1", include_spectrum_oids=True)
 
-    # Pre-state 4 for ~25 polls (~1.25s with poll_interval=0.05), then
-    # 5 (in-progress), then 4 (real completion). 36 responses total.
-    fake = _FakeWritableSnmpClient(get_responses=[4] * 25 + [5] * 10 + [4])
+    # Operator-observed sequence: pre-state 4 for the first 1.0s (5
+    # polls at 0.2s = 1.0s), then 5 (in-progress — TDD flush done),
+    # then 4 (idle-complete).
+    fake = _FakeWritableSnmpClient(get_responses=[4] * 5 + [5, 4])
     driver = _build_driver(inventory=inv, registry=registry, fake_client=fake)
     settings = Settings(
         _env_file=None,
         _env_file_encoding=None,
         nora_maintenance_window_minutes=0,
-        nora_spectrum_sweep_poll_interval_seconds=0.05,
+        nora_spectrum_sweep_poll_interval_seconds=0.2,
         nora_spectrum_sweep_timeout_seconds=10,
     )
 
@@ -988,46 +1033,54 @@ def test_sweep_does_not_complete_prematurely_on_pre_state_4(tmp_path: Path) -> N
         device_id="ap-7400-01",
         settings=settings,
         operator_confirmed=True,
+        # PR #66 review follow-up #3: scaled guard `elapsed >= sweep_duration_seconds`.
+        # The 1.0s startup floor (removed) would have falsely accepted
+        # the pre-state 4 in this scenario; the new guard waits the
+        # full 2.0s.
+        sweep_duration_seconds=2,
     )
     elapsed = time.monotonic() - start
 
-    # The helper polled past the 1.0s startup guard before accepting
-    # completion — the pre-state 4 on the first poll did NOT trigger
-    # an early return.
+    # The helper polled past the scaled 2.0s guard before accepting
+    # completion — the pre-state 4 on the first 5 polls did NOT
+    # trigger an early return (which would have falsely tripped the
+    # old 1.0s floor on physical hardware).
     assert result.scan_outcome == "COMPLETED"
     assert result.final_status == 4
-    assert elapsed >= 1.0, (
-        f"helper returned too early at {elapsed:.2f}s; the 1.0s startup guard was bypassed"
+    assert elapsed >= 2.0, (
+        f"helper returned too early at {elapsed:.2f}s; the scaled "
+        f"guard `elapsed >= sweep_duration_seconds` was bypassed"
     )
-    # And it didn't time out (which would have taken ~10s).
+    # Did not approach the 10s timeout.
     assert elapsed < 5.0, f"helper took {elapsed:.2f}s — should not approach the 10s timeout"
-    # The fake polled well past the guard (proves the helper kept
-    # polling past the pre-state 4 leak). With poll_interval=0.05 the
-    # helper needs ~15-20 polls to reach the 1.0s guard floor;
-    # depending on OS scheduling the exact count varies. 15 is a
-    # conservative floor that still proves the helper polled past
-    # many pre-state 4s before accepting.
-    assert len(fake.get_calls) >= 15, (
-        f"expected >=15 GETs past the 1.0s guard; got {len(fake.get_calls)} GETs"
+    # The helper polled well past the 1.0s pre-state 4 window (which
+    # would have tripped the old 1.0s floor) AND past the scaled
+    # 2.0s guard. With poll_interval=0.2s the guard activates at
+    # poll index >= 10; the helper must have polled at least 10
+    # times before accepting 4.
+    assert len(fake.get_calls) >= 10, (
+        f"expected >=10 GETs past the 2.0s scaled guard; got {len(fake.get_calls)} GETs"
     )
     # Client lifecycle still honoured.
     assert fake.closed is True
 
 
-def test_sweep_startup_guard_respects_minimum_one_second(tmp_path: Path) -> None:
-    """The startup guard enforces a 1.0s floor for any sweep_duration_seconds >= 1.
+def test_sweep_guard_waits_full_sweep_duration_before_completion(tmp_path: Path) -> None:
+    """Scaled guard `elapsed >= sweep_duration_seconds` rejects sentinels before duration.
 
-    With the default ``sweep_duration_seconds=15``, the guard is
-    ``min(_MIN_STARTUP_GUARD_SECONDS=1.0, 15) = 1.0``. A queue yielding
-    a completion sentinel immediately (e.g. ``[4]``) must NOT cause
-    the helper to return at ``t≈0``; the helper must wait until at
-    least 1.0s has elapsed before accepting the completion sentinel.
+    PR #66 review follow-up #3: the 1.0s startup floor was replaced
+    with a sweep-duration-scaled guard. A timed sweep cannot
+    physically complete before the requested duration, so completion
+    sentinels MUST NOT be accepted until ``elapsed >=
+    sweep_duration_seconds`` regardless of what the radio returns.
+    With ``sweep_duration_seconds=2`` and ``poll_interval_seconds=0.05``,
+    the guard activates at poll index >= 40 (2.0s / 0.05s).
 
-    This pins the floor of 1.0s which covers the operator's observed
-    ~10-50ms pre-state race window with a 20-100x margin. (For very
-    short sweeps ``sweep_duration_seconds < 1.0``, the guard is
-    capped to ``sweep_duration_seconds`` so the sweep still has time
-    to complete within its natural window.)
+    Queue design: in-progress (5) for 40 polls (the helper does NOT
+    accept these before the scaled guard fires), then 4 (completion
+    sentinel). The helper MUST poll past the guard before accepting
+    4 — and it MUST NOT accept the 4 on a hypothetical early return
+    at poll index 0. Runtime: ~2s.
     """
     import time
 
@@ -1036,10 +1089,9 @@ def test_sweep_startup_guard_respects_minimum_one_second(tmp_path: Path) -> None
     inv = _build_inventory(tmp_path)
     registry = _build_catalog(firmware="15.2.1", include_spectrum_oids=True)
 
-    # Queue: just [4] — every poll returns 4. Without the startup
-    # guard, the helper would return at t=0 (false-positive). With
-    # the guard, the helper must wait >=1.0s before accepting.
-    fake = _FakeWritableSnmpClient(get_responses=[4])
+    # 40 in-progress polls (would-be queue length to reach the 2.0s
+    # scaled guard floor at poll_interval=0.05), then 4 (completion).
+    fake = _FakeWritableSnmpClient(get_responses=[5] * 40 + [4])
     driver = _build_driver(inventory=inv, registry=registry, fake_client=fake)
     settings = Settings(
         _env_file=None,
@@ -1055,18 +1107,82 @@ def test_sweep_startup_guard_respects_minimum_one_second(tmp_path: Path) -> None
         device_id="ap-7400-01",
         settings=settings,
         operator_confirmed=True,
+        sweep_duration_seconds=2,
     )
     elapsed = time.monotonic() - start
 
     assert result.scan_outcome == "COMPLETED"
     assert result.final_status == 4
-    # The startup guard is 1.0s minimum; the helper waited at least
-    # 1.0s before accepting the completion sentinel.
-    assert elapsed >= 1.0, (
-        f"helper returned too early at {elapsed:.2f}s; the 1.0s startup guard was not respected"
+    # Helper polled past the 2.0s scaled guard before accepting.
+    assert elapsed >= 2.0, (
+        f"helper returned too early at {elapsed:.2f}s; the scaled "
+        f"`elapsed >= sweep_duration_seconds` guard was bypassed"
     )
-    # Sanity: didn't approach the 10s timeout.
     assert elapsed < 5.0, f"helper took {elapsed:.2f}s — should not approach the 10s timeout"
+    # Helper polled enough times to reach the scaled guard.
+    assert len(fake.get_calls) >= 40, (
+        f"expected >=40 GETs past the 2.0s scaled guard; got {len(fake.get_calls)} GETs"
+    )
+    assert fake.closed is True
+
+
+def test_sweep_guard_scales_with_sweep_duration_seconds(tmp_path: Path) -> None:
+    """The scaled guard scales linearly with `sweep_duration_seconds`.
+
+    PR #66 review follow-up #3: with ``sweep_duration_seconds=3`` and
+    ``poll_interval_seconds=0.05``, the guard activates at poll
+    index >= 60 (3.0s / 0.05s) — NOT at poll index >= 40 (which would
+    be the 2.0s guard). A 3-second sweep must NOT be accepted at
+    t≈2s; the helper must wait the full 3.0s.
+
+    This pins the linearity property of the scaled guard: the
+    guard floor is `sweep_duration_seconds`, and doubling the
+    duration doubles the floor.
+    """
+    import time
+
+    from nora.drivers.snmp_pmp450i.spectrum import fetch_spectrum
+
+    inv = _build_inventory(tmp_path)
+    registry = _build_catalog(firmware="15.2.1", include_spectrum_oids=True)
+
+    # 60 in-progress polls (queue length to reach the 3.0s guard
+    # floor at poll_interval=0.05), then 4 (completion).
+    fake = _FakeWritableSnmpClient(get_responses=[5] * 60 + [4])
+    driver = _build_driver(inventory=inv, registry=registry, fake_client=fake)
+    settings = Settings(
+        _env_file=None,
+        _env_file_encoding=None,
+        nora_maintenance_window_minutes=0,
+        nora_spectrum_sweep_poll_interval_seconds=0.05,
+        nora_spectrum_sweep_timeout_seconds=10,
+    )
+
+    start = time.monotonic()
+    result = fetch_spectrum(
+        driver=driver,
+        device_id="ap-7400-01",
+        settings=settings,
+        operator_confirmed=True,
+        sweep_duration_seconds=3,
+    )
+    elapsed = time.monotonic() - start
+
+    assert result.scan_outcome == "COMPLETED"
+    assert result.final_status == 4
+    # Helper waited at least 3.0s (the 3s guard floor) before
+    # accepting — NOT 2.0s (which would be the 2s guard floor or the
+    # old 1.0s startup floor).
+    assert elapsed >= 3.0, (
+        f"helper returned too early at {elapsed:.2f}s; the 3.0s "
+        f"scaled guard was bypassed (would have been bypassed at 2.0s "
+        f"with the 2s guard too)"
+    )
+    assert elapsed < 6.0, f"helper took {elapsed:.2f}s — should not approach the 10s timeout"
+    # Helper polled enough times to reach the 3.0s guard floor.
+    assert len(fake.get_calls) >= 60, (
+        f"expected >=60 GETs past the 3.0s scaled guard; got {len(fake.get_calls)} GETs"
+    )
     assert fake.closed is True
 
 
@@ -1086,6 +1202,10 @@ def test_sweep_driver_error_mid_poll_is_swallowed(tmp_path: Path) -> None:
     first 5 polls, then a normal completion sentinel for the 6th. The
     helper must NOT propagate the exception; it must eventually
     complete with ``final_status=4``.
+
+    PR #66 review follow-up #3: the helper also waits for the scaled
+    guard ``elapsed >= sweep_duration_seconds`` before accepting
+    completion; ``sweep_duration_seconds=2`` keeps runtime at ~2s.
     """
     import time
 
@@ -1095,8 +1215,8 @@ def test_sweep_driver_error_mid_poll_is_swallowed(tmp_path: Path) -> None:
     registry = _build_catalog(firmware="15.2.1", include_spectrum_oids=True)
 
     # First 5 polls raise ``SnmpTimeoutError`` (a ``DriverError``
-    # subclass); then ``[4]`` queue serves completion. The startup
-    # guard ensures we poll past 1.0s before accepting the 4.
+    # subclass); then ``[4]`` queue serves completion. The scaled
+    # guard ensures we poll past 2.0s before accepting the 4.
     fake = _FakeErrorInjectingSnmpClient(
         get_responses=[4],
         n_error_polls=5,
@@ -1118,42 +1238,24 @@ def test_sweep_driver_error_mid_poll_is_swallowed(tmp_path: Path) -> None:
         device_id="ap-7400-01",
         settings=settings,
         operator_confirmed=True,
+        # PR #66 review follow-up #3: scaled guard waits 2.0s before
+        # accepting completion (not the 1.0s floor of follow-up #2).
+        sweep_duration_seconds=2,
     )
     elapsed = time.monotonic() - start
 
     assert result.scan_outcome == "COMPLETED"
     assert result.final_status == 4
-    # The helper waited past the 1.0s guard.
-    assert elapsed >= 1.0, (
-        f"helper returned too early at {elapsed:.2f}s; the 1.0s startup guard was bypassed"
+    # The helper waited past the 2.0s scaled guard.
+    assert elapsed >= 2.0, (
+        f"helper returned too early at {elapsed:.2f}s; the 2.0s scaled guard was bypassed"
     )
     # The fake was polled enough times to exhaust the 5 error polls
-    # AND wait past the startup guard.
+    # AND wait past the scaled guard.
     assert len(fake.get_calls) >= 5, (
         f"expected >=5 GETs (5 error polls + completion poll); got {len(fake.get_calls)}"
     )
     assert fake.closed is True
-
-
-def test_sweep_completion_constants_exported_with_startup_guard() -> None:
-    """``_MIN_STARTUP_GUARD_SECONDS`` is exported alongside the completion set.
-
-    The startup-guard constant must be importable from the module's
-    public surface (added to ``__all__``) so downstream consumers +
-    tests can reference the guard floor without re-declaring it. The
-    equality pins the documented ``1.0`` second floor (defending
-    against accidental changes during future refactors).
-    """
-    from nora.drivers.snmp_pmp450i.spectrum import (
-        _MIN_STARTUP_GUARD_SECONDS,
-        _SWEEP_COMPLETION_STATUSES,
-    )
-
-    assert isinstance(_MIN_STARTUP_GUARD_SECONDS, float)
-    assert _MIN_STARTUP_GUARD_SECONDS == 1.0
-    # Both constants are exported side-by-side; the existing
-    # completion-sentinel set is unchanged.
-    assert _SWEEP_COMPLETION_STATUSES == frozenset({0, 3, 4})
 
 
 __all__ = [
@@ -1182,9 +1284,9 @@ __all__ = [
     "test_sweep_timeout_when_poll_sees_status_5_in_progress",
     "test_sweep_timeout_when_poll_sees_sentinel_minus_1",
     "test_sweep_completion_constants_exported",
-    # PR #66 review follow-up #2 — pre-state race + DriverError swallow
-    "test_sweep_does_not_complete_prematurely_on_pre_state_4",
-    "test_sweep_startup_guard_respects_minimum_one_second",
+    # PR #66 review follow-up #3 — TDD buffer flush + scaled guard
+    "test_sweep_does_not_complete_before_hardware_tdd_flush",
+    "test_sweep_guard_waits_full_sweep_duration_before_completion",
+    "test_sweep_guard_scales_with_sweep_duration_seconds",
     "test_sweep_driver_error_mid_poll_is_swallowed",
-    "test_sweep_completion_constants_exported_with_startup_guard",
 ]

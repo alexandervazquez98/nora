@@ -127,7 +127,14 @@ class Settings(BaseSettings):
     # enforced by the validator below and by the FastMCP tool wiring
     # (snmp_run_spectrum_analysis accepts an optional override at call
     # time). Mirrors the ICMP probe config layout.
-    nora_spectrum_sweep_duration_seconds: int = 15
+    #
+    # 30s is the operator's recommended production baseline (2026-09-19)
+    # for "sufficient RF sampling across unforeseen noise bursts". It also
+    # covers the TDD buffer flush latency observed on physical PMP 450i
+    # radios (1.5-2.5s on firmware 25.0.1) so the spectrum poll loop's
+    # startup guard `elapsed >= sweep_duration_seconds` is always safely
+    # larger than the radio's pre-state window.
+    nora_spectrum_sweep_duration_seconds: int = 30
     # Inter-poll interval. 1.0s mirrors the Cambium WHISP-BOX-MIBV2-MIB
     # recommendation; the WU-3 helper defaults to this.
     nora_spectrum_sweep_poll_interval_seconds: float = 1.0

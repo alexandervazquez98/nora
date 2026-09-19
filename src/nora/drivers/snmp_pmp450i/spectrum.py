@@ -53,24 +53,29 @@ the real protocol emits SET frames against the spectrum-scan scalars
 but is bounded (duration + arm + start, no frequency change) and
 recovers to idle without side effects.
 
-PR #66 review follow-up #2 adds two production-critical guards to
-``_poll_sweep_status`` (issue #62, deployed after ``6a59546``):
+PR #66 review follow-up #2 adds the production-critical wire-error swallow
+to ``_poll_sweep_status`` (issue #62, deployed after ``6a59546``): during an
+active sweep the radio goes off-channel and ``client.get_oid`` raises
+``SnmpTimeoutError`` / ``NetworkUnreachableError`` (subclasses of
+``DriverError``). The poll loop catches these as transient — ``last_status = -1``
+and keeps polling — so a single mid-sweep packet loss does not abort the
+entire helper.
 
-1. **Startup guard**: completion sentinels are only accepted after
-   ``min(_MIN_STARTUP_GUARD_SECONDS, sweep_duration_seconds)`` seconds
-   have elapsed since the SET. The radio's SNMP agent returns the
-   PRE-EXISTING idle state (typically 4 from a previous sweep) for
-   ~10-50ms after the SET before transitioning to 5 (in-progress).
-   Without this guard, the first poll reads the stale pre-state and
-   the helper reports false-positive completion in ~50ms, while the
-   radio is still about to start the sweep.
-
-2. **Wire-error swallow**: during an active sweep the radio goes
-   off-channel and ``client.get_oid`` raises ``SnmpTimeoutError`` /
-   ``NetworkUnreachableError`` (subclasses of ``DriverError``). The
-   poll loop catches these as transient — ``last_status = -1`` and
-   keeps polling — so a single mid-sweep packet loss does not abort
-   the entire helper.
+PR #66 review follow-up #3 (this commit, 2026-09-19) replaces the
+1.0s startup-guard floor with a sweep-duration-scaled guard. After
+re-deploying ``a607eb9`` to physical PMP 450i hardware the operator
+found the 1.0s minimum guard insufficient: the radio's SNMP agent
+takes 1.5-2.5s to flush TDD buffers and engage sweep mode, so at
+t=1.087s (our 1.0s guard satisfied) the radio was STILL returning
+its pre-sweep status 4, and the helper reported false-positive
+completion while the sweep had not yet started. The new guard is
+``elapsed >= float(sweep_duration_seconds)`` — "a timed sweep cannot
+physically complete before the requested duration" — with no
+minimum floor. The ``sweep_duration_seconds`` SET value is the
+authoritative minimum the radio itself enforces, so guarding on it
+keeps the poll loop honest regardless of firmware revision.
+``DriverError`` swallow from follow-up #2 continues to handle the
+temporary RF link silence during the sweep.
 
 Zero-Leakage: only TEST-NET-1 (``192.0.2.x``) host literals; no real
 IPs, hostnames, serials, or credentials.
@@ -124,16 +129,6 @@ ScanOutcome = Literal["COMPLETED", "TIMEOUT", "ABORTED"]
 # physical-hardware observation is that 4 is the success sentinel on
 # 25.0.1 but 3 also occurs.
 _SWEEP_COMPLETION_STATUSES: frozenset[int] = frozenset({0, 3, 4})
-
-# Minimum elapsed time before we accept a completion sentinel. The radio's
-# SNMP agent may return the PRE-EXISTING idle state (e.g. 4 from a previous
-# sweep) for ~10-50ms after our SET before transitioning to 5 (in-progress).
-# Without this guard, the very first poll reads the stale pre-state and we
-# report false-positive completion in ~50ms. 1s is comfortably larger than
-# the observed stale-state window and smaller than any sensible sweep
-# duration. Capped to `sweep_duration_seconds` so very short sweeps still
-# get a sensible guard.
-_MIN_STARTUP_GUARD_SECONDS: float = 1.0
 
 
 class SpectrumSweepResult(BaseModel):
@@ -231,23 +226,24 @@ def _poll_sweep_status(
 ) -> int:
     """GET-poll .221.0 until one of the completion sentinels or timeout.
 
-    Two production-critical guards (PR #66 review follow-up #2):
+    Two production-critical guards:
 
-    1. **Startup guard**: completion sentinels are only accepted after
-       ``min(_MIN_STARTUP_GUARD_SECONDS, sweep_duration_seconds)``
-       seconds have elapsed since the SET. Without this, the radio's
-       pre-existing idle state (typically 4 from a previous sweep)
-       leaks into the first poll and we report false-positive
-       completion in ~50ms, while the radio is still about to start
-       the sweep. The guard is capped to ``sweep_duration_seconds``
-       so very short sweeps still get a sensible guard.
+    1. **Sweep-duration-scaled guard** (PR #66 review follow-up #3):
+       completion sentinels are only accepted after
+       ``elapsed >= float(sweep_duration_seconds)`` seconds have
+       elapsed since the SET. A timed sweep cannot physically
+       complete before the requested duration. The guard
+       ``elapsed >= sweep_duration_seconds`` is the operator's
+       recommended replacement for the 1.0s floor that was
+       insufficient for the TDD buffer flush latency observed on
+       physical hardware (1.5-2.5s on firmware 25.0.1).
 
-    2. **Wire-error swallow**: during an active sweep the radio goes
-       off-channel and ``client.get_oid`` raises ``SnmpTimeoutError`` /
-       ``NetworkUnreachableError`` (subclasses of ``DriverError``). We
-       treat these as transient — ``last_status = -1`` and keep polling
-       — so a single mid-sweep packet loss does not abort the entire
-       helper.
+    2. **Wire-error swallow** (PR #66 review follow-up #2): during an
+       active sweep the radio goes off-channel and ``client.get_oid``
+       raises ``SnmpTimeoutError`` / ``NetworkUnreachableError``
+       (subclasses of ``DriverError``). We treat these as transient —
+       ``last_status = -1`` and keep polling — so a single mid-sweep
+       packet loss does not abort the entire helper.
 
     Completion sentinels (WHISP-BOX-MIBV2-MIB::whispBoxSpectrumScanAction):
       - 0 stopSpectrumAnalysis (SET-only; some agents return 0 by GET
@@ -259,7 +255,6 @@ def _poll_sweep_status(
     in-progress sentinel like 5). Callers check membership in
     `_SWEEP_COMPLETION_STATUSES` to decide success vs. timeout.
     """
-    min_startup = min(_MIN_STARTUP_GUARD_SECONDS, float(sweep_duration_seconds))
     deadline = time.monotonic() + timeout_seconds
     start = time.monotonic()
     last_status = -1  # sentinel: never polled
@@ -272,7 +267,7 @@ def _poll_sweep_status(
             # Radio off-channel during sweep — transient.
             last_status = -1
         elapsed = time.monotonic() - start
-        if elapsed >= min_startup and last_status in _SWEEP_COMPLETION_STATUSES:
+        if elapsed >= float(sweep_duration_seconds) and last_status in _SWEEP_COMPLETION_STATUSES:
             return last_status
         time.sleep(poll_interval_seconds)
     return last_status
@@ -302,10 +297,13 @@ def fetch_spectrum(
       6. GET-poll .221.0 every poll_interval_seconds until one of the
          completion sentinels in `_SWEEP_COMPLETION_STATUSES`
          (``{0, 3, 4}``) or timeout elapses. PR #66 review
-         follow-up #2: completion sentinels are only accepted after
-         ``min(_MIN_STARTUP_GUARD_SECONDS, sweep_duration_seconds)``
-         seconds have elapsed since the SET (startup guard against the
-         radio's pre-existing idle-state leak); mid-sweep wire errors
+         follow-up #3: completion sentinels are only accepted after
+         ``elapsed >= float(sweep_duration_seconds)`` seconds have
+         elapsed since the SET (a timed sweep cannot physically
+         complete before the requested duration — replaces the 1.0s
+         floor that was insufficient for the 1.5-2.5s TDD buffer flush
+         latency on physical PMP 450i firmware 25.0.1). PR #66 review
+         follow-up #2: mid-sweep wire errors
          (``SnmpTimeoutError`` / ``NetworkUnreachableError``,
          subclasses of ``DriverError``) are swallowed as transient.
       7. On timeout: raise SpectrumSweepTimeout.
@@ -451,5 +449,4 @@ __all__ = [
     "_arm_sweep",
     "_poll_sweep_status",
     "_SWEEP_COMPLETION_STATUSES",
-    "_MIN_STARTUP_GUARD_SECONDS",
 ]

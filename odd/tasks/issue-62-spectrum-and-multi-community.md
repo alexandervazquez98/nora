@@ -204,3 +204,19 @@ The real Cambium sweep protocol requires SET frames (write duration, arm, start)
     (c) New tests pin the pre-state race (completion NOT accepted before the
         startup guard elapses), the minimum-one-second guard for short
         sweeps, and the mid-sweep DriverError swallow.
+- **2026-09-19 — PR #66 review follow-up #3**: Owner re-deployed after `a607eb9`
+  and found the 1.0s startup guard is insufficient. The radio's SNMP agent
+  takes 1.5-2.5s to flush TDD buffers and engage sweep mode; at t=1.087s
+  (our 1.0s guard satisfied) the radio was still returning its pre-sweep
+  status 4. Operator's recommendation: drop the fixed 1.0s floor and use
+  `elapsed >= sweep_duration_seconds` directly — "a timed sweep cannot
+  physically complete before the requested duration". Also bump default
+  `nora_spectrum_sweep_duration_seconds` 15 → 30 (operator's production
+  baseline for "sufficient RF sampling across unforeseen noise bursts").
+  Fixes (in this follow-up):
+    (a) Remove `_MIN_STARTUP_GUARD_SECONDS` constant.
+    (b) `_poll_sweep_status` guard is now `elapsed >= float(sweep_duration_seconds)`
+        with no minimum floor.
+    (c) `nora_spectrum_sweep_duration_seconds` default 15 → 30.
+    (d) `.env.example` mirror.
+    (e) New tests pin the scaled guard + TDD buffer flush scenario.
