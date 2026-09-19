@@ -64,6 +64,11 @@ You have access to NORA MCP tools. Follow this operational sequence:
 2. Make-Before-Break Order:
    - When migration is authorized: Migrate active SMs first, then AP last.
    - Pre-existing offline SMs must be excluded from migration sweeps to prevent false timeouts.
+3. WU-A Pre-Flight Community Validation (per `feat/multi-community-band-reboot`):
+   - `snmp_migrate_radio_frequency` runs a read-only pre-flight BEFORE the Tier-2 gate. The pre-flight issues one cheap `sysDescr` GET against every candidate SM using that SM's own inventory credentials.
+   - On `CommunityValidationFailed`, the exception carries a typed `PreFlightReport` with per-SM outcomes (`reachable`, `community_accepted`, `error_class`, `error_message`) plus a `missing_inventory_luids` list.
+   - **Do NOT mint a Tier-2 token until the pre-flight passes.** Surface the typed report to the operator verbatim, naming the offending SM(s) by LUID and host, then ask the operator to either (a) confirm the community string stored in `data/devices.yaml`, (b) supply a different community string for that SM via `register_device`, or (c) confirm the missing-inventory SMs should be registered first.
+   - When the operator acknowledges the fix, re-invoke `snmp_migrate_radio_frequency`; the pre-flight re-runs on the fresh credentials.
 
 ## 6. Universal Service Impact & Disruption Gate
 

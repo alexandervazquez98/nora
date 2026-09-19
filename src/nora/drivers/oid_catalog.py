@@ -128,6 +128,17 @@ class OidCatalog(BaseModel):
     vendor: str
     model: str
     firmware: str
+    # ``version`` is the envelope schema version. v1 ships with the
+    # baseline; v2 is the ODD cut from 2026-09-18 (see
+    # ``feat/multi-community-band-reboot``): ``frequency`` /
+    # ``migrateCarrierFrequency`` / ``migratePriorCarrierFrequency``
+    # re-pointed from the deprecated ``rfFreqCarrier`` to the current
+    # ``radioFreqCarrier``, and four new OID names added (``reboot``,
+    # ``rebootIfRequired``, ``radioFrequencyBand``,
+    # ``whispBoxRFPhysicalRadioFrequencies``). Defaults to 1 so legacy
+    # callers and PR-1/2/3/4 test fixtures build catalogs without
+    # touching the field.
+    version: int = 1
     oids: dict[str, str] = Field(default_factory=dict)
     # PR 5 (slice 5 of `2026-09-13-pmp450i-production-surface`): the
     # catalog envelope carries a `tools` map (`tool_name -> [OID
@@ -553,7 +564,13 @@ class OidCatalogRegistry:
                 reason=f"missing required OID(s): {missing_str}",
             )
 
-        catalog = OidCatalog(vendor=vendor, model=model, firmware=firmware, oids=oids)
+        catalog = OidCatalog(
+            vendor=vendor,
+            model=model,
+            firmware=firmware,
+            oids=oids,
+            version=int(envelope.get("version", 1)),
+        )
         # PR 5 (slice 5): extract the envelope `tools` map if present.
         # Legacy catalogs (PR 1 + PR 2 + PR 3 + PR 4 fixtures) sign no
         # `tools` map — we accept the omission and store an empty dict

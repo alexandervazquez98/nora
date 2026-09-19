@@ -614,6 +614,96 @@ def hitl_mint_token(
 
 
 # ---------------------------------------------------------------------------
+# PMP 450i HITL-gated reboot tool — WU-C (feat/multi-community-band-reboot).
+#
+# Delegates to ``nora.drivers.snmp_pmp450i.reboot.fetch_reboot`` which
+# calls ``nora.hitl.tokens.verify_approval_token`` BEFORE any SNMP SET
+# frame. Missing or invalid tokens raise
+# :class:`AutonomousMutationRejected` with the literal "autonomous
+# device mutation rejected: HITL approval token required" message.
+#
+# The reboot reads the radio's ``rebootIfRequired`` OID
+# (catalog v2 — see commit ``f85f2ae``). When the firmware votes
+# "not required" the helper returns ``rebooted=False`` WITHOUT
+# emitting any SET frame — the firmware's authoritative vote wins
+# over the table-driven band-crossing detector.
+#
+# Per ``feat/multi-community-band-reboot`` decision "Tier-2 invariant:
+# snmp_reboot_radio is independently HITL-gated": the orchestrator
+# must mint a SECOND ``nora hitl mint`` token after a successful
+# ``snmp_migrate_radio_frequency`` whenever ``MigrationResult.band_crossing``
+# is True. Two HITL tokens in that flow (migration + reboot) — the
+# cost is justified because reboot is independently disruptive.
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool
+def snmp_reboot_radio(
+    device_id: str,
+    approval_token: str,
+) -> dict[str, Any]:
+    """Reboot a PMP 450i radio under explicit operator confirmation (WU-C).
+
+    Returns a :class:`RebootResult` carrying ``rebooted``, ``reason``,
+    ``firmware_vote``, ``dry_run``, ``would_set``, ``set_calls``,
+    ``expected_recovery_seconds``, and ``hitl_required``.
+
+    Per `odd/tasks/multi-community-migration-and-band-reboot.md` WU-C:
+    the helper reads the radio's ``rebootIfRequired`` OID
+    (catalog v2, ``whispBoxControls 4``,
+    ``1.3.6.1.4.1.161.19.3.3.3.4.0``) FIRST. When the firmware votes
+    "not required" (``rebootNotRequired(0)``) the helper returns
+    ``rebooted=False, reason='not_required_by_firmware'`` WITHOUT
+    emitting any SET frame — the firmware's authoritative vote wins
+    over the table-driven band-crossing detector. When the firmware
+    votes "required" (``rebootRequired(1)``) or the read fails
+    (fail-closed) the helper emits the SET on ``reboot``
+    (``whispBoxControls 2``, ``1.3.6.1.4.1.161.19.3.3.3.2.0``) with
+    value ``fullReboot(2)`` (450i default per the 25.x MIB).
+
+    Per WU-3 (`pr44-followups.md`): when the SNMP client lacks
+    ``apply_oid`` — e.g. the production ``V2CClient`` whose
+    read-only ``SnmpClient`` Protocol is deliberate — the tool
+    short-circuits before any wire frame and returns a typed
+    dry-run result so operators see what WOULD have happened,
+    instead of raising ``AttributeError``. Write mutations stay
+    out of scope.
+
+    Per WU-A (`snmp_migrate_radio_frequency` pre-flight): the
+    orchestrator MUST mint a fresh HITL token for this tool after
+    every successful migration that returned
+    ``band_crossing=True``. Reusing the migration token is rejected
+    — the verifier treats the token as single-use.
+
+    Returns:
+        A dict matching the :class:`RebootResult` schema.
+
+    Raises:
+        AutonomousMutationRejected: missing or invalid HITL
+            approval token. The literal message is the contract
+            seam.
+        DeviceNotFoundError: unknown ``device_id``.
+        CatalogNotFoundError: no catalog for the device's
+            ``(vendor, model, firmware)`` triple.
+        LookupError: the catalog entry does not carry the
+            ``reboot`` or ``rebootIfRequired`` OID names (catalog
+            v2 ships both; legacy catalogs missing one fail
+            loudly).
+    """
+    from nora.drivers.snmp_pmp450i.reboot import fetch_reboot
+
+    driver = get_driver()
+    settings = get_runtime_state()
+    result = fetch_reboot(
+        driver=driver,
+        device_id=device_id,
+        approval_token=approval_token,
+        settings=settings,
+    )
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Prompt registrations — `@mcp.prompt` thin wrappers over `PromptRegistry`.
 # ---------------------------------------------------------------------------
 
@@ -874,9 +964,15 @@ _EXPECTED_TOOL_TIERS: dict[str, int] = {
     "correlate_sector_interference": 0,
     # Tier 1 — Potentially Disruptive (1)
     "snmp_run_spectrum_analysis": 1,
-    # Tier 2 — Service-Affecting Mutations (2)
+    # Tier 2 — Service-Affecting Mutations (3)
     "snmp_migrate_radio_frequency": 2,
     "save_intervention_record": 2,
+    # WU-C (feat/multi-community-band-reboot) — reboot is
+    # independently disruptive so it carries its own HITL gate.
+    # Same tier as the migration tool because the wire-level
+    # impact is identical: the radio drops all subscribers during
+    # the reboot cycle. Two HITL tokens in the band-crossing flow.
+    "snmp_reboot_radio": 2,
     # `register_device` (issue #42) is intentionally NOT in this table
     # for now — its dedicated `docs/tool_specs/register_device.md` lands
     # in a follow-up change. The guard's "expected_tier is None" branch

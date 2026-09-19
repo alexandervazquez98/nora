@@ -49,8 +49,14 @@ import time
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
+from nora.drivers.exceptions import (
+    CommunityValidationFailed,
+    NetworkUnreachableError,
+    SnmpTimeoutError,
+)
+from nora.drivers.snmp_pmp450i.band_plan import _is_band_crossing
 from nora.drivers.snmp_pmp450i.subscribers import (
     fetch_sm_table,
 )
@@ -125,11 +131,319 @@ class MigrationResult(BaseModel):
     device_id: str
     dry_run: bool = False
     would_set: list[tuple[str, str | int | float]] = []
+    # WU-C (feat/multi-community-band-reboot) — band-crossing flag.
+    # ``True`` when the migration crosses regulatory bands
+    # (5.x ↔ 4.9 GHz); the orchestrator MUST mint a second HITL
+    # token and invoke ``snmp_reboot_radio`` after a successful
+    # migration. ``False`` for same-band sub-channel changes
+    # (5.7 → 5.8 GHz) where the 25.x MIB DESCRIPTION confirms no
+    # reboot is required (per ``radioFreqCarrier``: "As of release
+    # 16.1, this OID no longer requires reboot to take affect").
+    band_crossing: bool = False
+
+
+# ---------------------------------------------------------------------------
+# Pre-flight community validation — WU-A (feat/multi-community-band-reboot).
+#
+# The pre-flight runs BEFORE the HITL token gate. It walks the SM-table
+# subtree on the AP (so we know which LUIDs are registered with this
+# AP) and then issues one cheap ``sysDescr`` GET against every
+# candidate SM, using that SM's own credentials from the inventory.
+# Any failure (SM unreachable, community rejected, SM not in inventory)
+# is folded into a typed ``PreFlightReport`` so the orchestrator can
+# prompt the operator to confirm or supply a different community
+# before the HITL token is minted. Zero SET frames are emitted at
+# pre-flight time — the gate is read-only by design.
+# ---------------------------------------------------------------------------
+
+
+class SmPreFlightResult(BaseModel):
+    """Per-SM outcome from the WU-A pre-flight community validation.
+
+    Fields:
+
+    * ``luid`` — the SM's logical unit ID as observed on the AP.
+    * ``host`` — the IP the inventory carries for this SM (None when
+      the SM is missing from inventory).
+    * ``reachable`` — True when the ``sysDescr`` GET succeeded.
+    * ``community_accepted`` — True when the agent accepted the
+      community string. Independent of ``reachable`` (a SM can be
+      reachable but auth-rejected).
+    * ``error_class`` — the typed-exception class name (``DeviceUnreachable``,
+      ``InvalidCommunity``, ``MISSING_INVENTORY_ENTRY``); ``None``
+      on the success path.
+    * ``error_message`` — verbatim driver message (no Pydantic coercion);
+      sanitised at the tool boundary per Zero-Leakage.
+
+    The model is frozen so the MCP tool boundary can serialise via
+    ``model_dump(mode="json")`` without mutation risk.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    luid: str
+    host: str | None = None
+    reachable: bool = False
+    community_accepted: bool = False
+    error_class: str | None = None
+    error_message: str | None = None
+
+
+class PreFlightReport(BaseModel):
+    """Aggregate WU-A pre-flight community validation result.
+
+    Fields:
+
+    * ``ap_reachable`` — True when the AP's own ``sysDescr`` GET succeeded
+      (the AP must respond before we can read its SM-table subtree).
+    * ``ap_sysdescr`` — verbatim sysDescr body from the AP (RFC 1213
+      ``1.3.6.1.2.1.1.1.0``). ``None`` when unreachable.
+    * ``sm_results`` — one ``SmPreFlightResult`` per SM candidate that
+      the AP reported. Empty when ``ap_reachable`` is False.
+    * ``missing_inventory_luids`` — LUIDs that the AP reported but
+      the operator inventory has no entry for. The orchestrator MUST
+      tell the operator to register these via ``register_device``
+      before re-attempting the migration.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    ap_reachable: bool
+    ap_sysdescr: str | None = None
+    sm_results: list[SmPreFlightResult] = Field(default_factory=list)
+    missing_inventory_luids: list[str] = Field(default_factory=list)
+
+
+def _validate_sm_communities(
+    *,
+    driver: Any,
+    device: Any,
+    sm_luids: list[str],
+    client_factory: Callable[[Any], "SnmpClient"],
+    sysdescr_oid: str = "1.3.6.1.2.1.1.1.0",
+) -> PreFlightReport:
+    """Issue one ``sysDescr`` GET against every SM and the AP.
+
+    Args:
+        driver: ``Pmp450iSnmpDriver`` (carries inventory + client factory).
+        device: AP ``Device`` resolved from the inventory.
+        sm_luids: List of LUIDs reported by the AP's SM-table subtree.
+        client_factory: Driver's client factory — produces a fresh
+            ``SnmpClient`` per SM so the per-SM community is used.
+        sysdescr_oid: RFC 1213 ``sysDescr`` OID; default
+            ``1.3.6.1.2.1.1.1.0``. Parameterised for hermetic tests.
+
+    Returns:
+        ``PreFlightReport`` aggregating AP reachability + per-SM
+        outcomes. Never raises on per-SM wire failures; the report
+        itself surfaces typed errors via ``error_class`` /
+        ``error_message``. Only ``DeviceUnreachable`` on the AP path
+        short-circuits with an empty ``sm_results`` list.
+
+    Per-SM resolution:
+
+    * If the SM's LUID has no matching ``device_id`` in the inventory,
+      the result carries ``error_class='MISSING_INVENTORY_ENTRY'`` and
+      the LUID is also collected into ``missing_inventory_luids``.
+    * Wire failures are translated to typed exceptions:
+
+      * ``OSError`` / ``TimeoutError`` → ``DeviceUnreachable(host)``
+      * ``puresnmp.exc.SnmpError``    → ``InvalidCommunity(community)``
+    """
+    import puresnmp.exc
+
+    # AP reachability probe first; the AP must answer sysDescr before we
+    # trust the SM-table subtree walk that follows. On failure the
+    # pre-flight returns an empty sm_results list so the operator sees
+    # the AP-side problem without being misled by the SM-side.
+    ap_reachable = True
+    ap_sysdescr: str | None = None
+    try:
+        ap_client = client_factory(device)
+        try:
+            ap_sysdescr = str(ap_client.get_oid(sysdescr_oid))
+        finally:
+            try:
+                ap_client.close()
+            except Exception:  # pragma: no cover - close is best-effort
+                pass
+    except (OSError, TimeoutError, SnmpTimeoutError, NetworkUnreachableError):
+        ap_reachable = False
+        ap_sysdescr = None
+    except puresnmp.exc.SnmpError:
+        ap_reachable = False
+        ap_sysdescr = None
+
+    sm_results: list[SmPreFlightResult] = []
+    missing_luids: list[str] = []
+
+    # Skip per-SM probes when the AP itself is unreachable. The
+    # pre-flight surfaces AP-side failure first so the operator can
+    # investigate without flooding a broken network with SM probes.
+    if not ap_reachable:
+        return PreFlightReport(
+            ap_reachable=False,
+            ap_sysdescr=None,
+            sm_results=[],
+            missing_inventory_luids=[],
+        )
+
+    for luid in sm_luids:
+        # Resolve the inventory entry for this SM by LUID. We walk
+        # ``driver._inventory.device_ids`` (sorted) and look up by
+        # ``device_id == luid`` — a future change can add a
+        # ``luid -> device_id`` map to Inventory; for now the simple
+        # identity-keyed lookup is enough.
+        sm_device = _resolve_sm_device(driver, luid)
+        if sm_device is None:
+            missing_luids.append(luid)
+            sm_results.append(
+                SmPreFlightResult(
+                    luid=luid,
+                    host=None,
+                    reachable=False,
+                    community_accepted=False,
+                    error_class="MISSING_INVENTORY_ENTRY",
+                    error_message=(
+                        f"LUID {luid!r} reported by AP SM-table but absent "
+                        f"from inventory; register via register_device first"
+                    ),
+                )
+            )
+            continue
+
+        host = str(getattr(sm_device, "host", None) or "")
+
+        try:
+            sm_client = client_factory(sm_device)
+        except (OSError, TimeoutError, SnmpTimeoutError) as exc:
+            sm_results.append(
+                SmPreFlightResult(
+                    luid=luid,
+                    host=host,
+                    reachable=False,
+                    community_accepted=False,
+                    error_class="DeviceUnreachable",
+                    error_message=f"{host}: {exc!s}",
+                )
+            )
+            continue
+        except (puresnmp.exc.SnmpError, NetworkUnreachableError) as exc:
+            sm_results.append(
+                SmPreFlightResult(
+                    luid=luid,
+                    host=host,
+                    reachable=False,
+                    community_accepted=False,
+                    error_class="InvalidCommunity",
+                    error_message=f"auth rejected for {host}: {exc!s}",
+                )
+            )
+            continue
+
+        try:
+            try:
+                sm_client.get_oid(sysdescr_oid)
+                sm_results.append(
+                    SmPreFlightResult(
+                        luid=luid,
+                        host=host,
+                        reachable=True,
+                        community_accepted=True,
+                        error_class=None,
+                        error_message=None,
+                    )
+                )
+            except (OSError, TimeoutError, SnmpTimeoutError) as exc:
+                sm_results.append(
+                    SmPreFlightResult(
+                        luid=luid,
+                        host=host,
+                        reachable=False,
+                        community_accepted=False,
+                        error_class="DeviceUnreachable",
+                        error_message=f"{host}: {exc!s}",
+                    )
+                )
+            except (puresnmp.exc.SnmpError, NetworkUnreachableError) as exc:
+                sm_results.append(
+                    SmPreFlightResult(
+                        luid=luid,
+                        host=host,
+                        reachable=False,
+                        community_accepted=False,
+                        error_class="InvalidCommunity",
+                        error_message=f"auth rejected for {host}: {exc!s}",
+                    )
+                )
+        finally:
+            try:
+                sm_client.close()
+            except Exception:  # pragma: no cover - close is best-effort
+                pass
+
+    return PreFlightReport(
+        ap_reachable=ap_reachable,
+        ap_sysdescr=ap_sysdescr,
+        sm_results=sm_results,
+        missing_inventory_luids=missing_luids,
+    )
+
+
+def _resolve_sm_device(driver: Any, luid: str) -> Any | None:
+    """Return the inventory ``Device`` for ``luid`` or ``None``.
+
+    The inventory model keys devices by ``device_id`` (an operator
+    choice), so the helper first tries the identity match (most
+    operators name the SM ``sm-<luid>`` or similar) and then falls
+    back to a linear scan over the configured devices. A future
+    change can introduce a dedicated ``luid -> device_id`` map on
+    ``Inventory``; the current helper is intentionally narrow.
+    """
+    inventory = getattr(driver, "_inventory", None)
+    if inventory is None:
+        return None
+    try:
+        return inventory.get(luid)
+    except Exception:  # noqa: BLE001 - DeviceNotFoundError is the expected path
+        # Linear scan fallback: look for any device whose ``device_id``
+        # contains ``luid`` (e.g. ``sm-7400-001`` matches LUID ``001``).
+        # Operators that need stricter matching must rename inventory
+        # entries to match the LUID exactly.
+        for device_id in getattr(inventory, "device_ids", []):
+            if luid in device_id:
+                try:
+                    return inventory.get(device_id)
+                except Exception:
+                    continue
+        return None
 
 
 # ---------------------------------------------------------------------------
 # Public seam — overridable for tests.
 # ---------------------------------------------------------------------------
+
+
+def _band_crossing_from_prior(
+    prior_carrier: Any,
+    target_mhz: float,
+) -> bool:
+    """Defensive helper — convert prior-carrier value to band-crossing flag.
+
+    The runtime layer reads ``migratePriorCarrierFrequency`` (kHz)
+    before the SET frame; on firmware ≥ 16.1 the read normally
+    succeeds and returns an integer. On a non-numeric value (legacy
+    firmware / fake client / mid-reboot) we conservatively return
+    False — the runtime layer would consult ``radioFrequencyBand``
+    for the authoritative vote in production. This is a fail-safe
+    choice: a False negative means we do NOT mint a second HITL
+    token for the reboot, which is the cheaper mistake.
+    """
+    try:
+        prior_mhz = float(prior_carrier) / 1000.0
+    except (TypeError, ValueError):
+        return False
+    return _is_band_crossing(prior_mhz, target_mhz)
 
 
 def migrate_subscriber(
@@ -260,20 +574,62 @@ def fetch_migrate(
     Raises:
         AutonomousMutationRejected: missing or invalid approval
             token. The literal message is the contract seam.
+        CommunityValidationFailed: WU-A pre-flight discovered at
+            least one SM that is unreachable, auth-rejected, or
+            missing from the inventory. The full ``PreFlightReport``
+            rides on the ``.report`` attribute so the orchestrator
+            can ask the operator to confirm / supply a different
+            community BEFORE the HITL token is spent.
         DeviceNotFoundError: unknown ``device_id``.
         CatalogNotFoundError: no catalog for the device's
             ``(vendor, model, firmware)`` triple.
     """
-    # 1. HITL gate — fires FIRST. The signing key is sourced from
-    # `Settings.nora_hitl_signing_key`; lazy fail-closed if empty.
-    signing_key = getattr(settings, "nora_hitl_signing_key", None) if settings is not None else None
-    verify_approval_token(approval_token, signing_key=signing_key)
-
-    # 2. Resolve device + catalog.
+    # 1. Resolve device + catalog. WU-A pre-flight runs BEFORE the
+    # HITL gate so the operator is never asked to mint an approval
+    # token for a migration we already know will fail at the
+    # community-string level.
     device = driver._inventory.get(device_id)  # noqa: SLF001 — internal API
     catalog = driver._catalog_registry.resolve(  # noqa: SLF001 — internal API
         (device.vendor, device.model, device.firmware)
     )
+
+    # 2. WU-A pre-flight community validation. We walk the SM-table
+    # subtree on the AP (the same walk the rest of the tool uses
+    # below) so we know the candidate LUID set, then issue one
+    # cheap sysDescr GET per SM using that SM's own credentials
+    # from the inventory. On any per-SM failure (unreachable,
+    # community rejected, missing inventory entry) we raise
+    # ``CommunityValidationFailed`` carrying the typed report so
+    # the orchestrator can prompt the operator before any HITL
+    # token is spent. The pre-flight is opt-out via
+    # ``Settings.nora_preflight_community_validation`` (default
+    # True) so legacy test fixtures can disable it.
+    preflight_enabled = bool(
+        getattr(settings, "nora_preflight_community_validation", True)
+        if settings is not None
+        else True
+    )
+    if preflight_enabled:
+        sm_summary = fetch_sm_table(driver=driver, device_id=device_id, settings=settings)
+        candidate_luids = sorted(
+            {record.luid for record in sm_summary.online_active}
+            | {record.luid for record in sm_summary.active_degraded}
+        )
+        preflight_report = _validate_sm_communities(
+            driver=driver,
+            device=device,
+            sm_luids=candidate_luids,
+            client_factory=driver._client_factory,  # noqa: SLF001 — internal API
+        )
+        failed_results = [r for r in preflight_report.sm_results if r.error_class is not None]
+        if not preflight_report.ap_reachable or failed_results:
+            raise CommunityValidationFailed(report=preflight_report)
+
+    # 3. HITL gate — fires AFTER the pre-flight. The signing key is
+    # sourced from `Settings.nora_hitl_signing_key`; lazy fail-closed
+    # if empty.
+    signing_key = getattr(settings, "nora_hitl_signing_key", None) if settings is not None else None
+    verify_approval_token(approval_token, signing_key=signing_key)
 
     # Migration OID names must be in the catalog.
     migration_oids: dict[str, str] = {}
@@ -460,6 +816,17 @@ def fetch_migrate(
             device_id=str(getattr(device, "host", device_id)),
             dry_run=dry_run,
             would_set=would_set,
+            # WU-C band-crossing flag — fires on a confirmed cross-band
+            # move (5.x ↔ 4.9). The prior_carrier read returns kHz;
+            # convert to MHz for the table-driven detector. On a
+            # non-numeric read (e.g. legacy firmware / fake client)
+            # we conservatively return False — the runtime layer
+            # would consult ``radioFrequencyBand`` OID for the
+            # authoritative vote in production.
+            band_crossing=_band_crossing_from_prior(
+                prior_carrier,
+                float(target_frequency_mhz),
+            ),
         ).model_dump(mode="json")
     finally:
         try:
@@ -476,4 +843,12 @@ __all__ = [
     "_start_rollback_watchdog",
     "_cancel_rollback_watchdog",
     "_wait_for_management_reachability",
+    # WU-A (feat/multi-community-band-reboot) — pre-flight community
+    # validation. Runs BEFORE the HITL gate so the operator is never
+    # asked to mint an approval token for a migration we already know
+    # will fail at the community-string level.
+    "PreFlightReport",
+    "SmPreFlightResult",
+    "_validate_sm_communities",
+    "_resolve_sm_device",
 ]

@@ -134,6 +134,12 @@ TOOLS_V1: dict[str, list[str]] = {
         "modulationMode",
         "sysDescr",
     ],
+    # WU-C (feat/multi-community-band-reboot) — snmp_reboot_radio tool.
+    # Reads rebootIfRequired first; emits SET on reboot on confirmation.
+    "snmp_reboot_radio": [
+        "reboot",
+        "rebootIfRequired",
+    ],
 }
 
 
@@ -145,6 +151,15 @@ def _load_source(source_path: Path) -> dict[str, object]:
     An optional ``_provenance`` block documents the verification source
     for audit (it's preserved verbatim in the signed envelope as
     informational metadata but excluded from the HMAC body).
+
+    An optional ``version`` field (positive integer, default 1) bumps
+    the envelope's ``version`` field. The ODD cut coordinated on
+    2026-09-18 (feature ``feat/multi-community-band-reboot``) ships
+    ``version: 2`` for every signed envelope because the
+    ``frequency`` / ``migrateCarrierFrequency`` / ``migratePriorCarrierFrequency``
+    OIDs were re-pointed from the deprecated ``rfFreqCarrier``
+    (`1.3.6.1.4.1.161.19.3.1.1.2.0`) to the current ``radioFreqCarrier``
+    (`1.3.6.1.4.1.161.19.3.1.10.1.1`).
     """
     payload = json.loads(source_path.read_text())
     if not isinstance(payload, dict):
@@ -154,6 +169,10 @@ def _load_source(source_path: Path) -> dict[str, object]:
             raise ValueError(f"{source_path}: source missing required field {key!r}")
     if not isinstance(payload["oids"], dict):
         raise ValueError(f"{source_path}: source.oids must be a JSON object")
+    if "version" in payload and not isinstance(payload["version"], int):
+        raise ValueError(f"{source_path}: source.version must be an integer")
+    if "version" in payload and payload["version"] < 1:
+        raise ValueError(f"{source_path}: source.version must be >= 1")
     return payload
 
 
@@ -174,11 +193,14 @@ def _sign_one(
     oids_raw = payload["oids"]
     assert isinstance(oids_raw, dict)
     oids: dict[str, str] = {str(k): str(v) for k, v in oids_raw.items()}
+    # ``version`` is read from the source when present; default 1 keeps
+    # back-compat with v1 source files that predate the version field.
+    envelope_version = int(payload.get("version", 1))
 
     canonical_body = json.dumps(oids, sort_keys=True, separators=(",", ":")).encode("utf-8")
     sig = hmac.new(key.encode("utf-8"), canonical_body, hashlib.sha256).hexdigest()
     envelope = {
-        "version": 1,
+        "version": envelope_version,
         "vendor": vendor,
         "model": model,
         "firmware": firmware,
