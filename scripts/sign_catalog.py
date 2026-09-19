@@ -127,18 +127,20 @@ TOOLS_V1: dict[str, list[str]] = {
     # same PR (Task 7).
     "register_device": ["sysDescr"],
     # Slice-1 radio-metrics tool — promoted from the legacy
-    # `_ALLOWED_UNCATALOGUED_TOOLS` allow-list. Same OID-set as the
-    # legacy driver path minus the broken ``signalStrengthTx`` (issue
-    # #54: pointed at ``maxSMTxPwr`` which is engineering-only +
-    # tabular, returns empty on production firmware). Sector-level
-    # active EIRP (``eirp``, ``whispBoxActiveEIRP``) replaces it.
+    # `_ALLOWED_UNCATALOGUED_TOOLS` allow-list. Issue #57
+    # (2026-09-19): the legacy radio-metrics subset
+    # (``radioDownlinkRate`` / ``radioUplinkRate`` /
+    # ``signalStrengthRx`` / ``ssr`` / ``modulationMode``) was
+    # dropped — every one of those OIDs is a per-LUID
+    # ``whispLinkEntry`` tabular column whose ``.0`` instance
+    # returns ``noSuchName`` on real Cambium PMP 450i hardware.
+    # The tool now requires only the sector-scalar seed ``eirp``
+    # (``whispBoxActiveEIRP``); the other sector scalars
+    # (``activeTxPowerDbh``, ``channelBandwidth``, ``frequency``,
+    # ``transmitPower``) are optional and get picked up by the fold
+    # when the resolved catalog carries them.
     "snmp_get_pmp450i_radio_metrics": [
-        "radioDownlinkRate",
-        "radioUplinkRate",
-        "signalStrengthRx",
         "eirp",
-        "ssr",
-        "modulationMode",
         "sysDescr",
     ],
     # WU-C (feat/multi-community-band-reboot) — snmp_reboot_radio tool.
@@ -348,12 +350,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     # Single-triple mode: resolve the source file under --source-root.
-    source_path = (
-        args.source_root
-        / args.vendor
-        / args.model
-        / f"{args.firmware}.source.json"
-    )
+    source_path = args.source_root / args.vendor / args.model / f"{args.firmware}.source.json"
     if not source_path.is_file():
         print(
             f"error: source file not found at {source_path}. "
