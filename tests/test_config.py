@@ -27,9 +27,9 @@ PRIVATE_IPV4 = re.compile(
 
 
 def test_settings_has_eight_user_fields() -> None:
-    """After the thin split, `Settings.model_fields` has exactly 22 entries.
+    """After the thin split, `Settings.model_fields` has exactly 23 entries.
 
-    Twenty-one user-settable fields plus the computed `loaded_from` = 22 total.
+    Twenty-two user-settable fields plus the computed `loaded_from` = 23 total.
     The nine former LLM/journal fields MUST be gone.
 
     PR 4 (slice 4) extends the set with four HITL/maintenance-window
@@ -53,12 +53,16 @@ def test_settings_has_eight_user_fields() -> None:
     ``nora_icmp_default_packet_size_bytes``, ``nora_icmp_per_packet_timeout_seconds``,
     ``nora_icmp_max_duration_seconds``, ``nora_icmp_min_duration_seconds``.
     Enforced by ``_validate_icmp_duration_bounds`` (min <= default <= max).
+
+    Issue #61 PR2 (WU-2.6) extends the set with one more:
+    ``nora_probe_results_dir`` (atomic JSON snapshots of completed
+    probe runs; mirrors ``nora_interventions_dir``).
     """
     from nora.config import Settings
 
     fields = Settings.model_fields
-    assert len(fields) == 22, (
-        f"Expected 22 model fields (21 user + loaded_from); got {len(fields)}: {sorted(fields)}"
+    assert len(fields) == 23, (
+        f"Expected 23 model fields (22 user + loaded_from); got {len(fields)}: {sorted(fields)}"
     )
 
     forbidden = {
