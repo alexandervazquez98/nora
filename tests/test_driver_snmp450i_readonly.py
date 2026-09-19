@@ -28,6 +28,26 @@ SRC_DIR = PROJECT_ROOT / "src" / "nora"
 # package. Matched case-sensitively (Python identifier rules).
 _WRITE_VERB_SET: frozenset[str] = frozenset({"set", "update", "setbulk", "bulk_set", "write"})
 
+# Driver-R2 carve-out (issue #62, 2026-09-19): the spectrum sweep
+# protocol requires SET frames (write duration + arm + start) against
+# the Cambium WHISP-BOX-MIBV2-MIB sweep scalars. The carve-out is
+# scoped to the writable seam — `WritableSnmpClient` Protocol +
+# `WritableV2CClient` / `WritableV3Client` adapters — and ONLY to
+# those three files. Every other `.py` file under `src/nora/drivers/`
+# still asserts zero `def set` / `def update` / etc.
+#
+# Adding a NEW file to this allow-list is a Driver-R2 violation and
+# must come with an updated ADR. Removing a file from this allow-list
+# is the same. Reviewers: if you see a PR touching this constant,
+# ask "why does this new file need a SET surface?"
+_WRITABLE_SEAM_FILES: frozenset[str] = frozenset(
+    {
+        "src/nora/drivers/snmp_pmp450i/client.py",
+        "src/nora/drivers/snmp_pmp450i/v2c.py",
+        "src/nora/drivers/snmp_pmp450i/v3.py",
+    }
+)
+
 
 # ---------------------------------------------------------------------------
 # Property test: SnmpClient's public method set is empty of write verbs
@@ -68,6 +88,22 @@ def _iter_python_files() -> list[Path]:
     return sorted((SRC_DIR / "drivers").rglob("*.py"))
 
 
+def _is_writable_seam_file(py_file: Path) -> bool:
+    """Return True iff `py_file` is in the Driver-R2 carve-out allow-list.
+
+    Path comparison is POSIX-relative (`PurePosixPath`) so the
+    comparison is robust to Windows separators on dev hosts.
+    """
+    try:
+        relative = py_file.resolve().relative_to(PROJECT_ROOT.resolve()).as_posix()
+    except ValueError:
+        # File lives outside the repo root — treat as not-in-allow-list
+        # so the AST / regex scans still flag it. This is defensive;
+        # `_iter_python_files` only descends under `SRC_DIR/drivers`.
+        return False
+    return relative in _WRITABLE_SEAM_FILES
+
+
 def _find_write_identifiers(py_file: Path) -> list[tuple[int, str, str]]:
     """Return list of (lineno, name_kind, identifier) for write verbs in `py_file`.
 
@@ -96,9 +132,22 @@ def _find_write_identifiers(py_file: Path) -> list[tuple[int, str, str]]:
 
 
 def test_no_write_identifiers_under_src_nora_drivers() -> None:
-    """AST scan over `src/nora/drivers/**/*.py` finds zero write identifiers."""
+    """AST scan over `src/nora/drivers/**/*.py` finds zero write identifiers.
+
+    Driver-R2 carve-out (issue #62, 2026-09-19): the writable seam
+    (`WritableSnmpClient` Protocol + `WritableV2CClient` /
+    `WritableV3Client` adapters) lives in three explicitly named files
+    enumerated in `_WRITABLE_SEAM_FILES`. Those three files are
+    EXEMPT from this scan; every other `.py` file under
+    `src/nora/drivers/` still asserts zero `def set` / `def update` /
+    etc. The base `SnmpClient` Protocol is NOT exempt — it remains
+    read-only at the type level (`test_snmp_client_protocol_exposes_no_write_verbs`
+    pins that property over `vars(SnmpClient)`).
+    """
     offenders: list[tuple[str, int, str, str]] = []
     for py in _iter_python_files():
+        if _is_writable_seam_file(py):
+            continue
         for lineno, kind, name in _find_write_identifiers(py):
             offenders.append((str(py), lineno, kind, name))
     assert offenders == [], (
@@ -113,10 +162,18 @@ def test_no_write_identifiers_in_attribute_paths() -> None:
     Belt-and-braces over the AST scan: matches the identifier on a line
     that does NOT start a definition, in case the AST walker misses an
     obscure construct (e.g. lambda bodies).
+
+    Same carve-out as the AST scan — the three writable-seam files in
+    `_WRITABLE_SEAM_FILES` are exempted because the adapters call
+    ``self._inner._call_async("set", ...)`` (an ``ast.Call`` whose
+    function is an ``ast.Name`` with id ``"set"``) and the driver
+    references ``client.set(oid, value)`` in docstrings + comments.
     """
     pattern = re.compile(r"\b(set|update|setbulk|bulk_set|write)\b\s*\(")
     offenders: list[tuple[str, int, str]] = []
     for py in _iter_python_files():
+        if _is_writable_seam_file(py):
+            continue
         for lineno, line in enumerate(py.read_text().splitlines(), start=1):
             stripped = line.lstrip()
             if stripped.startswith("def ") or stripped.startswith("async def "):

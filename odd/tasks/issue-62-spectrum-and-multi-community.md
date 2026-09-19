@@ -25,6 +25,7 @@ The two defects share no wire path or schema. We are implementing them as **two 
 | 3 | **Branch from `origin/main` (`fefd77d`); do NOT mix with `feat/icmp-stability-probe` WIP.** | Issue #61 has uncommitted dirty work on the current branch; #62 is a separate production incident with its own review budget. |
 | 4 | **Re-sign all 5 HMAC-signed catalogs after OID changes.** | Boot-time HMAC gate (`src/nora/drivers/oid_catalog.py:570`) fails closed on any tamper; the re-sign uses `Settings.nora_oid_catalog_signing_key`. New key ships with the feature; existing key stays valid for shipped envelopes only. |
 | 5 | **Tier of `snmp_run_spectrum_analysis` stays Tier-1.** | Even though the real protocol emits a SET, the SET is bounded (duration + arm + start, no frequency change) and recovers to idle without side effects; the Tier-1 `operator_confirmed` gate already in place is sufficient. No HITL token required. |
+| 8 | **Driver-R2 carve-out for spectrum: new `WritableSnmpClient(Protocol)` + `WritableV2CClient` / `WritableV3Client` adapters + `_writable_client_factory` on the driver.** | Resolved 2026-09-19. The base `SnmpClient` Protocol stays read-only at the type level; the write capability is opt-in via the new Protocol. `V2CClient` and `V3Client` themselves stay read-only; the `Writable*` adapters wrap them and add `set(oid, value)` via `puresnmp.PyWrapper.set`. |
 | 6 | **Sweep timeout policy = hard fail with typed exception.** | Polling past `nora_spectrum_sweep_timeout_seconds` without reaching `0` (idle) raises `SpectrumSweepTimeout`; the result object still carries `scan_outcome="TIMEOUT"`, but the orchestrator receives the typed exception explicitly so it can retry or abort instead of silently consuming a partial sweep. |
 | 7 | **Branch strategy = clean checkout from `origin/main`, leave `#61` WIP alone.** | `git stash` on the single dirty file `odd/tasks/issue-61-icmp-stability-probe.md` (status-log update post-merge of #61 PR1..PR3) so the new branch starts clean. The stash is tagged `issue-62-branch-prep` and lives at `stash@{0}` for the user to `git stash pop` on return to `feat/icmp-stability-probe`. |
 
@@ -82,14 +83,28 @@ Each WU closes with one work-unit commit on the feature branch. WUs run sequenti
 - `pytest tests/` (full suite) — must pass except for the spectrum-related tests skipped with `@pytest.mark.skip(reason="WU-2 pending")`.
 - Built-in baseline catalogs are NOT out-of-band in the sense the prior ODD doc claimed — they live in `src/nora/data/oid-catalogs/` and ARE loaded at every install via `importlib.resources`. Re-signing them in WU-1 is required because the gate MUST stay consistent across both roots or every boot path crashes.
 
-### WU-2: Spectrum helper rewrite (`src/nora/drivers/snmp_pmp450i/spectrum.py`)
+### WU-2: Driver-R2 carve-out — WritableSnmpClient Protocol + factory
+
+The real Cambium sweep protocol requires SET frames (write duration, arm, start) which the read-only `SnmpClient` Protocol explicitly forbids. Carve a narrow seam:
 
 **Touch**:
-- `src/nora/drivers/snmp_pmp450i/spectrum.py` (full rewrite of `fetch_spectrum`)
-- `src/nora/config.py` (3 new `nora_spectrum_*` knobs + validator)
-- `src/nora/server.py` (`snmp_run_spectrum_analysis` signature — accept `sweep_duration_seconds: int | None = None`)
-- `tests/test_snmp_spectrum.py` (rewrite against the new protocol; **un-skip the WU-1 `@pytest.mark.skip` markers here**)
-- `tests/snmp_pmp450i/test_spectrum.py` (new or rewritten)
+- `src/nora/drivers/snmp_pmp450i/client.py` — add `WritableSnmpClient(Protocol)` extending `SnmpClient` with `set(oid: str, value: str | int) -> None`; document the carve-out in the module docstring
+- `src/nora/drivers/snmp_pmp450i/v2c.py` — add `WritableV2CClient` adapter that wraps a `V2CClient` and exposes `set(oid, value)` via `puresnmp.PyWrapper.set`
+- `src/nora/drivers/snmp_pmp450i/v3.py` — add `WritableV3Client` adapter wrapping `V3Client`
+- `src/nora/drivers/snmp_pmp450i/driver.py` — add `_writable_client_factory` parameter (defaults to a function that wraps the existing `default_client_factory` output in the right adapter)
+- `src/nora/drivers/snmp_pmp450i/__init__.py` — re-export `WritableSnmpClient`, `WritableV2CClient`, `WritableV3Client`
+- `tests/snmp_pmp450i/test_writable_client.py` (new) — covers the carve-out: Protocol runtime-checkable, adapter round-trips, base Protocol still read-only
+
+**Driver-R2 invariant preserved**: the base `SnmpClient` Protocol keeps its read-only docstring + the property test (`tests/test_driver_snmp_pmp450i_readonly.py` if present) still passes. The new `WritableSnmpClient` Protocol is opt-in: callers that need it import explicitly. `V2CClient` and `V3Client` stay read-only at the type level; the write capability lives on the `Writable*` adapter.
+
+### WU-3: Spectrum helper rewrite (`src/nora/drivers/snmp_pmp450i/spectrum.py`)
+
+**Touch**:
+- `src/nora/drivers/exceptions.py` — add `SpectrumSweepTimeout(DriverError)` carrying `device_id`, `duration_seconds`, `last_status`
+- `src/nora/drivers/snmp_pmp450i/spectrum.py` — full rewrite: replace `SpectrumAnalysis` with `SpectrumSweepResult`; `fetch_spectrum` performs SET duration → SET `8` (arm) → SET `1` (start) → GET-poll `.221.0` until `0` (idle) or `SpectrumSweepTimeout`; helpers `_arm_sweep(client, ...)`, `_poll_sweep_status(client, ...)`; Tier-1 `operator_confirmed` gate + maintenance-window guard preserved; uses `WritableSnmpClient` from WU-2
+- `src/nora/config.py` — 3 new knobs: `nora_spectrum_sweep_duration_seconds` (default 15), `nora_spectrum_sweep_poll_interval_seconds` (default 1.0), `nora_spectrum_sweep_timeout_seconds` (default 60); validator that bounds duration to [1, 600]
+- `src/nora/server.py` — `snmp_run_spectrum_analysis(device_id, operator_confirmed=False, sweep_duration_seconds: int | None = None)`; the new parameter overrides the Settings default when provided
+- `tests/test_snmp_spectrum.py` — rewrite against the new protocol; **un-skip the WU-1 `@pytest.mark.skip` markers**; uses a fake `WritableSnmpClient` that records SET/GET sequences
 
 **Change**:
 - Replace `SpectrumAnalysis` with `SpectrumSweepResult` (per decision #2).
