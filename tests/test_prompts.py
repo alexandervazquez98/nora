@@ -206,6 +206,121 @@ def test_registry_has_no_inotify_or_watchdog_dependency() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Issue #72 — Per-Tool MCP Prompt Exposure
+#
+# Asserts the 13 tool-specs under `docs/tool_specs/` are reachable via
+# `mcp.list_prompts()` AND that `_EXPOSED_PROMPTS` (the audit allow-list)
+# stays in sync with the registered `@mcp.prompt` functions.
+# ---------------------------------------------------------------------------
+
+
+def _shipped_tool_spec_names() -> set[str]:
+    """Return the basenames of every shipped tool-spec, excluding `README.md`.
+
+    Used by the issue #72 prompt-exposure tests so they auto-discover new
+    tool-specs added under `docs/tool_specs/` without needing the test
+    file to be edited.
+    """
+    specs_dir = Path(__file__).resolve().parent.parent / "docs" / "tool_specs"
+    return {p.stem for p in specs_dir.glob("*.md") if p.name != "README.md"}
+
+
+def test_server_exposes_all_tool_spec_prompts() -> None:
+    """All shipped tool-specs are reachable via `mcp.list_prompts()`.
+
+    Per `prompt-registry` *Per-Tool MCP Prompt Exposure* scenario "every
+    tool-spec is reachable via get_prompt".
+    """
+    import asyncio
+
+    from nora import server as server_mod
+
+    async def _names() -> set[str]:
+        prompts = await server_mod.mcp.list_prompts()
+        return {p.name for p in prompts}
+
+    names = asyncio.run(_names())
+    expected = _shipped_tool_spec_names()
+    missing = expected - names
+    assert not missing, (
+        f"Expected every shipped tool-spec to be exposed via @mcp.prompt; "
+        f"missing: {sorted(missing)}"
+    )
+
+
+def test_exposed_prompts_allowlist_matches_mcp_list_prompts() -> None:
+    """`_EXPOSED_PROMPTS` MUST exactly equal the set of registered @mcp.prompt names.
+
+    Per `prompt-registry` *Per-Tool MCP Prompt Exposure* scenario "boot
+    fails when a tool-spec is not exposed via @mcp.prompt". This test is
+    the contract: any drift between the allow-list and the registered
+    prompts fails the suite.
+    """
+    import asyncio
+
+    from nora import server as server_mod
+
+    async def _names() -> set[str]:
+        prompts = await server_mod.mcp.list_prompts()
+        return {p.name for p in prompts}
+
+    actual = asyncio.run(_names())
+    expected = set(server_mod._EXPOSED_PROMPTS)
+    assert actual == expected, (
+        f"_EXPOSED_PROMPTS ({sorted(expected)}) is out of sync with "
+        f"registered @mcp.prompt names ({sorted(actual)}); "
+        f"missing={sorted(expected - actual)}, extra={sorted(actual - expected)}"
+    )
+
+
+def test_tool_spec_prompt_body_matches_registry_body() -> None:
+    """Spot-check: 3 sampled tool-spec prompts return `PromptRegistry.get(name).body`.
+
+    Per `prompt-registry` *Per-Tool MCP Prompt Exposure* scenario
+    "tool-spec body equals registry body". A representative sample
+    (one Tier 0, one Tier 1, one Tier 2) covers all three governance
+    tiers without making the test exhaustive.
+    """
+    import asyncio
+
+    from nora import server as server_mod
+    from nora.prompts.registry import PromptRegistry
+
+    package_dir = Path(__file__).resolve().parent.parent / "src" / "nora" / "prompts"
+    specs_dir = Path(__file__).resolve().parent.parent / "docs" / "tool_specs"
+    registry = PromptRegistry.scan([package_dir, specs_dir])
+
+    previous = server_mod._current_prompt_registry  # type: ignore[attr-defined]
+    try:
+        server_mod.set_prompt_registry(registry)
+
+        # Tier 0, Tier 1, Tier 2 — covers all governance branches.
+        sampled = (
+            "snmp_get_pmp450i_radio_metrics",  # tier 0
+            "snmp_run_spectrum_analysis",  # tier 1
+            "snmp_reboot_radio",  # tier 2
+        )
+
+        async def _bodies() -> dict[str, str]:
+            # FastMCP 3.x: `mcp.get_prompt(name)` returns the prompt
+            # definition (a `FunctionPrompt`); `mcp.render_prompt(name)`
+            # returns the rendered `PromptResult` with `.messages[0].content.text`.
+            return {
+                name: (await server_mod.mcp.render_prompt(name)).messages[0].content.text
+                for name in sampled
+            }
+
+        bodies = asyncio.run(_bodies())
+        for name in sampled:
+            assert bodies[name] == registry.get(name).body, (
+                f"@mcp.prompt {name!r} returned body that does not match "
+                f"PromptRegistry.get({name!r}).body byte-for-byte"
+            )
+    finally:
+        server_mod._current_prompt_registry = previous  # type: ignore[attr-defined]
+
+
+# ---------------------------------------------------------------------------
 # Negative coverage — registry env-var surface
 # ---------------------------------------------------------------------------
 
@@ -728,4 +843,8 @@ __all__ = [
     "test_every_tool_spec_declares_tier",
     "test_tool_spec_metadata_exposes_tier_and_prerequisites",
     "test_tool_spec_validator_enforces_uses_operator_confirmed_equals_for_tier_1",
+    # Issue #72 — per-tool MCP prompt exposure
+    "test_server_exposes_all_tool_spec_prompts",
+    "test_exposed_prompts_allowlist_matches_mcp_list_prompts",
+    "test_tool_spec_prompt_body_matches_registry_body",
 ]
