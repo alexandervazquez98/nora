@@ -557,3 +557,106 @@ def mcp_http_client(mcp_http_server: tuple[str, int, subprocess.Popen[bytes]]) -
     """Per-test JSON-RPC client over the shared HTTP MCP server."""
     host, port, _proc = mcp_http_server
     return McpHttpClient(f"http://{host}:{port}/mcp")
+
+
+@pytest.fixture(scope="session")
+def mcp_stdio_server(
+    worker_id: str, tmp_path_factory: pytest.TempPathFactory
+) -> Iterator[subprocess.Popen[bytes]]:
+    """One nora-mcp subprocess per pytest-xdist worker, sharing stdio across tests.
+
+    Mirrors `mcp_http_server` but uses stdio transport (the default for
+    `nora-mcp`). Each worker boots exactly one `nora-mcp` process on a
+    hermetic tmp tree; tests in the same worker share the proc and pay
+    only the JSON-RPC round-trip cost per assertion.
+
+    Cleanup: terminate the process, wait up to 5s, then SIGKILL on
+    timeout. Drain stderr so the parent runner doesn't see a broken-
+    pipe warning at fixture teardown.
+
+    Tests that assert on stdout/stderr framing of the subprocess (e.g.
+    `test_subprocess_keeps_stdout_reserved_for_jsonrpc`,
+    `test_subprocess_emits_structured_startup_log_on_stderr`,
+    `intervention_writer/test_stdio_smoke.py`) MUST NOT use this fixture;
+    they need a fresh subprocess per test to assert on per-boot framing.
+    """
+    from nora.data import BUILTIN_BASELINE_SIGNING_KEY
+
+    project_root = Path(__file__).resolve().parent.parent
+    venv_py = project_root / ".venv" / "bin" / "python"
+    if not venv_py.exists():
+        pytest.skip("venv python not present")
+    py = str(venv_py)
+
+    # Per-worker tmp dir so parallel workers don't collide on catalogs /
+    # devices.yaml.
+    tmp = tmp_path_factory.mktemp(f"mcp_stdio_{worker_id}")
+    (tmp / "catalogs").mkdir(exist_ok=True)
+    (tmp / "devices.yaml").write_text("# empty hermetic inventory\n")
+
+    env = {
+        **os.environ,
+        "NORA_OID_CATALOG_SIGNING_KEY": BUILTIN_BASELINE_SIGNING_KEY,
+        "NORA_OID_CATALOGS_PATH": str(tmp / "catalogs"),
+        "NORA_DEVICES_INVENTORY_PATH": str(tmp / "devices.yaml"),
+        "NORA_MCP_TRANSPORT": "stdio",
+    }
+
+    proc = subprocess.Popen(
+        [
+            py,
+            "-m",
+            "nora.cli",
+            "--transport=stdio",
+        ],
+        cwd=str(project_root),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        bufsize=0,
+    )
+
+    # Wait for the server to be ready by probing `initialize`. FastMCP's
+    # stdio server is "ready" the moment the subprocess boots; we just
+    # need to make sure it didn't crash on startup. Poll briefly with
+    # `initialize`; if it responds, the server is up.
+    ready_deadline = time.monotonic() + 10.0
+    while time.monotonic() < ready_deadline:
+        if proc.poll() is not None:
+            err = b""
+            try:
+                assert proc.stderr is not None
+                err = proc.stderr.read() or b""
+            except Exception:
+                pass
+            pytest.fail(
+                f"nora-mcp exited before ready (rc={proc.returncode}); "
+                f"stderr: {err.decode(errors='replace')!r}"
+            )
+        try:
+            client = McpStdioClient(proc)
+            client.initialize()
+            break
+        except Exception:
+            time.sleep(0.1)
+    else:
+        proc.kill()
+        proc.wait()
+        pytest.fail("nora-mcp never responded to initialize within 10s")
+
+    try:
+        yield proc
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+        try:
+            assert proc.stderr is not None
+            proc.stderr.read()
+        except Exception:
+            pass
