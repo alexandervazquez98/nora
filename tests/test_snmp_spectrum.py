@@ -33,11 +33,16 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 import yaml
 
+import nora.drivers.snmp_pmp450i.spectrum_http as _spectrum_http_module
 from nora.config import Settings
-from nora.drivers.exceptions import SnmpTimeoutError
+from nora.drivers.exceptions import (
+    SnmpTimeoutError,
+    SpectrumHttpFetchError,
+)
 from nora.drivers.inventory import Inventory
 from nora.drivers.oid_catalog import OidCatalog, OidCatalogRegistry
 
@@ -64,6 +69,19 @@ def _build_inventory(tmp_path: Path) -> Inventory:
     inv_path = tmp_path / "devices.yaml"
     inv_path.write_text(yaml.safe_dump(payload))
     return Inventory.from_yaml(inv_path)
+
+
+def _load_fixture_xml() -> str:
+    """Load the hermetic Cambium spectrum XML fixture (issue #70 WU-2).
+
+    Reads ``tests/data/fixtures/spectrum/pmp450i_spectrum_sample.xml``
+    verbatim so the 8 WU-2 tests share the same fixture as
+    ``tests/test_snmp_spectrum_http.py`` (32 bins across 8 unique
+    frequencies, cleanest = 3560.0 MHz).
+    """
+    return (
+        Path(__file__).parent / "data" / "fixtures" / "spectrum" / "pmp450i_spectrum_sample.xml"
+    ).read_text(encoding="utf-8")
 
 
 def _radio_seed_oids() -> dict[str, str]:
@@ -231,12 +249,95 @@ def _build_driver(
     )
 
 
+class _FakeUncloseableHttpClient(httpx.Client):
+    """``httpx.Client`` subclass whose ``close()`` is a no-op.
+
+    Issue #70 / WU-2: ``fetch_spectrum_xml`` owns the client it
+    creates inside its retry loop (``owns_client = http_client is None``)
+    and closes it after every attempt. When tests monkey-patch
+    ``httpx.Client`` to return a single shared fake, the first
+    attempt closes the fake client and subsequent attempts (e.g.
+    per-SM GETs in the post-sweep ladder) hit
+    ``RuntimeError("Cannot send a request, as the client has been closed.")``.
+    Overriding ``close()`` to a no-op keeps the fake reusable across
+    the AP + SM ladder steps within a single test invocation.
+    """
+
+    def close(self) -> None:
+        # Intentionally a no-op so monkey-patched clients survive
+        # the ladder's per-attempt close calls.
+        return
+
+
+def _build_fake_http_client(
+    *,
+    ap_xml: str | None = None,
+    ap_error: Exception | None = None,
+    sm_xml: dict[str, str] | None = None,
+) -> httpx.Client:
+    """Build a one-shot ``httpx.Client`` wired to ``httpx.MockTransport``.
+
+    Issue #70 / WU-2: used by the post-sweep ladder tests to keep the
+    HTTP fetch hermetic (no real network). The handler recognises
+    ``192.0.2.10`` as the AP host and any SM host in ``sm_xml`` as an
+    SM. If ``ap_error`` is set, the AP GET raises it on every
+    attempt (used by the failure-path tests). If a SM host is
+    requested but absent from ``sm_xml``, the SM GET raises
+    :class:`SpectrumHttpFetchError` with ``status_code=404`` so the
+    caller's non-fatal handler records it as a one-line diagnostic.
+
+    The returned client is an
+    :class:`_FakeUncloseableHttpClient` so the ladder's per-attempt
+    ``close()`` calls do not invalidate it for the next attempt.
+    """
+    sm_xml = sm_xml or {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if ap_error is not None and "192.0.2.10" in url:
+            raise ap_error
+        for sm_host, payload in sm_xml.items():
+            if sm_host in url:
+                return httpx.Response(200, text=payload)
+        if "192.0.2.10" in url:
+            if ap_xml is None:
+                return httpx.Response(404, text="not found")
+            return httpx.Response(200, text=ap_xml)
+        raise SpectrumHttpFetchError(
+            host=url,
+            status_code=404,
+            attempts=1,
+            message=f"unexpected URL in fake HTTP client: {url}",
+        )
+
+    return _FakeUncloseableHttpClient(
+        transport=httpx.MockTransport(handler),
+        timeout=5.0,
+    )
+
+
 def _settings_no_window() -> Settings:
-    """Build a hermetic Settings with no maintenance window enforced."""
+    """Build a hermetic Settings with no maintenance window enforced.
+
+    Issue #70 / WU-2: the test suite has ``final_status == 4`` paths
+    that trigger the post-sweep HTTP ladder. The TEST-NET-1 host
+    (``192.0.2.10``) is unreachable from the test runner, so each
+    default-configured ladder makes 6 attempts (1 + 5 retries) × 10s
+    timeout = ~60s + 5 × 3s inter-attempt delays = ~75s of wall
+    time per test. We keep the validation bounds sane (retry delay
+    must be ``>= 0.1``, max retries must be ``>= 0``) and pick the
+    minimum values the validator accepts. Tests that DEPEND on the
+    ladder's behaviour override these (the 8 WU-2 tests inject a
+    fake transport or set high retry budgets).
+    """
     return Settings(
         _env_file=None,
         _env_file_encoding=None,
         nora_maintenance_window_minutes=0,
+        nora_spectrum_http_timeout_seconds=1.0,
+        nora_spectrum_http_max_retries=0,
+        nora_spectrum_http_retry_delay_seconds=0.1,
+        nora_spectrum_sm_reassociation_timeout_seconds=1.0,
     )
 
 
@@ -590,7 +691,10 @@ def test_spectrum_sweep_duration_seconds_override_is_honored(tmp_path: Path) -> 
     driver = _build_driver(inventory=inv, registry=registry, fake_client=fake)
 
     # Settings default is 15 (explicit, NOT the field default of 30).
-    # The override of 2 wins.
+    # The override of 2 wins. Issue #70 / WU-2: ``final_status == 4``
+    # triggers the post-sweep HTTP ladder; we minimise its retry /
+    # timeout so the unreachable TEST-NET-1 host cannot blow the
+    # test runtime.
     settings = Settings(
         _env_file=None,
         _env_file_encoding=None,
@@ -598,6 +702,10 @@ def test_spectrum_sweep_duration_seconds_override_is_honored(tmp_path: Path) -> 
         nora_spectrum_sweep_duration_seconds=15,
         nora_spectrum_sweep_poll_interval_seconds=0.05,
         nora_spectrum_sweep_timeout_seconds=10,
+        nora_spectrum_http_timeout_seconds=1.0,
+        nora_spectrum_http_max_retries=0,
+        nora_spectrum_http_retry_delay_seconds=0.1,
+        nora_spectrum_sm_reassociation_timeout_seconds=1.0,
     )
 
     result = fetch_spectrum(
@@ -1025,6 +1133,16 @@ def test_sweep_does_not_complete_before_hardware_tdd_flush(tmp_path: Path) -> No
         nora_maintenance_window_minutes=0,
         nora_spectrum_sweep_poll_interval_seconds=0.2,
         nora_spectrum_sweep_timeout_seconds=10,
+        # Issue #70 / WU-2: ``final_status == 4`` triggers the
+        # post-sweep HTTP ladder. The TEST-NET-1 host (192.0.2.10)
+        # is unreachable from the test runner, so we minimise the
+        # ladder's HTTP retry/timeout to keep this guard-semantics
+        # test within its ``elapsed < 5.0`` upper bound. The ladder
+        # is non-fatal — it just records the failure in
+        # ``post_sweep_error`` and returns empty bin fields.
+        nora_spectrum_http_timeout_seconds=1.0,
+        nora_spectrum_http_max_retries=0,
+        nora_spectrum_http_retry_delay_seconds=0.1,
     )
 
     start = time.monotonic()
@@ -1051,7 +1169,8 @@ def test_sweep_does_not_complete_before_hardware_tdd_flush(tmp_path: Path) -> No
         f"helper returned too early at {elapsed:.2f}s; the scaled "
         f"guard `elapsed >= sweep_duration_seconds` was bypassed"
     )
-    # Did not approach the 10s timeout.
+    # Did not approach the 10s timeout (sweep) OR the post-sweep
+    # ladder's 1.0s HTTP timeout (WU-2 — see Settings above).
     assert elapsed < 5.0, f"helper took {elapsed:.2f}s — should not approach the 10s timeout"
     # The helper polled well past the 1.0s pre-state 4 window (which
     # would have tripped the old 1.0s floor) AND past the scaled
@@ -1099,6 +1218,12 @@ def test_sweep_guard_waits_full_sweep_duration_before_completion(tmp_path: Path)
         nora_maintenance_window_minutes=0,
         nora_spectrum_sweep_poll_interval_seconds=0.05,
         nora_spectrum_sweep_timeout_seconds=10,
+        # Issue #70 / WU-2: keep the post-sweep HTTP ladder from
+        # blocking on the unreachable TEST-NET-1 host (192.0.2.10)
+        # so the scaled-guard elapsed-time upper bound holds.
+        nora_spectrum_http_timeout_seconds=1.0,
+        nora_spectrum_http_max_retries=0,
+        nora_spectrum_http_retry_delay_seconds=0.1,
     )
 
     start = time.monotonic()
@@ -1118,6 +1243,8 @@ def test_sweep_guard_waits_full_sweep_duration_before_completion(tmp_path: Path)
         f"helper returned too early at {elapsed:.2f}s; the scaled "
         f"`elapsed >= sweep_duration_seconds` guard was bypassed"
     )
+    # Did not approach the 10s sweep timeout OR the 1.0s post-sweep
+    # HTTP ladder timeout (WU-2 — see Settings above).
     assert elapsed < 5.0, f"helper took {elapsed:.2f}s — should not approach the 10s timeout"
     # Helper polled enough times to reach the scaled guard.
     assert len(fake.get_calls) >= 40, (
@@ -1156,6 +1283,14 @@ def test_sweep_guard_scales_with_sweep_duration_seconds(tmp_path: Path) -> None:
         nora_maintenance_window_minutes=0,
         nora_spectrum_sweep_poll_interval_seconds=0.05,
         nora_spectrum_sweep_timeout_seconds=10,
+        # Issue #70 / WU-2: see Settings note in
+        # ``test_sweep_does_not_complete_before_hardware_tdd_flush``
+        # — minimise the post-sweep HTTP ladder so the unreachable
+        # TEST-NET-1 host cannot blow past this test's
+        # ``elapsed < 6.0`` upper bound.
+        nora_spectrum_http_timeout_seconds=1.0,
+        nora_spectrum_http_max_retries=0,
+        nora_spectrum_http_retry_delay_seconds=0.1,
     )
 
     start = time.monotonic()
@@ -1228,6 +1363,14 @@ def test_sweep_driver_error_mid_poll_is_swallowed(tmp_path: Path) -> None:
         nora_maintenance_window_minutes=0,
         nora_spectrum_sweep_poll_interval_seconds=0.05,
         nora_spectrum_sweep_timeout_seconds=10,
+        # Issue #70 / WU-2: see Settings note in
+        # ``test_sweep_does_not_complete_before_hardware_tdd_flush`` —
+        # keep the post-sweep HTTP ladder from blocking on the
+        # unreachable TEST-NET-1 host.
+        nora_spectrum_http_timeout_seconds=1.0,
+        nora_spectrum_http_max_retries=0,
+        nora_spectrum_http_retry_delay_seconds=0.1,
+        nora_spectrum_sm_reassociation_timeout_seconds=1.0,
     )
 
     start = time.monotonic()
@@ -1258,7 +1401,335 @@ def test_sweep_driver_error_mid_poll_is_swallowed(tmp_path: Path) -> None:
     assert fake.closed is True
 
 
+# ---------------------------------------------------------------------------
+# Issue #70 / WU-2 — post-sweep HTTP fetch + XML parse ladder
+#
+# These tests pin the WU-2 contract:
+#   - ``final_status == 4`` triggers the HTTP ladder (AP XML + optional
+#     SM hosts; parse + noise-floor + ranking).
+#   - ``final_status`` in ``{0, 3}`` SKIPS the ladder entirely.
+#   - Any HTTP / parse failure is NON-FATAL — the sweep outcome stays
+#     COMPLETED, the bin fields go to empty, and ``post_sweep_error``
+#     captures a one-line diagnostic.
+# Zero-Leakage: only TEST-NET-1 (``192.0.2.x``) host literals.
+# ---------------------------------------------------------------------------
+
+
+def _raising_httpx_client(*_args: Any, **_kwargs: Any) -> httpx.Client:
+    """Sentinel replacement for ``httpx.Client`` used to assert the ladder didn't run.
+
+    Any call into ``fetch_spectrum_xml`` (which constructs
+    ``httpx.Client(...)`` when no ``http_client`` is passed) raises
+    ``RuntimeError`` so a leaked ladder trips the test loudly instead
+    of silently hitting the network.
+    """
+    raise RuntimeError("post-sweep HTTP ladder must not run")
+
+
+def test_post_sweep_ladder_populates_noise_and_ranking_on_sentinel_4(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``final_status == 4`` runs the ladder and populates bins + ranking.
+
+    Issue #70 / WU-2: the helper writes ``ranked_clean_frequencies``
+    and ``noise_floor_dbm`` from the parsed AP XML. The fixture's
+    cleanest freq is 3560.0 MHz (worst-leg avg ``-81`` dBm across the
+    V/H legs).
+    """
+    from nora.drivers.snmp_pmp450i.spectrum import (
+        SpectrumSweepResult,
+        fetch_spectrum,
+    )
+
+    inv = _build_inventory(tmp_path)
+    registry = _build_catalog(firmware="15.2.1", include_spectrum_oids=True)
+    fake = _FakeWritableSnmpClient(get_responses=[5, 4])
+    driver = _build_driver(inventory=inv, registry=registry, fake_client=fake)
+    settings = _settings_no_window()
+
+    fake_http = _build_fake_http_client(ap_xml=_load_fixture_xml())
+    monkeypatch.setattr(_spectrum_http_module.httpx, "Client", lambda **kw: fake_http)
+
+    result = fetch_spectrum(
+        driver=driver,
+        device_id="ap-7400-01",
+        settings=settings,
+        operator_confirmed=True,
+        sweep_duration_seconds=2,
+    )
+
+    assert isinstance(result, SpectrumSweepResult)
+    assert result.scan_outcome == "COMPLETED"
+    assert result.final_status == 4
+    assert result.post_sweep_error == ""
+    # Fixture has 8 unique frequencies × 4 series each; top-N=10 keeps
+    # all 8.
+    assert len(result.ranked_clean_frequencies) == 8
+    assert len(result.noise_floor_dbm) == 8
+    # Cleanest = 3560.0 MHz (worst-leg avg = -81 dBm); see fixture.
+    assert result.ranked_clean_frequencies[0] == 3560.0
+
+
+def test_post_sweep_ladder_skipped_on_sentinel_3_idle_no_results(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sentinel 3 (``idleNoSpectrumAnalysis``) SKIPS the ladder entirely.
+
+    The sweep ran but produced no usable results; the ladder would
+    only fetch garbage or 404. The helper returns empty bin fields
+    with ``post_sweep_error == ""`` and never invokes ``httpx.Client``.
+    """
+    from nora.drivers.snmp_pmp450i.spectrum import fetch_spectrum
+
+    inv = _build_inventory(tmp_path)
+    registry = _build_catalog(firmware="15.2.1", include_spectrum_oids=True)
+    fake = _FakeWritableSnmpClient(get_responses=[5, 3])
+    driver = _build_driver(inventory=inv, registry=registry, fake_client=fake)
+    settings = _settings_no_window()
+
+    monkeypatch.setattr(_spectrum_http_module.httpx, "Client", _raising_httpx_client)
+
+    result = fetch_spectrum(
+        driver=driver,
+        device_id="ap-7400-01",
+        settings=settings,
+        operator_confirmed=True,
+        sweep_duration_seconds=2,
+    )
+
+    assert result.scan_outcome == "COMPLETED"
+    assert result.final_status == 3
+    assert result.ranked_clean_frequencies == []
+    assert result.noise_floor_dbm == {}
+    assert result.post_sweep_error == ""
+
+
+def test_post_sweep_ladder_skipped_on_sentinel_0_defensive_abort(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sentinel 0 (defensive) SKIPS the ladder too — no fetch, no error."""
+    from nora.drivers.snmp_pmp450i.spectrum import fetch_spectrum
+
+    inv = _build_inventory(tmp_path)
+    registry = _build_catalog(firmware="15.2.1", include_spectrum_oids=True)
+    fake = _FakeWritableSnmpClient(get_responses=[5, 0])
+    driver = _build_driver(inventory=inv, registry=registry, fake_client=fake)
+    settings = _settings_no_window()
+
+    monkeypatch.setattr(_spectrum_http_module.httpx, "Client", _raising_httpx_client)
+
+    result = fetch_spectrum(
+        driver=driver,
+        device_id="ap-7400-01",
+        settings=settings,
+        operator_confirmed=True,
+        sweep_duration_seconds=2,
+    )
+
+    assert result.scan_outcome == "COMPLETED"
+    assert result.final_status == 0
+    assert result.ranked_clean_frequencies == []
+    assert result.noise_floor_dbm == {}
+    assert result.post_sweep_error == ""
+
+
+def test_post_sweep_ladder_http_failure_is_non_fatal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transport failure on the AP fetch is NON-FATAL.
+
+    The helper catches :class:`SpectrumHttpFetchError` /
+    :class:`SpectrumXmlParseError` and folds them into
+    ``post_sweep_error``. The sweep outcome stays COMPLETED so the
+    orchestrator can distinguish "sweep ran fine, bin decode
+    failed" from :class:`SpectrumSweepTimeout` (sweep itself timed
+    out).
+    """
+    from nora.drivers.snmp_pmp450i.spectrum import fetch_spectrum
+
+    inv = _build_inventory(tmp_path)
+    registry = _build_catalog(firmware="15.2.1", include_spectrum_oids=True)
+    fake = _FakeWritableSnmpClient(get_responses=[5, 4])
+    driver = _build_driver(inventory=inv, registry=registry, fake_client=fake)
+    settings = _settings_no_window()
+
+    fake_http = _build_fake_http_client(ap_error=httpx.ConnectError("refused"))
+    monkeypatch.setattr(_spectrum_http_module.httpx, "Client", lambda **kw: fake_http)
+
+    result = fetch_spectrum(
+        driver=driver,
+        device_id="ap-7400-01",
+        settings=settings,
+        operator_confirmed=True,
+        sweep_duration_seconds=2,
+    )
+
+    assert result.scan_outcome == "COMPLETED"
+    assert result.final_status == 4
+    assert result.ranked_clean_frequencies == []
+    assert result.noise_floor_dbm == {}
+    assert result.post_sweep_error != ""
+    assert "192.0.2.10" in result.post_sweep_error
+
+
+def test_post_sweep_ladder_xml_parse_failure_is_non_fatal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An XML payload that fails parsing is NON-FATAL.
+
+    The fake HTTP client returns 200 with body ``"<Other/>"``, which
+    the :func:`parse_spectrum_xml` helper rejects with
+    :class:`SpectrumXmlParseError` (root element is not
+    ``<Spectrum_Analyzer>``). The helper folds the error into
+    ``post_sweep_error`` and returns empty bin fields.
+    """
+    from nora.drivers.snmp_pmp450i.spectrum import fetch_spectrum
+
+    inv = _build_inventory(tmp_path)
+    registry = _build_catalog(firmware="15.2.1", include_spectrum_oids=True)
+    fake = _FakeWritableSnmpClient(get_responses=[5, 4])
+    driver = _build_driver(inventory=inv, registry=registry, fake_client=fake)
+    settings = _settings_no_window()
+
+    fake_http = _build_fake_http_client(ap_xml="<Other/>")
+    monkeypatch.setattr(_spectrum_http_module.httpx, "Client", lambda **kw: fake_http)
+
+    result = fetch_spectrum(
+        driver=driver,
+        device_id="ap-7400-01",
+        settings=settings,
+        operator_confirmed=True,
+        sweep_duration_seconds=2,
+    )
+
+    assert result.scan_outcome == "COMPLETED"
+    assert result.final_status == 4
+    assert result.post_sweep_error != ""
+    assert result.ranked_clean_frequencies == []
+    assert result.noise_floor_dbm == {}
+
+
+def test_post_sweep_ladder_with_sm_hosts_fetches_sequentially(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two SM hosts are fetched in order; bins aggregate; ranking picks cleanest.
+
+    Both SM hosts return the same fixture XML as the AP, so the
+    aggregated bins produce 8 unique frequency keys (the noise-floor
+    helper picks the worst-leg per frequency, not the union).
+    """
+    from nora.drivers.snmp_pmp450i.spectrum import fetch_spectrum
+
+    inv = _build_inventory(tmp_path)
+    registry = _build_catalog(firmware="15.2.1", include_spectrum_oids=True)
+    fake = _FakeWritableSnmpClient(get_responses=[5, 4])
+    driver = _build_driver(inventory=inv, registry=registry, fake_client=fake)
+    # NB: ``nora_spectrum_sm_reassociation_timeout_seconds=1.0`` is
+    # the minimum the validator allows (the spec's default is 15s);
+    # ``time.sleep`` is monkey-patched to a no-op below so the helper
+    # still spends zero wall time on the wait.
+    settings = _settings_no_window()
+
+    fixture_xml = _load_fixture_xml()
+    fake_http = _build_fake_http_client(
+        ap_xml=fixture_xml,
+        sm_xml={
+            "192.0.2.21": fixture_xml,
+            "192.0.2.22": fixture_xml,
+        },
+    )
+    monkeypatch.setattr(_spectrum_http_module.httpx, "Client", lambda **kw: fake_http)
+    monkeypatch.setattr("time.sleep", lambda _seconds: None)
+
+    result = fetch_spectrum(
+        driver=driver,
+        device_id="ap-7400-01",
+        settings=settings,
+        operator_confirmed=True,
+        sweep_duration_seconds=2,
+        sm_hosts=["192.0.2.21", "192.0.2.22"],
+    )
+
+    assert result.scan_outcome == "COMPLETED"
+    assert result.final_status == 4
+    assert result.post_sweep_error == ""
+    # Noise floor collapses across the 3 hosts to 8 unique freq keys.
+    assert len(result.noise_floor_dbm) == 8
+    # Cleanest freq (worst-leg avg) survives the aggregation.
+    assert result.ranked_clean_frequencies[0] == 3560.0
+
+
+def test_post_sweep_ladder_sm_host_failure_still_uses_ap_data(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An SM-host failure is recorded but does NOT discard the AP bins."""
+    from nora.drivers.snmp_pmp450i.spectrum import fetch_spectrum
+
+    inv = _build_inventory(tmp_path)
+    registry = _build_catalog(firmware="15.2.1", include_spectrum_oids=True)
+    fake = _FakeWritableSnmpClient(get_responses=[5, 4])
+    driver = _build_driver(inventory=inv, registry=registry, fake_client=fake)
+    settings = _settings_no_window()
+
+    # SM host ``192.0.2.21`` is NOT in ``sm_xml``, so the fake handler
+    # raises :class:`SpectrumHttpFetchError` (status=404) for that URL
+    # — the helper's non-fatal catch folds it into ``post_sweep_error``.
+    fake_http = _build_fake_http_client(ap_xml=_load_fixture_xml(), sm_xml={})
+    monkeypatch.setattr(_spectrum_http_module.httpx, "Client", lambda **kw: fake_http)
+    monkeypatch.setattr("time.sleep", lambda _seconds: None)
+
+    result = fetch_spectrum(
+        driver=driver,
+        device_id="ap-7400-01",
+        settings=settings,
+        operator_confirmed=True,
+        sweep_duration_seconds=2,
+        sm_hosts=["192.0.2.21"],
+    )
+
+    assert result.scan_outcome == "COMPLETED"
+    assert result.final_status == 4
+    # AP bins drive the ranking — the SM failure is recorded but
+    # does NOT discard AP data.
+    assert len(result.ranked_clean_frequencies) == 8
+    assert len(result.noise_floor_dbm) == 8
+    assert result.ranked_clean_frequencies[0] == 3560.0
+    # Diagnostic surfaces the offending SM host.
+    assert result.post_sweep_error != ""
+    assert "192.0.2.21" in result.post_sweep_error
+
+
+def test_post_sweep_error_default_is_empty_string() -> None:
+    """``SpectrumSweepResult.post_sweep_error`` defaults to ``""``."""
+    from nora.drivers.snmp_pmp450i.spectrum import SpectrumSweepResult
+
+    result = SpectrumSweepResult(
+        device_id="192.0.2.10",
+        scan_started_at="2026-09-19T00:00:00+00:00",
+        scan_completed_at="2026-09-19T00:00:30+00:00",
+        sweep_duration_seconds=30,
+        final_status=4,
+        scan_outcome="COMPLETED",
+    )
+    assert result.post_sweep_error == ""
+
+
 __all__ = [
+    "test_post_sweep_ladder_populates_noise_and_ranking_on_sentinel_4",
+    "test_post_sweep_ladder_skipped_on_sentinel_3_idle_no_results",
+    "test_post_sweep_ladder_skipped_on_sentinel_0_defensive_abort",
+    "test_post_sweep_ladder_http_failure_is_non_fatal",
+    "test_post_sweep_ladder_xml_parse_failure_is_non_fatal",
+    "test_post_sweep_ladder_with_sm_hosts_fetches_sequentially",
+    "test_post_sweep_ladder_sm_host_failure_still_uses_ap_data",
+    "test_post_sweep_error_default_is_empty_string",
     "test_spectrum_happy_path_runs_set_then_poll_returns_completed",
     "test_spectrum_timeout_raises_spectrum_sweep_timeout",
     # Tier-1 gate

@@ -307,10 +307,7 @@ def parse_spectrum_xml(xml_text: str) -> list[SpectrumBin]:
 
     if root.tag != _SPECTRUM_ANALYZER_ROOT:
         raise SpectrumXmlParseError(
-            message=(
-                f"unexpected root element <{root.tag}>; "
-                f"expected <{_SPECTRUM_ANALYZER_ROOT}>"
-            ),
+            message=(f"unexpected root element <{root.tag}>; expected <{_SPECTRUM_ANALYZER_ROOT}>"),
             line=0,
         )
 
@@ -336,8 +333,7 @@ def parse_spectrum_xml(xml_text: str) -> list[SpectrumBin]:
             if len(parts) != 2:
                 raise SpectrumXmlParseError(
                     message=(
-                        f"<Freq f={f_attr_stripped!r}> must be "
-                        f"'<freq_mhz> <polarization>' (V or H)"
+                        f"<Freq f={f_attr_stripped!r}> must be '<freq_mhz> <polarization>' (V or H)"
                     ),
                     line=0,
                 )

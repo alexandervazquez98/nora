@@ -38,6 +38,19 @@ _BANNED_MODULES: tuple[str, ...] = (
     "aiohttp",
 )
 
+# Issue #70 / WU-1 — the post-sweep HTTP fetch is the ONE exception
+# to the driver-layer air-gap. Cambium PMP 450i radios expose
+# `SpectrumAnalysis.xml` only over plain HTTP on their web root, and
+# the spectrum sweep helper MUST reach it to populate the
+# ranked_clean_frequencies + noise_floor_dbm fields. The whitelist
+# is keyed by file path RELATIVE TO PROJECT ROOT and lists the
+# modules that file may import. Any new HTTP-using module MUST be
+# added here explicitly (not blanket-permitted) so the air-gap
+# enforcement stays surgical.
+_AIRGAP_EXCEPTIONS: dict[str, frozenset[str]] = {
+    "src/nora/drivers/snmp_pmp450i/spectrum_http.py": frozenset({"httpx"}),
+}
+
 
 def _iter_python_files() -> list[Path]:
     files: list[Path] = []
@@ -49,7 +62,15 @@ def _iter_python_files() -> list[Path]:
 
 
 def _find_banned_imports(py_file: Path) -> list[tuple[int, str, str]]:
-    """Return list of (lineno, import_type, module) for banned imports."""
+    """Return list of (lineno, import_type, module) for banned imports.
+
+    Files in :data:`_AIRGAP_EXCEPTIONS` are exempt from the check for
+    the specific modules they declare; any other banned import in
+    those files still flags. New files MUST be added to the whitelist
+    explicitly — there is no blanket HTTP egress permission.
+    """
+    rel_path = py_file.relative_to(PROJECT_ROOT).as_posix()
+    allowed_for_file = _AIRGAP_EXCEPTIONS.get(rel_path, frozenset())
     src = py_file.read_text()
     tree = ast.parse(src)
     offenders: list[tuple[int, str, str]] = []
@@ -57,12 +78,16 @@ def _find_banned_imports(py_file: Path) -> list[tuple[int, str, str]]:
         if isinstance(node, ast.Import):
             for alias in node.names:
                 top = alias.name.split(".")[0]
+                if top in allowed_for_file:
+                    continue
                 if any(top == m.split(".")[0] for m in _BANNED_MODULES):
                     offenders.append((node.lineno, "import", alias.name))
         elif isinstance(node, ast.ImportFrom):
             if node.module is None:
                 continue
             top = node.module.split(".")[0]
+            if top in allowed_for_file:
+                continue
             if any(top == m.split(".")[0] for m in _BANNED_MODULES):
                 offenders.append((node.lineno, "importfrom", node.module))
     return offenders
@@ -102,11 +127,22 @@ def test_resolver_path_is_in_ast_walked_set() -> None:
 
 
 def test_no_banned_dotted_attribute_paths() -> None:
-    """Inline references to `urllib.request.urlopen(...)` etc. are banned."""
+    """Inline references to `urllib.request.urlopen(...)` etc. are banned.
+
+    The dotted-path gate is module-scope: each file gets its own
+    :data:`_AIRGAP_EXCEPTIONS` whitelist. ``spectrum_http.py`` may
+    reference ``httpx`` (the post-sweep HTTP fetch); every other
+    driver / prompt file MUST NOT name any banned module as a bare
+    identifier.
+    """
     offenders: list[tuple[str, int, str]] = []
     for py in _iter_python_files():
+        rel_path = py.relative_to(PROJECT_ROOT).as_posix()
+        allowed_for_file = _AIRGAP_EXCEPTIONS.get(rel_path, frozenset())
         text = py.read_text()
         for mod in _BANNED_MODULES:
+            if mod in allowed_for_file:
+                continue
             pattern = re.compile(rf"\b{re.escape(mod)}\b")
             for m in pattern.finditer(text):
                 line_no = text[: m.start()].count("\n") + 1

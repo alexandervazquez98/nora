@@ -299,9 +299,7 @@ def test_parse_spectrum_xml_malformed_xml_raises() -> None:
 def test_parse_spectrum_xml_missing_freq_avg_attribute_raises() -> None:
     """A ``<Freq>`` missing the ``avg`` attribute → ``SpectrumXmlParseError``."""
     with pytest.raises(SpectrumXmlParseError):
-        parse_spectrum_xml(
-            '<Spectrum_Analyzer><Freq f="3500.0 V" max="-68" /></Spectrum_Analyzer>'
-        )
+        parse_spectrum_xml('<Spectrum_Analyzer><Freq f="3500.0 V" max="-68" /></Spectrum_Analyzer>')
 
 
 def test_parse_spectrum_xml_unexpected_root_raises() -> None:

@@ -93,10 +93,19 @@ from pydantic import BaseModel, ConfigDict, Field
 from nora.drivers.exceptions import (
     DriverError,
     MaintenanceWindowViolation,
+    SpectrumHttpFetchError,
     SpectrumSweepTimeout,
+    SpectrumXmlParseError,
     Tier1ClearanceRequired,
 )
 from nora.drivers.snmp_pmp450i.client import SnmpClient, WritableSnmpClient
+from nora.drivers.snmp_pmp450i.spectrum_http import (
+    SpectrumBin,
+    fetch_spectrum_xml,
+    noise_floor_per_channel,
+    parse_spectrum_xml,
+    rank_clean_frequencies,
+)
 
 if TYPE_CHECKING:
     from nora.config import Settings
@@ -157,8 +166,15 @@ class SpectrumSweepResult(BaseModel):
       - scan_outcome: COMPLETED | TIMEOUT | ABORTED.
       - ranked_clean_frequencies: empty list in WU-3 (real per-bin
         noise decoding is a future slice); kept as a field so the
-        schema is stable for that follow-up.
-      - noise_floor_dbm: empty dict in WU-3 (same reason).
+        schema is stable for that follow-up; populated by WU-2 on
+        a sweep that completed with ``final_status == 4``.
+      - noise_floor_dbm: empty dict in WU-3 (same reason); populated
+        by WU-2 on a sweep that completed with ``final_status == 4``.
+      - post_sweep_error: empty string on a clean sweep; one-line
+        diagnostic on a sweep that completed with ``final_status == 4``
+        but the post-sweep HTTP fetch + XML parse ladder failed
+        non-fatally (the sweep outcome stays COMPLETED — only the
+        bin decode could not be performed).
     """
 
     model_config = ConfigDict(frozen=True)
@@ -171,6 +187,15 @@ class SpectrumSweepResult(BaseModel):
     scan_outcome: ScanOutcome
     ranked_clean_frequencies: list[float] = Field(default_factory=list)
     noise_floor_dbm: dict[str, float] = Field(default_factory=dict)
+    # Issue #70 / WU-2: non-fatal error from the post-sweep HTTP fetch
+    # + XML parse ladder. Empty string when the ladder succeeded OR
+    # when the sweep sentinel was 0 / 3 (defensive / no-results — the
+    # ladder is skipped). Populated with a one-line diagnostic when
+    # the ladder ran but failed (network unreachable, XML malformed,
+    # or one or more SM hosts failed). The sweep outcome itself is
+    # still COMPLETED — the operator sees the sweep ran but the bin
+    # decode could not be performed.
+    post_sweep_error: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -273,6 +298,125 @@ def _poll_sweep_status(
     return last_status
 
 
+def _fetch_and_populate_post_sweep(
+    *,
+    ap_host: str,
+    sm_hosts: list[str] | None,
+    settings: "Settings | None",
+) -> tuple[list[float], dict[str, float], str]:
+    """Run the post-sweep HTTP ladder and populate the RF bin fields.
+
+    Ladder (issue #70):
+
+      1. GET ``http://{ap_host}/SpectrumAnalysis.xml`` with bounded
+         retry / timeout (``nora_spectrum_http_*`` Settings).
+      2. If ``sm_hosts`` is non-empty, sleep
+         ``nora_spectrum_sm_reassociation_timeout_seconds`` (the SMs
+         need to re-associate after the sector-coordinated sweep),
+         then GET each SM's XML.
+      3. Parse every payload via :func:`parse_spectrum_xml`; aggregate
+         the bins across AP + SMs.
+      4. Compute :func:`noise_floor_per_channel` (per-channel
+         worst-leg avg_dbm) and :func:`rank_clean_frequencies`
+         (top-N worst-case-min-first).
+
+    Failure policy: ANY exception raised by the HTTP fetch ladder OR
+    the XML parser is NON-FATAL — the helper returns empty lists /
+    dicts and a one-line diagnostic string. The sweep itself is
+    already COMPLETED; the operator sees the sweep ran fine but the
+    bin decode could not be performed, and the diagnostic points at
+    the first failure (network unreachable, XML malformed, etc.).
+
+    Returns ``(ranked_clean_frequencies, noise_floor_dbm, post_sweep_error)``.
+    """
+    if settings is None:
+        http_timeout_seconds = 10.0
+        http_max_retries = 5
+        http_retry_delay_seconds = 3.0
+        sm_reassoc_seconds = 15.0
+        ranking_top_n = 10
+    else:
+        http_timeout_seconds = float(getattr(settings, "nora_spectrum_http_timeout_seconds", 10.0))
+        http_max_retries = int(getattr(settings, "nora_spectrum_http_max_retries", 5))
+        http_retry_delay_seconds = float(
+            getattr(settings, "nora_spectrum_http_retry_delay_seconds", 3.0)
+        )
+        sm_reassoc_seconds = float(
+            getattr(settings, "nora_spectrum_sm_reassociation_timeout_seconds", 15.0)
+        )
+        ranking_top_n = int(getattr(settings, "nora_spectrum_ranking_top_n", 10))
+
+    ap_error: str = ""
+    ap_xml: str | None = None
+    try:
+        ap_xml = fetch_spectrum_xml(
+            ap_host,
+            timeout_seconds=http_timeout_seconds,
+            max_retries=http_max_retries,
+            retry_delay_seconds=http_retry_delay_seconds,
+        )
+    except (SpectrumHttpFetchError, SpectrumXmlParseError) as exc:
+        ap_error = f"ap={ap_host!r}: {exc}"
+        logger.warning(
+            "post-sweep AP XML fetch failed; "
+            "sweep outcome stays COMPLETED with empty bin fields: %s",
+            ap_error,
+        )
+
+    if ap_xml is None or ap_error:
+        return ([], {}, ap_error)
+
+    try:
+        ap_bins = parse_spectrum_xml(ap_xml)
+    except SpectrumXmlParseError as exc:
+        err = f"ap={ap_host!r} parse: {exc}"
+        logger.warning("post-sweep AP XML parse failed: %s", err)
+        return ([], {}, err)
+
+    all_bins: list[SpectrumBin] = list(ap_bins)
+    sm_error: str = ""
+
+    if sm_hosts:
+        # Sleep once for SM re-association. Bounded to >= 0 so a
+        # misconfigured negative Settings value cannot corrupt the
+        # helper. The bound check is also enforced in
+        # _validate_spectrum_http_settings.
+        sleep_seconds = max(0.0, float(sm_reassoc_seconds))
+        if sleep_seconds > 0:
+            time.sleep(sleep_seconds)
+
+        for sm_host in sm_hosts:
+            if not sm_host:
+                continue
+            try:
+                sm_xml = fetch_spectrum_xml(
+                    sm_host,
+                    timeout_seconds=http_timeout_seconds,
+                    max_retries=http_max_retries,
+                    retry_delay_seconds=http_retry_delay_seconds,
+                )
+                sm_bins = parse_spectrum_xml(sm_xml)
+            except (SpectrumHttpFetchError, SpectrumXmlParseError) as exc:
+                sm_error = (
+                    f"sm={sm_host!r}: {exc}"
+                    if not sm_error
+                    else f"{sm_error}; sm={sm_host!r}: {exc}"
+                )
+                logger.warning(
+                    "post-sweep SM XML fetch/parse failed (continuing with partial data): %s",
+                    exc,
+                )
+                continue
+            all_bins.extend(sm_bins)
+
+    if not all_bins:
+        return ([], {}, "")
+
+    noise = noise_floor_per_channel(all_bins)
+    ranked = rank_clean_frequencies(all_bins, top_n=ranking_top_n)
+    return (ranked, noise, sm_error)
+
+
 # ---------------------------------------------------------------------------
 # Public helpers — issue #62 / WU-3
 # ---------------------------------------------------------------------------
@@ -285,8 +429,31 @@ def fetch_spectrum(
     settings: "Settings | None" = None,
     operator_confirmed: bool = False,
     sweep_duration_seconds: int | None = None,
+    sm_hosts: list[str] | None = None,
 ) -> SpectrumSweepResult:
     """Run the real Cambium sweep: SET duration → SET 8 → SET 1 → GET-poll until completion.
+
+    Issue #70 / WU-2: after a successful sweep (final_status in
+    ``{3, 4}``), the helper runs a post-sweep HTTP fetch ladder:
+
+      1. ``final_status == 4`` only — the ladder is skipped for
+         ``0`` (defensive abort) and ``3`` (idle, no results).
+      2. AP XML: ``fetch_spectrum_xml(host)`` with bounded retry /
+         timeout (``Settings.nora_spectrum_http_*``).
+      3. ``sm_hosts``: if non-None and non-empty, sleep
+         ``Settings.nora_spectrum_sm_reassociation_timeout_seconds``
+         (the SMs need to re-associate), then sequentially fetch
+         each SM's XML.
+      4. Parse every XML via ``parse_spectrum_xml``; aggregate bins.
+      5. Compute ``noise_floor_dbm`` + ``ranked_clean_frequencies``.
+      6. Any HTTP / parse failure is NON-FATAL — the result carries
+         a one-line diagnostic in ``post_sweep_error`` and the sweep
+         outcome stays COMPLETED.
+
+    Parameters (added in WU-2):
+      * ``sm_hosts``: list of SM IPv4 literals (TEST-NET-1 / RFC 5737
+        only at the inventory layer). ``None`` (default) skips the SM
+        ladder — only the AP XML is fetched. Empty list also skips.
 
     Gates (preserve existing behavior):
       1. Tier-1 operator_confirmed gate FIRST (raises Tier1ClearanceRequired).
@@ -429,6 +596,21 @@ def fetch_spectrum(
             last_status=last_status,
         )
 
+    # Issue #70 / WU-2: post-sweep HTTP ladder runs ONLY when the
+    # sweep produced usable results. Sentinel 0 (defensive abort)
+    # and 3 (idle, no results) skip the ladder; only sentinel 4
+    # (idle, results available) triggers the fetch.
+    ranked: list[float] = []
+    noise: dict[str, float] = {}
+    post_sweep_error = ""
+    if last_status == 4:
+        ap_host = str(getattr(device, "host", device_id))
+        ranked, noise, post_sweep_error = _fetch_and_populate_post_sweep(
+            ap_host=ap_host,
+            sm_hosts=sm_hosts,
+            settings=settings,
+        )
+
     return SpectrumSweepResult(
         device_id=str(getattr(device, "host", device_id)),
         scan_started_at=now.isoformat(),
@@ -436,8 +618,9 @@ def fetch_spectrum(
         sweep_duration_seconds=effective_duration,
         final_status=last_status,  # now actually 0/3/4, not always 0
         scan_outcome="COMPLETED",
-        ranked_clean_frequencies=[],
-        noise_floor_dbm={},
+        ranked_clean_frequencies=ranked,
+        noise_floor_dbm=noise,
+        post_sweep_error=post_sweep_error,
     )
 
 
@@ -448,5 +631,6 @@ __all__ = [
     "ScanOutcome",
     "_arm_sweep",
     "_poll_sweep_status",
+    "_fetch_and_populate_post_sweep",
     "_SWEEP_COMPLETION_STATUSES",
 ]
