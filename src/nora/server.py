@@ -788,7 +788,24 @@ def snmp_reboot_radio(
 # in sync with the `@mcp.prompt` registrations below; the constant exists so
 # readers can audit "what is published to MCP clients" without grepping
 # decorators.
-_EXPOSED_PROMPTS: tuple[str, ...] = ("netops_orchestrator", "snmp_pmp450i")
+_EXPOSED_PROMPTS: tuple[str, ...] = (
+    "netops_orchestrator",
+    "snmp_pmp450i",
+    "correlate_sector_interference",
+    "get_device_lifecycle_summary",
+    "icmp_list_probe_runs",
+    "save_intervention_record",
+    "search_intervention_history",
+    "snmp_get_ap_summary",
+    "snmp_get_frame_utilization",
+    "snmp_get_pmp450i_radio_metrics",
+    "snmp_get_sm_detailed_diagnostics",
+    "snmp_get_sm_table",
+    "snmp_migrate_radio_frequency",
+    "snmp_reboot_radio",
+    "snmp_run_spectrum_analysis",
+    "nora_get_tool_spec",  # NEW: meta-tool bridge
+)
 
 
 @mcp.prompt
@@ -801,6 +818,119 @@ def netops_orchestrator() -> str:
 def snmp_pmp450i() -> str:
     """PMP 450i SNMP driver operator-facing system prompt."""
     return get_prompt_registry().get("snmp_pmp450i").body
+
+
+# ---------------------------------------------------------------------------
+# Meta-tool: spec lookup bridge.
+#
+# Lets the LLM follow §7 of `netops_orchestrator.md` from any MCP client,
+# including clients that do NOT surface `prompts/get` as a callable tool.
+# Internally delegates to the same `PromptRegistry` as the `@mcp.prompt`
+# wrappers below, so the source of truth is one and the same.
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool
+def nora_get_tool_spec(name: str) -> str:
+    """Return the canonical Markdown body of the named NORA tool-spec.
+
+    The orchestrator (netops_orchestrator.md §7) directs the LLM to call
+    this tool BEFORE invoking any other `@mcp.tool`, so the precise
+    parameter contract, tier classification, and governance protocol are
+    resolved at runtime rather than guessed from prior knowledge. Returns
+    the same body that `prompts/get` would surface to clients that bridge
+    prompts into tools.
+    """
+    return get_prompt_registry().get(name).body
+
+
+# Tool-spec prompts — one thin wrapper per `docs/tool_specs/<tool>.md`.
+# The LLM resolves tool → spec at runtime via `get_prompt(name=<tool>)`
+# before invoking the corresponding `@mcp.tool` (per `prompt-registry`
+# spec, *Per-Tool MCP Prompt Exposure* requirement). The docstring tier
+# tag is the single source of truth surfaced to Open WebUI's prompt list.
+@mcp.prompt(name="correlate_sector_interference")
+def _correlate_sector_interference_spec() -> str:
+    """Tool spec for correlate_sector_interference (Tier 1)."""
+    return get_prompt_registry().get("correlate_sector_interference").body
+
+
+@mcp.prompt(name="get_device_lifecycle_summary")
+def _get_device_lifecycle_summary_spec() -> str:
+    """Tool spec for get_device_lifecycle_summary (Tier 1)."""
+    return get_prompt_registry().get("get_device_lifecycle_summary").body
+
+
+@mcp.prompt(name="icmp_list_probe_runs")
+def _icmp_list_probe_runs_spec() -> str:
+    """Tool spec for icmp_list_probe_runs (Tier 1)."""
+    return get_prompt_registry().get("icmp_list_probe_runs").body
+
+
+@mcp.prompt(name="save_intervention_record")
+def _save_intervention_record_spec() -> str:
+    """Tool spec for save_intervention_record (Tier 0)."""
+    return get_prompt_registry().get("save_intervention_record").body
+
+
+@mcp.prompt(name="search_intervention_history")
+def _search_intervention_history_spec() -> str:
+    """Tool spec for search_intervention_history (Tier 1)."""
+    return get_prompt_registry().get("search_intervention_history").body
+
+
+@mcp.prompt(name="snmp_get_ap_summary")
+def _snmp_get_ap_summary_spec() -> str:
+    """Tool spec for snmp_get_ap_summary (Tier 0)."""
+    return get_prompt_registry().get("snmp_get_ap_summary").body
+
+
+@mcp.prompt(name="snmp_get_frame_utilization")
+def _snmp_get_frame_utilization_spec() -> str:
+    """Tool spec for snmp_get_frame_utilization (Tier 0)."""
+    return get_prompt_registry().get("snmp_get_frame_utilization").body
+
+
+@mcp.prompt(name="snmp_get_pmp450i_radio_metrics")
+def _snmp_get_pmp450i_radio_metrics_spec() -> str:
+    """Tool spec for snmp_get_pmp450i_radio_metrics (Tier 0)."""
+    return get_prompt_registry().get("snmp_get_pmp450i_radio_metrics").body
+
+
+@mcp.prompt(name="snmp_get_sm_detailed_diagnostics")
+def _snmp_get_sm_detailed_diagnostics_spec() -> str:
+    """Tool spec for snmp_get_sm_detailed_diagnostics (Tier 0)."""
+    return get_prompt_registry().get("snmp_get_sm_detailed_diagnostics").body
+
+
+@mcp.prompt(name="snmp_get_sm_table")
+def _snmp_get_sm_table_spec() -> str:
+    """Tool spec for snmp_get_sm_table (Tier 0)."""
+    return get_prompt_registry().get("snmp_get_sm_table").body
+
+
+@mcp.prompt(name="snmp_migrate_radio_frequency")
+def _snmp_migrate_radio_frequency_spec() -> str:
+    """Tool spec for snmp_migrate_radio_frequency (Tier 2)."""
+    return get_prompt_registry().get("snmp_migrate_radio_frequency").body
+
+
+@mcp.prompt(name="snmp_reboot_radio")
+def _snmp_reboot_radio_spec() -> str:
+    """Tool spec for snmp_reboot_radio (Tier 2)."""
+    return get_prompt_registry().get("snmp_reboot_radio").body
+
+
+@mcp.prompt(name="snmp_run_spectrum_analysis")
+def _snmp_run_spectrum_analysis_spec() -> str:
+    """Tool spec for snmp_run_spectrum_analysis (Tier 1)."""
+    return get_prompt_registry().get("snmp_run_spectrum_analysis").body
+
+
+@mcp.prompt(name="nora_get_tool_spec")
+def _nora_get_tool_spec_spec() -> str:
+    """Tool spec for nora_get_tool_spec (Tier 0)."""
+    return get_prompt_registry().get("nora_get_tool_spec").body
 
 
 # ---------------------------------------------------------------------------
@@ -928,6 +1058,16 @@ _ALLOWED_UNCATALOGUED_TOOLS: frozenset[str] = frozenset(
         # coverage. See the deferred-tier-classification note near
         # `_EXPECTED_TOOL_TIERS` for the related follow-up.
         "hitl_mint_token",
+        # PR #73 review follow-up — meta-tool: spec lookup bridge.
+        # The `nora_get_tool_spec` tool exposes the in-memory
+        # `PromptRegistry` over MCP; it has no OID catalog envelope
+        # and never will (it consumes the registry, not SNMP). The
+        # allow-list entry keeps the boot-time tool-registration
+        # guard green; the tier-classification guard
+        # (`verify_tools_have_tier_classification`) skips it because
+        # it is absent from `_EXPECTED_TOOL_TIERS` (the canonical
+        # 3-tier taxonomy applies to wire-affecting operators).
+        "nora_get_tool_spec",
         # Issue #42 / `2026-09-15-register-device-mcp`: both
         # `register_device` and `snmp_get_pmp450i_radio_metrics` were
         # retired from this allow-list once their catalog envelope

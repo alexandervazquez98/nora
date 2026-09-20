@@ -206,6 +206,310 @@ def test_registry_has_no_inotify_or_watchdog_dependency() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Issue #72 — Per-Tool MCP Prompt Exposure
+#
+# Asserts the 13 tool-specs under `docs/tool_specs/` are reachable via
+# `mcp.list_prompts()` AND that `_EXPOSED_PROMPTS` (the audit allow-list)
+# stays in sync with the registered `@mcp.prompt` functions.
+# ---------------------------------------------------------------------------
+
+
+def _shipped_tool_spec_names() -> set[str]:
+    """Return the basenames of every shipped tool-spec, excluding `README.md`.
+
+    Used by the issue #72 prompt-exposure tests so they auto-discover new
+    tool-specs added under `docs/tool_specs/` without needing the test
+    file to be edited.
+    """
+    specs_dir = Path(__file__).resolve().parent.parent / "docs" / "tool_specs"
+    return {p.stem for p in specs_dir.glob("*.md") if p.name != "README.md"}
+
+
+def test_server_exposes_all_tool_spec_prompts() -> None:
+    """All shipped tool-specs are reachable via `mcp.list_prompts()`.
+
+    Per `prompt-registry` *Per-Tool MCP Prompt Exposure* scenario "every
+    tool-spec is reachable via get_prompt".
+    """
+    import asyncio
+
+    from nora import server as server_mod
+
+    async def _names() -> set[str]:
+        prompts = await server_mod.mcp.list_prompts()
+        return {p.name for p in prompts}
+
+    names = asyncio.run(_names())
+    expected = _shipped_tool_spec_names()
+    missing = expected - names
+    assert not missing, (
+        f"Expected every shipped tool-spec to be exposed via @mcp.prompt; "
+        f"missing: {sorted(missing)}"
+    )
+
+
+def test_exposed_prompts_allowlist_matches_mcp_list_prompts() -> None:
+    """`_EXPOSED_PROMPTS` MUST exactly equal the set of registered @mcp.prompt names.
+
+    Per `prompt-registry` *Per-Tool MCP Prompt Exposure* scenario "boot
+    fails when a tool-spec is not exposed via @mcp.prompt". This test is
+    the contract: any drift between the allow-list and the registered
+    prompts fails the suite.
+    """
+    import asyncio
+
+    from nora import server as server_mod
+
+    async def _names() -> set[str]:
+        prompts = await server_mod.mcp.list_prompts()
+        return {p.name for p in prompts}
+
+    actual = asyncio.run(_names())
+    expected = set(server_mod._EXPOSED_PROMPTS)
+    assert actual == expected, (
+        f"_EXPOSED_PROMPTS ({sorted(expected)}) is out of sync with "
+        f"registered @mcp.prompt names ({sorted(actual)}); "
+        f"missing={sorted(expected - actual)}, extra={sorted(actual - expected)}"
+    )
+
+
+def test_tool_spec_prompt_body_matches_registry_body() -> None:
+    """Spot-check: 3 sampled tool-spec prompts return `PromptRegistry.get(name).body`.
+
+    Per `prompt-registry` *Per-Tool MCP Prompt Exposure* scenario
+    "tool-spec body equals registry body". A representative sample
+    (one Tier 0, one Tier 1, one Tier 2) covers all three governance
+    tiers without making the test exhaustive.
+    """
+    import asyncio
+
+    from nora import server as server_mod
+    from nora.prompts.registry import PromptRegistry
+
+    package_dir = Path(__file__).resolve().parent.parent / "src" / "nora" / "prompts"
+    specs_dir = Path(__file__).resolve().parent.parent / "docs" / "tool_specs"
+    registry = PromptRegistry.scan([package_dir, specs_dir])
+
+    previous = server_mod._current_prompt_registry  # type: ignore[attr-defined]
+    try:
+        server_mod.set_prompt_registry(registry)
+
+        # Tier 0, Tier 1, Tier 2 — covers all governance branches.
+        sampled = (
+            "snmp_get_pmp450i_radio_metrics",  # tier 0
+            "snmp_run_spectrum_analysis",  # tier 1
+            "snmp_reboot_radio",  # tier 2
+        )
+
+        async def _bodies() -> dict[str, str]:
+            # FastMCP 3.x: `mcp.get_prompt(name)` returns the prompt
+            # definition (a `FunctionPrompt`); `mcp.render_prompt(name)`
+            # returns the rendered `PromptResult` with `.messages[0].content.text`.
+            return {
+                name: (await server_mod.mcp.render_prompt(name)).messages[0].content.text
+                for name in sampled
+            }
+
+        bodies = asyncio.run(_bodies())
+        for name in sampled:
+            assert bodies[name] == registry.get(name).body, (
+                f"@mcp.prompt {name!r} returned body that does not match "
+                f"PromptRegistry.get({name!r}).body byte-for-byte"
+            )
+    finally:
+        server_mod._current_prompt_registry = previous  # type: ignore[attr-defined]
+
+
+def test_orchestrator_prompt_directs_llm_to_read_spec_before_invoke() -> None:
+    """`netops_orchestrator.md` MUST teach the LLM to call
+    `get_prompt(name=<tool>)` before invoking tools.
+
+    Per `prompt-registry` *Orchestrator Prompt Body Augmentation*
+    requirement and issue #72 canonical prompt source layer. The orchestrator
+    prompt is the system context the LLM plans against; without explicit
+    guidance to read the per-tool spec, the LLM falls back to vague prior
+    knowledge and skips the governance contract.
+    """
+    package_dir = Path(__file__).resolve().parent.parent / "src" / "nora" / "prompts"
+    text = (package_dir / "netops_orchestrator.md").read_text()
+
+    # Pattern: the orchestrator body must mention the MCP prompt-call shape.
+    assert "get_prompt(name=" in text, (
+        "Orchestrator prompt must teach the LLM to call `get_prompt(name=<tool>)` "
+        "before invoking tools; pattern `get_prompt(name=` not found in body."
+    )
+    # Mandatory language: must or shall or required.
+    lower = text.lower()
+    assert any(token in lower for token in ("must ", "shall ", "mandatory")), (
+        "Orchestrator prompt must use mandatory language when describing the spec lookup."
+    )
+
+
+def test_orchestrator_prompt_names_all_shipped_tool_specs() -> None:
+    """`netops_orchestrator.md` references every shipped `docs/tool_specs/<tool>.md` by name.
+
+    Per `prompt-registry` *Orchestrator Prompt Body Augmentation*. Each
+    tool's tier classification must be reachable from the body so the LLM
+    can resolve tool → tier → spec lookup chain without leaving the prompt.
+    """
+    package_dir = Path(__file__).resolve().parent.parent / "src" / "nora" / "prompts"
+    text = (package_dir / "netops_orchestrator.md").read_text()
+
+    expected = _shipped_tool_spec_names()
+    missing = {n for n in expected if n not in text}
+    assert not missing, (
+        f"Orchestrator prompt must reference every shipped tool by name; missing: {sorted(missing)}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# PR #73 review follow-up — meta-tool bridge for spec lookup.
+#
+# Asserts `nora_get_tool_spec` is reachable from any MCP client that
+# exposes the tool-calling schema, regardless of whether the client
+# bridges `prompts/get` into a callable tool. Closes the PR #73 review
+# finding on `feat/prompt-spec-exposure`.
+# ---------------------------------------------------------------------------
+
+
+def test_nora_get_tool_spec_is_registered_as_tool() -> None:
+    """`nora_get_tool_spec` MUST appear in `mcp.list_tools()` so standard MCP clients expose it.
+
+    Per `prompt-registry` *Tool-Bridged Spec Lookup* requirement (PR #73
+    review feedback). Without this assertion the bridge tool could be
+    added but invisible to clients that do not bridge `prompts/get`.
+    """
+    import asyncio
+
+    from nora import server as server_mod
+
+    async def _names() -> set[str]:
+        tools = await server_mod.mcp.list_tools()
+        return {t.name for t in tools}
+
+    names = asyncio.run(_names())
+    assert "nora_get_tool_spec" in names, (
+        f"Expected nora_get_tool_spec in mcp.list_tools(); got: {sorted(names)}"
+    )
+
+
+def test_nora_get_tool_spec_returns_registry_body() -> None:
+    """Calling `nora_get_tool_spec(name)` returns `PromptRegistry.get(name).body` byte-for-byte.
+
+    Per `prompt-registry` *Tool-Bridged Spec Lookup* requirement. Spot-
+    checked across all 3 tiers to confirm governance payloads surface
+    identically through the tool and the registry.
+    """
+    import asyncio
+    from pathlib import Path
+
+    from fastmcp import Client
+
+    from nora import server as server_mod
+    from nora.prompts.registry import PromptRegistry
+
+    package_dir = Path(__file__).resolve().parent.parent / "src" / "nora" / "prompts"
+    specs_dir = Path(__file__).resolve().parent.parent / "docs" / "tool_specs"
+    registry = PromptRegistry.scan([package_dir, specs_dir])
+
+    previous = server_mod._current_prompt_registry  # type: ignore[attr-defined]
+    try:
+        server_mod.set_prompt_registry(registry)
+
+        sampled = (
+            "snmp_get_pmp450i_radio_metrics",  # tier 0
+            "snmp_run_spectrum_analysis",  # tier 1
+            "snmp_reboot_radio",  # tier 2
+            "nora_get_tool_spec",  # the meta-tool itself (tier 0)
+        )
+
+        async def _bodies() -> dict[str, str]:
+            async with Client(server_mod.mcp) as client:
+                return {
+                    name: (await client.call_tool("nora_get_tool_spec", {"name": name})).data
+                    for name in sampled
+                }
+
+        bodies = asyncio.run(_bodies())
+        for name in sampled:
+            assert bodies[name] == registry.get(name).body, (
+                f"nora_get_tool_spec({name!r}) returned body that does not "
+                f"match PromptRegistry.get({name!r}).body byte-for-byte"
+            )
+    finally:
+        server_mod._current_prompt_registry = previous  # type: ignore[attr-defined]
+
+
+def test_nora_get_tool_spec_raises_on_unknown_name() -> None:
+    """Calling `nora_get_tool_spec` with an unknown name surfaces `PromptNotFoundError`.
+
+    Per `prompt-registry` *Tool-Bridged Spec Lookup* requirement. The
+    registry fail-closed contract MUST propagate through the bridge tool
+    so the LLM cannot fabricate specs for unregistered names.
+    """
+    import asyncio
+    from pathlib import Path
+
+    from fastmcp import Client
+
+    from nora import server as server_mod
+    from nora.prompts.registry import PromptRegistry
+
+    package_dir = Path(__file__).resolve().parent.parent / "src" / "nora" / "prompts"
+    specs_dir = Path(__file__).resolve().parent.parent / "docs" / "tool_specs"
+    registry = PromptRegistry.scan([package_dir, specs_dir])
+
+    previous = server_mod._current_prompt_registry  # type: ignore[attr-defined]
+    try:
+        server_mod.set_prompt_registry(registry)
+
+        async def _call_unknown() -> None:
+            async with Client(server_mod.mcp) as client:
+                await client.call_tool("nora_get_tool_spec", {"name": "no_such_tool_xyz"})
+
+        # The bridge MUST raise — the test will fail if it silently returns
+        # an empty body or a fabricated spec. The exact exception class
+        # depends on how FastMCP wraps registry errors at the tool
+        # boundary; accept any exception whose message references the bad
+        # name, since `PromptNotFoundError` may be wrapped by FastMCP's
+        # tool error path.
+        with pytest.raises(Exception) as exc:
+            asyncio.run(_call_unknown())
+        # The exception message MUST reference the bad name OR mention the
+        # registry. Accept either signal.
+        msg = str(exc.value).lower()
+        assert (
+            "no_such_tool_xyz" in str(exc.value).lower()
+            or "promptnotfounderror" in msg
+            or "not found" in msg
+        ), f"Expected exception referencing the unknown name; got: {exc.value!r}"
+    finally:
+        server_mod._current_prompt_registry = previous  # type: ignore[attr-defined]
+
+
+def test_nora_get_tool_spec_prompt_is_registered() -> None:
+    """`nora_get_tool_spec` is also exposed via `@mcp.prompt` for symmetry.
+
+    Per `prompt-registry` *Per-Tool MCP Prompt Exposure* requirement.
+    Both the tool AND the prompt expose the same registry body, so
+    clients bridging prompts into tools AND clients that don't get a
+    consistent answer.
+    """
+    import asyncio
+
+    from nora import server as server_mod
+
+    async def _names() -> set[str]:
+        prompts = await server_mod.mcp.list_prompts()
+        return {p.name for p in prompts}
+
+    names = asyncio.run(_names())
+    assert "nora_get_tool_spec" in names, (
+        f"Expected nora_get_tool_spec in mcp.list_prompts(); got: {sorted(names)}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Negative coverage — registry env-var surface
 # ---------------------------------------------------------------------------
 
@@ -728,4 +1032,15 @@ __all__ = [
     "test_every_tool_spec_declares_tier",
     "test_tool_spec_metadata_exposes_tier_and_prerequisites",
     "test_tool_spec_validator_enforces_uses_operator_confirmed_equals_for_tier_1",
+    # Issue #72 — per-tool MCP prompt exposure
+    "test_exposed_prompts_allowlist_matches_mcp_list_prompts",
+    "test_orchestrator_prompt_directs_llm_to_read_spec_before_invoke",
+    "test_orchestrator_prompt_names_all_shipped_tool_specs",
+    "test_server_exposes_all_tool_spec_prompts",
+    "test_tool_spec_prompt_body_matches_registry_body",
+    # PR #73 follow-up — meta-tool bridge for spec lookup
+    "test_nora_get_tool_spec_is_registered_as_tool",
+    "test_nora_get_tool_spec_prompt_is_registered",
+    "test_nora_get_tool_spec_raises_on_unknown_name",
+    "test_nora_get_tool_spec_returns_registry_body",
 ]

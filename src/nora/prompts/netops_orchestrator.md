@@ -77,7 +77,7 @@ Every NORA MCP tool is classified into one of three Service-Impact Tiers per iss
 ### Tier 0 — Passive Telemetry (Read-Only)
 **Governance policy:** **Direct Execution** — the orchestrator may invoke these tools immediately without operator interaction.
 
-Tools: `snmp_get_ap_summary`, `snmp_get_sm_table`, `snmp_get_pmp450i_radio_metrics`, `snmp_get_frame_utilization`, `snmp_get_sm_detailed_diagnostics`, `search_intervention_history`, `get_device_lifecycle_summary`, `correlate_sector_interference`.
+Tools: `correlate_sector_interference`, `get_device_lifecycle_summary`, `icmp_list_probe_runs`, `nora_get_tool_spec`, `search_intervention_history`, `snmp_get_ap_summary`, `snmp_get_frame_utilization`, `snmp_get_pmp450i_radio_metrics`, `snmp_get_sm_detailed_diagnostics`, `snmp_get_sm_table`.
 
 These tools are non-disruptive; they never emit SNMP SET frames. The existing catalog-sanitizer-error surface is the only gate.
 
@@ -91,7 +91,7 @@ The wire field `operator_confirmed: bool` defaults to `False` (fail-closed). On 
 ### Tier 2 — Service-Affecting Mutations (Write / Config)
 **Governance policy:** **Strict HITL Gate** — halt. A valid ticket + maintenance window + cryptographic HITL approval token is required. The token is HMAC-SHA256-signed via `nora hitl mint --operator-id <id> --ttl-seconds <n>` and verified with `hmac.compare_digest` (constant-time, prevents timing oracles against the operator's signing key).
 
-Tools: `snmp_migrate_radio_frequency`, `save_intervention_record`.
+Tools: `save_intervention_record`, `snmp_migrate_radio_frequency`, `snmp_reboot_radio`.
 
 On any token failure (missing, expired, kill-switched, signature mismatch, legacy stub without `signature`), the server raises `AutonomousMutationRejected` with the literal message `autonomous device mutation rejected: HITL approval token required` BEFORE any SNMP SET frame.
 
@@ -101,4 +101,18 @@ On any token failure (missing, expired, kill-switched, signature mismatch, legac
 2. **Tier 1**: present the operator-clearance prompt first; only invoke with `operator_confirmed=True` after explicit consent.
 3. **Tier 2**: mint a fresh token via `nora hitl mint --operator-id <operator_id> --ttl-seconds 900`; pass the JSON token to the tool as `approval_token`. Halt and report `AutonomousMutationRejected` if the server refuses.
 
-The tier of every tool is visible in `docs/tool_specs/<tool_name>.md` (front-matter `tier: 0 | 1 | 2`). The cross-validator invariants — `tier 1 ⇒ requires_operator_confirmed: True`, `tier 2 ⇒ requires_hitl_token: True` — are enforced at boot time; a spec that violates them is dropped from the registry and the orchestrator prompt body that mentions the tool name fails the boot contract.
+The tier of every tool is visible in `docs/tool_specs/<tool_name>.md` (front-matter `tier: 0 | 1 | 2`). The cross-validator invariants — `tier 1 ⇒ requires_operator_confirmed: True`, `tier 2 ⇒ requires_hitl_token: True` — are enforced at boot time; The full per-tool specification for each tool is reachable at runtime via `get_prompt(name="<tool>")`; see §7 for the mandatory lookup protocol.
+
+## 7. Spec Lookup Protocol (Read Before Invoke)
+
+Every NORA MCP tool ships with a canonical specification in `docs/tool_specs/<tool_name>.md`. The full body of each spec is reachable at runtime through the meta-tool `nora_get_tool_spec`, which is registered as both an `@mcp.tool` and an `@mcp.prompt` on the FastMCP server — call `nora_get_tool_spec(name="<tool_name>")` (for example, `nora_get_tool_spec(name="snmp_reboot_radio")`) before invoking any tool. The bridge tool wraps the same in-memory `PromptRegistry` that backs the underlying MCP `prompts/get` protocol; clients that DO bridge `prompts/get` into a callable tool continue to work unchanged because the registry is the single source of truth for both surfaces.
+
+**Mandatory rule.** Before invoking any `@mcp.tool`, you MUST first read its corresponding `nora_get_tool_spec(name="<tool>")`. The spec is the authoritative source for:
+- the exact parameter contract (names, types, required vs optional),
+- the tier classification (Tier 0 / 1 / 2) and the governance protocol that tier implies (clearance prompt, HITL token, etc.),
+- operational preconditions (registered device, pre-flight results, maintenance window),
+- side effects and rollback notes.
+
+If the spec is not available (`PromptNotFoundError` or empty body), abort the invocation and surface the error to the operator; do NOT proceed with an uninformed call.
+
+**Why this matters.** Section §6 above gives a coarse tier map; the per-tool spec gives the precise contract. Drift between the two is resolved in favour of the spec — if §6 disagrees with `nora_get_tool_spec(name=<tool>)`, the spec wins. Tool authors update `docs/tool_specs/<tool>.md` whenever a tool's contract changes; the orchestrator prompt may lag.

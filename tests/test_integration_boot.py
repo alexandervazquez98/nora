@@ -166,10 +166,10 @@ def _boot_env(tmp_path: Path) -> dict[str, str]:
     }
 
 
-def test_subprocess_nora_mcp_exposes_fourteen_tools(
+def test_subprocess_nora_mcp_exposes_fifteen_tools(
     mcp_http_client: McpHttpClient,
 ) -> None:
-    """The shared HTTP MCP server exposes the 14-tool surface in `tools/list`."""
+    """The shared HTTP MCP server exposes the 15-tool surface in `tools/list`."""
     mcp_http_client.initialize()
     mcp_http_client.initialized()
     parsed = mcp_http_client.tools_list()
@@ -190,16 +190,17 @@ def test_subprocess_nora_mcp_exposes_fourteen_tools(
         "register_device",
         "hitl_mint_token",
         "snmp_reboot_radio",
+        "nora_get_tool_spec",
     ]
     assert tool_names == expected, (
-        f"`nora-mcp` (HTTP) must expose exactly the 14 thin tools in order; got {tool_names!r}"
+        f"`nora-mcp` (HTTP) must expose exactly the 15 thin tools in order; got {tool_names!r}"
     )
 
 
 def test_subprocess_python_dash_m_nora_exposes_same_tools(
     mcp_http_client: McpHttpClient,
 ) -> None:
-    """`python -m nora` and the shared HTTP server expose the same 14 tools."""
+    """`python -m nora` and the shared HTTP server expose the same 15 tools."""
     mcp_http_client.initialize()
     mcp_http_client.initialized()
     parsed = mcp_http_client.tools_list()
@@ -220,9 +221,10 @@ def test_subprocess_python_dash_m_nora_exposes_same_tools(
         "register_device",
         "hitl_mint_token",
         "snmp_reboot_radio",
+        "nora_get_tool_spec",
     ]
     assert tool_names == expected, (
-        f"`python -m nora` (HTTP) must expose 14 thin tools in order; got {tool_names!r}"
+        f"`python -m nora` (HTTP) must expose 15 thin tools in order; got {tool_names!r}"
     )
 
 
