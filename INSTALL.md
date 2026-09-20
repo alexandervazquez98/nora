@@ -130,6 +130,60 @@ sudo systemctl status nora-mcp           # should be "active (running)"
 sudo journalctl -u nora-mcp -n 50        # should show "nora-mcp boot complete"
 ```
 
+## 6. Synchronise prompts to Open WebUI (recommended for chat-front-end deployments)
+
+System prompts are versioned in Git and exported to Open WebUI as
+immutable model profiles via the `nora prompt sync` subcommand.
+Operators running an Open WebUI front-end (or any other MCP-aware
+chat UI that consumes Open WebUI's model registry) SHOULD run sync
+once per NORA release to keep the front-end's model dropdown aligned
+with the canonical prompts.
+
+### Required environment variables
+
+| Variable | Required | Default | Purpose |
+|----------|----------|---------|---------|
+| `OPENWEBUI_BASE_URL` | no | `http://localhost:8080` | Open WebUI base URL |
+| `OPENWEBUI_ADMIN_API_KEY` | **yes** | (none) | Bearer token with model-create permission |
+
+### Sync command
+
+```bash
+export OPENWEBUI_BASE_URL="http://localhost:8080"
+export OPENWEBUI_ADMIN_API_KEY="<your-admin-key>"
+
+nora prompt sync \
+    --git-sha "$(git rev-parse HEAD)" \
+    --release-tag "$(git describe --tags --exact-match 2>/dev/null || true)"
+```
+
+### What gets created
+
+- `<model_base>-v<X.Y.Z>` — **immutable** versioned profile (POST).
+  Re-running sync with the same NORA version is a no-op (server returns
+  `409 CONFLICT`, treated as success).
+- `<model_base>-latest` — **mutable alias** updated in place (PUT) to
+  point at the freshly-synced version.
+
+`<model_base>` defaults to `nora-netops` and is configurable via
+`--model-base`.
+
+### Instant rollback
+
+In Open WebUI's model dropdown, the prior frozen version tag
+(`nora-netops:v0.3.5` for example) is selectable. Switching the
+chat session to that tag rolls back the prompt without restarting
+NORA or touching the local filesystem. The `latest` alias continues
+to point at the latest synced version until the next sync.
+
+### Skip this step if
+
+- You are deploying NORA as a backend for an MCP client that consumes
+  `@mcp.prompt` directly (no Open WebUI model registry involved).
+- You prefer to maintain Open WebUI Modelfiles manually. The
+  zero-leak pass on the canonical prompts in Git is unaffected by
+  Open WebUI state.
+
 ## Smoke test
 
 Talk to the running server over stdio (the systemd unit uses the same
