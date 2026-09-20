@@ -151,6 +151,33 @@ class Settings(BaseSettings):
     # not the poll timeout).
     nora_spectrum_sweep_timeout_seconds: int = 150
 
+    # --- Issue #70 / WU-1 — post-sweep HTTP fetch + RF bin decoding ---
+    # Per-attempt HTTP timeout for ``SpectrumAnalysis.xml`` GET. The
+    # Cambium radio's web server is slow to start after a sweep
+    # (operator observation: ~5-15s of HTTP silence); 10s per
+    # attempt gives enough headroom for the slowest radio observed
+    # without making the test suite slow.
+    nora_spectrum_http_timeout_seconds: float = 10.0
+    # Max retry attempts AFTER the initial GET. Default 5 matches
+    # the issue operator's "5 reintentos con 3s de delay" baseline;
+    # with the default retry delay (3s) this gives 15s of patience
+    # before failing. ``0`` disables retry (one attempt only).
+    nora_spectrum_http_max_retries: int = 5
+    # Sleep between HTTP attempts. The Cambium radio's web server
+    # needs time to reload the spectrum XML after a sweep; the
+    # default 3s matches the issue operator's documented recovery
+    # interval.
+    nora_spectrum_http_retry_delay_seconds: float = 3.0
+    # Wait between AP completion and SM XML fetch. The SMs need to
+    # re-associate with the AP after the coordinated sweep; 15s is
+    # the operator's production baseline (typical re-association
+    # observed: 8-15s).
+    nora_spectrum_sm_reassociation_timeout_seconds: float = 15.0
+    # Top-N count for ``ranked_clean_frequencies``. Default 10 keeps
+    # the orchestrator's "where should I migrate?" output compact;
+    # operators tune via ``NORA_SPECTRUM_RANKING_TOP_N``.
+    nora_spectrum_ranking_top_n: int = 10
+
     loaded_from: LoadSource = "defaults"
 
     @model_validator(mode="before")
@@ -181,6 +208,60 @@ class Settings(BaseSettings):
 
         values["loaded_from"] = "defaults"
         return values
+
+    @model_validator(mode="after")
+    def _validate_spectrum_http_settings(self) -> "Settings":
+        """Bound the post-sweep HTTP settings to documented ranges.
+
+        Issue #70 / WU-1: keeps the spectrum helper fail-closed at
+        boot — a misconfigured ``NORA_SPECTRUM_HTTP_TIMEOUT_SECONDS=0``
+        or ``NORA_SPECTRUM_RANKING_TOP_N=10000`` is caught BEFORE the
+        first sweep rather than silently misbehaving. Mirrors
+        :meth:`_validate_spectrum_sweep_duration_bounds`.
+
+        Bounds (enforced; values outside raise ``ValueError``):
+          * ``nora_spectrum_http_timeout_seconds`` — [1.0, 60.0]
+          * ``nora_spectrum_http_max_retries``     — [0, 20]
+          * ``nora_spectrum_http_retry_delay_seconds`` — [0.1, 30.0]
+          * ``nora_spectrum_sm_reassociation_timeout_seconds`` — [1.0, 60.0]
+          * ``nora_spectrum_ranking_top_n``        — [1, 100]
+        """
+        http_timeout = float(self.nora_spectrum_http_timeout_seconds)
+        if http_timeout < 1.0 or http_timeout > 60.0:
+            raise ValueError(
+                f"nora_spectrum_http_timeout_seconds={http_timeout} "
+                f"is outside the documented [1.0, 60.0] range; "
+                f"see Settings.nora_spectrum_http_timeout_seconds"
+            )
+        http_retries = int(self.nora_spectrum_http_max_retries)
+        if http_retries < 0 or http_retries > 20:
+            raise ValueError(
+                f"nora_spectrum_http_max_retries={http_retries} "
+                f"is outside the documented [0, 20] range; "
+                f"see Settings.nora_spectrum_http_max_retries"
+            )
+        retry_delay = float(self.nora_spectrum_http_retry_delay_seconds)
+        if retry_delay < 0.1 or retry_delay > 30.0:
+            raise ValueError(
+                f"nora_spectrum_http_retry_delay_seconds={retry_delay} "
+                f"is outside the documented [0.1, 30.0] range; "
+                f"see Settings.nora_spectrum_http_retry_delay_seconds"
+            )
+        sm_reassoc = float(self.nora_spectrum_sm_reassociation_timeout_seconds)
+        if sm_reassoc < 1.0 or sm_reassoc > 60.0:
+            raise ValueError(
+                f"nora_spectrum_sm_reassociation_timeout_seconds={sm_reassoc} "
+                f"is outside the documented [1.0, 60.0] range; "
+                f"see Settings.nora_spectrum_sm_reassociation_timeout_seconds"
+            )
+        ranking_top_n = int(self.nora_spectrum_ranking_top_n)
+        if ranking_top_n < 1 or ranking_top_n > 100:
+            raise ValueError(
+                f"nora_spectrum_ranking_top_n={ranking_top_n} "
+                f"is outside the documented [1, 100] range; "
+                f"see Settings.nora_spectrum_ranking_top_n"
+            )
+        return self
 
     @model_validator(mode="after")
     def _validate_spectrum_sweep_duration_bounds(self) -> "Settings":

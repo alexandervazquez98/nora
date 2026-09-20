@@ -266,6 +266,61 @@ class InvalidHostError(DriverError):
         self.host = host
 
 
+class SpectrumHttpFetchError(DriverError):
+    """Raised when the spectrum XML HTTP fetch fails after bounded retry.
+
+    Issue #70 (2026-09-19): after a successful Cambium sweep (``.221.0
+    in {3, 4}``), the helper fetches ``http://{host}/SpectrumAnalysis.xml``
+    with bounded retry / timeout. On retry exhaustion or a
+    non-retryable HTTP status (4xx other than 408 / 429), this typed
+    exception is raised so the caller can distinguish "the sweep ran
+    fine, but the post-sweep XML fetch failed" from
+    :class:`SpectrumSweepTimeout` (the sweep itself timed out).
+
+    The exception carries ``host``, ``status_code`` (0 when the
+    failure was a transport error rather than an HTTP response),
+    ``attempts`` (number of attempts made before giving up), and
+    ``message`` (verbatim diagnostic). The host string flows through
+    unchanged; the MCP tool boundary applies the existing
+    Zero-Leakage ``Sanitizer`` before serialisation.
+    """
+
+    def __init__(
+        self,
+        *,
+        host: str,
+        status_code: int,
+        attempts: int,
+        message: str,
+    ) -> None:
+        super().__init__(message)
+        self.host = host
+        self.status_code = status_code
+        self.attempts = attempts
+        self.message = message
+
+
+class SpectrumXmlParseError(DriverError):
+    """Raised when the spectrum XML payload fails the documented schema.
+
+    Issue #70 (2026-09-19): the spectrum XML parser expects a root
+    ``<Spectrum_Analyzer>`` element with ``<Freq f="<mhz> <pol>" avg="<dBm>" max="<dBm>" />``
+    children. Any deviation (missing root, missing required
+    attribute, unknown polarization, non-numeric avg/max,
+    non-positive frequency) raises this typed exception so the
+    caller can distinguish "the wire returned garbage" from a
+    transport failure (:class:`SpectrumHttpFetchError`).
+
+    The exception carries ``message`` (verbatim diagnostic) and
+    ``line`` (0 when the parser could not identify a line number).
+    """
+
+    def __init__(self, *, message: str, line: int) -> None:
+        super().__init__(f"{message}" + (f" (line {line})" if line else ""))
+        self.message = message
+        self.line = line
+
+
 class CommunityValidationFailed(DriverError):
     """Raised when the WU-A pre-flight discovers unreachable SMs or rejected communities.
 
@@ -321,4 +376,10 @@ __all__ = [
     # WU-A (feat/multi-community-band-reboot) — typed error for the
     # pre-flight community validation in `snmp_migrate_radio_frequency`.
     "CommunityValidationFailed",
+    # Issue #70 — typed errors for the post-sweep HTTP fetch + XML
+    # parse ladder. Re-exported from `snmp_pmp450i.spectrum_http`
+    # so the MCP tool boundary can `except` them without re-importing
+    # the internal helper module.
+    "SpectrumHttpFetchError",
+    "SpectrumXmlParseError",
 ]

@@ -314,6 +314,73 @@ bypass the window check.
 | Tier 1    | `operator_confirmed: bool = False` (the default). | `Tier1ClearanceRequired` raised BEFORE any wire frame when False / absent. |
 | Tier 2    | `approval_token: str` carrying an HMAC-SHA256-signed `HitlApprovalToken`. | `AutonomousMutationRejected` raised with literal message `autonomous device mutation rejected: HITL approval token required`. |
 
+## Spectrum sweep — post-sweep HTTP fetch ladder (issue #70 / WU-2)
+
+After the real Cambium sweep completes (`.221.0 == 4` — `idleCompleteSpectrumAnalysis`),
+the helper runs a post-sweep HTTP ladder against each radio's web root to
+recover the per-bin RF telemetry. This is the third slice of issue #62
+(part 1 = sweep protocol in PR #66; part 2 = multi-community in PR #67;
+part 3 = HTTP decode in this slice).
+
+**Ladder sequence (only on `final_status == 4`):**
+
+1. `GET http://{host}/SpectrumAnalysis.xml` with bounded retry / timeout
+   (`nora_spectrum_http_max_retries=5` × `nora_spectrum_http_retry_delay_seconds=3.0`
+   = 15s patience before failing; matches operator's "5 reintentos con
+   3s de delay" baseline).
+2. If a future tool-wiring slice passes `sm_hosts` to the helper, sleep
+   `nora_spectrum_sm_reassociation_timeout_seconds=15.0` (the SMs need
+   to re-associate after the coordinated sweep), then sequentially `GET`
+   each SM's XML.
+3. Parse every payload (stdlib `xml.etree.ElementTree`); aggregate bins
+   across AP + SMs.
+4. Compute `noise_floor_per_channel` (per-channel worst-leg `avg_dbm`)
+   + `rank_clean_frequencies` (top-`nora_spectrum_ranking_top_n`
+   worst-case-min-first ordering in MHz).
+
+**Failure policy is non-fatal:** any HTTP fetch failure or XML parse
+error is captured in `SpectrumSweepResult.post_sweep_error` (one-line
+diagnostic); `ranked_clean_frequencies` + `noise_floor_dbm` stay
+empty, and the sweep outcome remains `COMPLETED`. The operator sees
+that the sweep ran fine but the bin decode could not be performed.
+
+**Operational timing on physical PMP 450i (firmware 25.0.1, operator-observed):**
+
+| Phase | Typical duration |
+|-------|------------------|
+| SNMP sweep (AP, sector-coordinated) | ~95-105s |
+| SM re-association (after AP sweep) | ~8-15s |
+| Per-radio HTTP fetch (with retry on slow web server) | ~5-15s |
+| **Total end-to-end (single-AP + N SMs)** | **~120s + N × 10s** |
+
+**New Settings knobs (defaults match operator's production baseline):**
+
+| Knob | Default | Bound | Purpose |
+|------|---------|-------|---------|
+| `nora_spectrum_http_timeout_seconds` | 10.0 | `[1.0, 60.0]` | Per-attempt HTTP timeout. |
+| `nora_spectrum_http_max_retries` | 5 | `[0, 20]` | Retry attempts AFTER the initial GET (0 disables retry). |
+| `nora_spectrum_http_retry_delay_seconds` | 3.0 | `[0.1, 30.0]` | Sleep between HTTP attempts. |
+| `nora_spectrum_sm_reassociation_timeout_seconds` | 15.0 | `[1.0, 60.0]` | Wait between AP completion and SM XML fetch. |
+| `nora_spectrum_ranking_top_n` | 10 | `[1, 100]` | Top-N for `ranked_clean_frequencies`. |
+
+All five are bound by `Settings._validate_spectrum_http_settings` and
+fail closed at boot on misconfiguration. Each defaults to the value
+the operator uses in production.
+
+**Driver-layer air-gap carve-out:** the post-sweep HTTP fetch is the ONE
+exception to the driver-layer air-gap. Cambium radios expose
+`SpectrumAnalysis.xml` only over plain HTTP on their web root, and the
+spectrum helper MUST reach it. The exception is surgical: the
+`httpx` whitelist is keyed by file path RELATIVE TO PROJECT ROOT
+(`tests/test_driver_airgap.py::_AIRGAP_EXCEPTIONS`); any new HTTP-using
+driver module must be added explicitly. See `tests/test_driver_airgap.py`
+for the full enforcement.
+
+**Zero-Leakage:** every host literal in the result is the inventory's
+IPv4 literal (already TEST-NET-1 / RFC 5737 sanitised at the inventory
+layer); the URL builder does not embed any other identifier. The MCP
+tool boundary applies the project-wide `Sanitizer` before serialisation.
+
 ## HITL signing-key management (`NORA_HITL_SIGNING_KEY`)
 
 `Settings.nora_hitl_signing_key: SecretStr` is the HMAC-SHA256 signing key

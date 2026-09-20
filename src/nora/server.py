@@ -309,23 +309,47 @@ def snmp_run_spectrum_analysis(
 ) -> dict[str, Any]:
     """Run the real Cambium spectrum sweep against the named PMP 450i device.
 
+    Issue #70 / WU-2: after the sweep completes with
+    ``final_status == 4`` (``idleCompleteSpectrumAnalysis``), the
+    helper runs a post-sweep HTTP fetch ladder against the radio's
+    web root to populate ``ranked_clean_frequencies`` and
+    ``noise_floor_dbm``. See ``OPERATIONS.md`` "Spectrum sweep —
+    post-sweep HTTP fetch ladder (issue #70 / WU-2)" for the full
+    operator-facing description.
+
     Returns a :class:`SpectrumSweepResult` carrying ``device_id``,
     ``scan_started_at`` (UTC ISO-8601, marking the SET-arm call),
     ``scan_completed_at`` (UTC ISO-8601, marking the moment ``.221.0``
-    returned ``0``/idle), ``sweep_duration_seconds`` (echoes the
-    duration SET on ``.220.0``), ``final_status`` (last polled value
-    on ``.221.0``), ``scan_outcome`` (``COMPLETED`` | ``TIMEOUT`` |
-    ``ABORTED``), ``ranked_clean_frequencies`` (empty in WU-3 — real
-    per-bin noise decoding is a future slice), and ``noise_floor_dbm``
-    (empty in WU-3 for the same reason).
+    returned a completion sentinel), ``sweep_duration_seconds``
+    (echoes the duration SET on ``.220.0``), ``final_status`` (last
+    polled value on ``.221.0``: ``4`` on a successful sweep,
+    ``0`` / ``3`` on the alternative idle sentinels, ``5`` /
+    ``-1`` on TIMEOUT / wire failure), ``scan_outcome``
+    (``COMPLETED`` | ``TIMEOUT`` | ``ABORTED``),
+    ``ranked_clean_frequencies`` (top-``Settings.nora_spectrum_ranking_top_n``
+    frequencies in MHz, ascending by worst-leg ``avg_dbm``;
+    populated on ``final_status == 4`` only), ``noise_floor_dbm``
+    (per-channel worst-leg ``avg_dbm`` keyed by ``"{freq_mhz:.1f}"``;
+    populated on ``final_status == 4`` only), and ``post_sweep_error``
+    (empty on a clean sweep; one-line diagnostic when the post-sweep
+    HTTP / XML parse ladder failed non-fatally — the sweep outcome
+    stays ``COMPLETED``).
 
     Wire protocol (issue #62, 2026-09-19): the helper emits SET
     ``.220.0 = duration`` then SET ``.221.0 = 8`` (arm) then SET
     ``.221.0 = 1`` (start), then GET-polls ``.221.0`` every
     ``Settings.nora_spectrum_sweep_poll_interval_seconds`` (default
-    1.0s) until the scalar returns ``0`` (idle) OR
-    ``Settings.nora_spectrum_sweep_timeout_seconds`` (default 60s)
-    elapses.
+    1.0s) until the scalar returns one of the completion sentinels
+    ``{0, 3, 4}`` OR ``Settings.nora_spectrum_sweep_timeout_seconds``
+    (default 150s) elapses.
+
+    Post-sweep ladder (issue #70, 2026-09-19): on ``final_status == 4``
+    only, the helper GETs ``http://{host}/SpectrumAnalysis.xml`` with
+    bounded retry / timeout (5 × 3s = 15s patience by default), then
+    (when ``sm_hosts`` is supplied to the helper) sleeps the SM
+    re-association timeout and sequentially GETs each SM's XML. Any
+    HTTP / parse failure is captured in ``post_sweep_error``;
+    ``ranked_clean_frequencies`` + ``noise_floor_dbm`` stay empty.
 
     Gates (preserve existing behaviour):
       * Tier-1 ``operator_confirmed`` gate FIRST (per issue #43 ADDED
@@ -343,11 +367,11 @@ def snmp_run_spectrum_analysis(
 
     ``sweep_duration_seconds`` (1..600; optional): when supplied,
     overrides ``Settings.nora_spectrum_sweep_duration_seconds`` (the
-    default 15). Out-of-range values raise :class:`ValueError` at the
+    default 30). Out-of-range values raise :class:`ValueError` at the
     Pydantic boundary BEFORE any wire frame.
 
-    On poll timeout (``.221.0`` does not return to ``0`` within
-    ``Settings.nora_spectrum_sweep_timeout_seconds``) the helper
+    On poll timeout (``.221.0`` does not return a completion sentinel
+    within ``Settings.nora_spectrum_sweep_timeout_seconds``) the helper
     raises :class:`SpectrumSweepTimeout` carrying ``device_id``,
     ``duration_seconds``, and ``last_status`` so the orchestrator
     receives an explicit signal instead of silently consuming a
