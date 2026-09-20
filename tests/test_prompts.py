@@ -1292,4 +1292,153 @@ __all__ = [
     "test_registry_accepts_prompt_with_valid_frontmatter",
     "test_registry_drops_prompt_when_nora_compatibility_unsatisfied",
     "test_tool_specs_keep_tier_based_schema",
+    # Issue #45 — watermark banner + render() method (WU-2)
+    "test_render_includes_watermark_with_correct_format",
+    "test_render_watermark_sha_is_first_8_hex_chars",
+    "test_render_unknown_prompt_raises_promptnotfounderror",
+    "test_render_returns_raw_body_for_tool_specs",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Issue #45 — Watermark banner + `render(name)` method (WU-2)
+#
+# Asserts the Q6 frozen watermark format
+# (`<!-- NORA-PROMPT: <name> v<version> [sha: <first-8-hex>] -->\n\n<body>`)
+# is prepended to system-prompt bodies, while tool-specs (`docs/tool_specs/`)
+# return their body unchanged. The watermark is the runtime signal to
+# Open WebUI (and any future consumer) that the LLM context carries a
+# versioned SSoT provenance tag.
+#
+# SHA truncation is deliberate: the PR-zero-leak playbook discourages
+# exposing HMAC fragments in user-visible text. The checksum is a
+# non-secret SHA-256 of the body itself — its first 8 hex chars are
+# enough for human-readable diff comparisons without leaking the full
+# digest.
+# ---------------------------------------------------------------------------
+
+
+def test_render_includes_watermark_with_correct_format(tmp_prompts_dir: Path) -> None:
+    """`render(name)` prepends the Q6 watermark banner for system prompts.
+
+    Per issue #45 *Watermark Banner Rendering* (WU-2): the rendered body
+    starts with the literal ``<!-- NORA-PROMPT: name v<version> [sha: <8hex>] -->\\n\\n``
+    marker, followed by the original body verbatim. The banner is the
+    only source of version metadata the LLM sees; it MUST match the
+    frozen Q6 format byte-for-byte.
+    """
+    body = "Original body line.\n"
+    _write_versioned_prompt(
+        tmp_prompts_dir,
+        name="rendered_prompt",
+        version="0.3.5",
+        nora_compatibility=">=0.3.4,<0.4.0",
+        governance={"tier_0": 0, "tier_1": 0, "tier_2": 0},
+        body_text=body,
+    )
+    registry = PromptRegistry.scan(tmp_prompts_dir)
+
+    rendered = registry.render("rendered_prompt")
+    expected_checksum = hashlib.sha256(body.encode("utf-8")).hexdigest()
+    expected_prefix = (
+        f"<!-- NORA-PROMPT: rendered_prompt v0.3.5 [sha: {expected_checksum[:8]}] -->\n\n"
+    )
+    assert rendered.startswith(expected_prefix), (
+        f"render() must prepend the Q6 watermark banner; expected prefix {expected_prefix!r}, "
+        f"got {rendered[: len(expected_prefix)]!r}"
+    )
+    # Body below the banner is preserved verbatim.
+    assert rendered.endswith(body), (
+        f"render() must preserve the original body below the watermark; got tail {rendered[-50:]!r}"
+    )
+
+
+def test_render_watermark_sha_is_first_8_hex_chars(tmp_prompts_dir: Path) -> None:
+    """`render(name)` truncates `checksum_sha256` to the first 8 hex chars.
+
+    Belt-and-braces: the registry carries the FULL 64-char hex digest in
+    `metadata["checksum_sha256"]` (matched byte-for-byte against the
+    computed digest at scan time per WU-1), but the watermark exposes
+    only the first 8 — a deliberate readability choice documented in
+    the Q6 design decision. A regression that emits the full digest
+    would re-introduce an HMAC-fragment leak pattern.
+    """
+    body = "Watermark truncation regression body.\n"
+    _write_versioned_prompt(
+        tmp_prompts_dir,
+        name="trunc_prompt",
+        version="0.3.5",
+        nora_compatibility=">=0.3.4,<0.4.0",
+        governance={"tier_0": 0, "tier_1": 0, "tier_2": 0},
+        body_text=body,
+    )
+    registry = PromptRegistry.scan(tmp_prompts_dir)
+
+    full_checksum = registry.get("trunc_prompt").metadata["checksum_sha256"]
+    assert len(full_checksum) == 64, (
+        f"metadata['checksum_sha256'] must carry the full 64-char digest; got {full_checksum!r}"
+    )
+
+    rendered = registry.render("trunc_prompt")
+    # The full 64-char checksum MUST NOT appear in the rendered output —
+    # only the first 8 hex chars are exposed by the watermark.
+    assert full_checksum not in rendered, (
+        "render() must NOT expose the full SHA-256 digest in the watermark; "
+        "rendered body still contains the full checksum"
+    )
+    # The first 8 chars ARE present in the watermark line.
+    assert f"[sha: {full_checksum[:8]}]" in rendered, (
+        f"render() watermark must reference the first 8 hex chars of the checksum; "
+        f"got {rendered.splitlines()[0]!r}"
+    )
+
+
+def test_render_unknown_prompt_raises_promptnotfounderror(tmp_prompts_dir: Path) -> None:
+    """`render(name)` raises `PromptNotFoundError` for unknown names — same contract as `get()`.
+
+    The fail-closed surface MUST be identical to `get()` so callers can
+    swap the two APIs without changing their error-handling code.
+    """
+    empty = tmp_prompts_dir.parent / "render-empty"
+    empty.mkdir()
+    registry = PromptRegistry.scan(empty)
+
+    with pytest.raises(PromptNotFoundError) as exc:
+        registry.render("definitely_not_registered")
+    assert "definitely_not_registered" in str(exc.value)
+
+
+def test_render_returns_raw_body_for_tool_specs(tmp_path: Path) -> None:
+    """`render(name)` returns the body UNCHANGED for tool-specs (no watermark).
+
+    Per issue #45 *Q8 — Tool-specs vs system-prompts front-matter split*:
+    tool-specs (`docs/tool_specs/*.md`) keep the tier-based schema and
+    DO NOT carry `version` / `checksum_sha256` metadata — the watermark
+    is a system-prompt-only signal. The branch in `render()` falls
+    through to `prompt.body` when those keys are absent.
+    """
+    tool_specs_dir = tmp_path / "tool_specs"
+    tool_specs_dir.mkdir()
+    spec = tool_specs_dir / "rendered_spec.md"
+    spec.write_text(
+        "---\n"
+        "name: rendered_spec\n"
+        "description: A tier-0 tool spec for render() test.\n"
+        "tier: 0\n"
+        "---\n"
+        "Raw tool-spec body — no watermark expected.\n"
+    )
+    registry = PromptRegistry.scan(tool_specs_dir)
+    prompt = registry.get("rendered_spec")
+
+    rendered = registry.render("rendered_spec")
+    # Tool-spec bodies pass through `render()` unchanged — no `<!--`
+    # comment line, no banner.
+    assert rendered == prompt.body, (
+        f"render() must return the raw body for tool-specs (no watermark); "
+        f"expected {prompt.body!r}, got {rendered!r}"
+    )
+    assert "<!-- NORA-PROMPT:" not in rendered, (
+        f"render() must NOT prepend a watermark banner to tool-spec bodies; "
+        f"got banner line in {rendered[:80]!r}"
+    )

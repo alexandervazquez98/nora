@@ -1097,13 +1097,13 @@ _EXPOSED_PROMPTS: tuple[str, ...] = (
 @mcp.prompt
 def netops_orchestrator() -> str:
     """Lead NOC Wireless Infrastructure Orchestrator system prompt."""
-    return get_prompt_registry().get("netops_orchestrator").body
+    return get_prompt_registry().render("netops_orchestrator")
 
 
 @mcp.prompt
 def snmp_pmp450i() -> str:
     """PMP 450i SNMP driver operator-facing system prompt."""
-    return get_prompt_registry().get("snmp_pmp450i").body
+    return get_prompt_registry().render("snmp_pmp450i")
 
 
 # ---------------------------------------------------------------------------
@@ -1127,7 +1127,7 @@ def nora_get_tool_spec(name: str) -> str:
     the same body that `prompts/get` would surface to clients that bridge
     prompts into tools.
     """
-    return get_prompt_registry().get(name).body
+    return get_prompt_registry().render(name)
 
 
 # Tool-spec prompts — one thin wrapper per `docs/tool_specs/<tool>.md`.
@@ -1138,19 +1138,19 @@ def nora_get_tool_spec(name: str) -> str:
 @mcp.prompt(name="correlate_sector_interference")
 def _correlate_sector_interference_spec() -> str:
     """Tool spec for correlate_sector_interference (Tier 1)."""
-    return get_prompt_registry().get("correlate_sector_interference").body
+    return get_prompt_registry().render("correlate_sector_interference")
 
 
 @mcp.prompt(name="get_device_lifecycle_summary")
 def _get_device_lifecycle_summary_spec() -> str:
     """Tool spec for get_device_lifecycle_summary (Tier 1)."""
-    return get_prompt_registry().get("get_device_lifecycle_summary").body
+    return get_prompt_registry().render("get_device_lifecycle_summary")
 
 
 @mcp.prompt(name="icmp_list_probe_runs")
 def _icmp_list_probe_runs_spec() -> str:
     """Tool spec for icmp_list_probe_runs (Tier 0)."""
-    return get_prompt_registry().get("icmp_list_probe_runs").body
+    return get_prompt_registry().render("icmp_list_probe_runs")
 
 
 @mcp.prompt(name="icmp_run_sector_stability_probe")
@@ -1174,67 +1174,67 @@ def _icmp_cancel_sector_stability_probe_spec() -> str:
 @mcp.prompt(name="save_intervention_record")
 def _save_intervention_record_spec() -> str:
     """Tool spec for save_intervention_record (Tier 0)."""
-    return get_prompt_registry().get("save_intervention_record").body
+    return get_prompt_registry().render("save_intervention_record")
 
 
 @mcp.prompt(name="search_intervention_history")
 def _search_intervention_history_spec() -> str:
     """Tool spec for search_intervention_history (Tier 1)."""
-    return get_prompt_registry().get("search_intervention_history").body
+    return get_prompt_registry().render("search_intervention_history")
 
 
 @mcp.prompt(name="snmp_get_ap_summary")
 def _snmp_get_ap_summary_spec() -> str:
     """Tool spec for snmp_get_ap_summary (Tier 0)."""
-    return get_prompt_registry().get("snmp_get_ap_summary").body
+    return get_prompt_registry().render("snmp_get_ap_summary")
 
 
 @mcp.prompt(name="snmp_get_frame_utilization")
 def _snmp_get_frame_utilization_spec() -> str:
     """Tool spec for snmp_get_frame_utilization (Tier 0)."""
-    return get_prompt_registry().get("snmp_get_frame_utilization").body
+    return get_prompt_registry().render("snmp_get_frame_utilization")
 
 
 @mcp.prompt(name="snmp_get_pmp450i_radio_metrics")
 def _snmp_get_pmp450i_radio_metrics_spec() -> str:
     """Tool spec for snmp_get_pmp450i_radio_metrics (Tier 0)."""
-    return get_prompt_registry().get("snmp_get_pmp450i_radio_metrics").body
+    return get_prompt_registry().render("snmp_get_pmp450i_radio_metrics")
 
 
 @mcp.prompt(name="snmp_get_sm_detailed_diagnostics")
 def _snmp_get_sm_detailed_diagnostics_spec() -> str:
     """Tool spec for snmp_get_sm_detailed_diagnostics (Tier 0)."""
-    return get_prompt_registry().get("snmp_get_sm_detailed_diagnostics").body
+    return get_prompt_registry().render("snmp_get_sm_detailed_diagnostics")
 
 
 @mcp.prompt(name="snmp_get_sm_table")
 def _snmp_get_sm_table_spec() -> str:
     """Tool spec for snmp_get_sm_table (Tier 0)."""
-    return get_prompt_registry().get("snmp_get_sm_table").body
+    return get_prompt_registry().render("snmp_get_sm_table")
 
 
 @mcp.prompt(name="snmp_migrate_radio_frequency")
 def _snmp_migrate_radio_frequency_spec() -> str:
     """Tool spec for snmp_migrate_radio_frequency (Tier 2)."""
-    return get_prompt_registry().get("snmp_migrate_radio_frequency").body
+    return get_prompt_registry().render("snmp_migrate_radio_frequency")
 
 
 @mcp.prompt(name="snmp_reboot_radio")
 def _snmp_reboot_radio_spec() -> str:
     """Tool spec for snmp_reboot_radio (Tier 2)."""
-    return get_prompt_registry().get("snmp_reboot_radio").body
+    return get_prompt_registry().render("snmp_reboot_radio")
 
 
 @mcp.prompt(name="snmp_run_spectrum_analysis")
 def _snmp_run_spectrum_analysis_spec() -> str:
     """Tool spec for snmp_run_spectrum_analysis (Tier 1)."""
-    return get_prompt_registry().get("snmp_run_spectrum_analysis").body
+    return get_prompt_registry().render("snmp_run_spectrum_analysis")
 
 
 @mcp.prompt(name="nora_get_tool_spec")
 def _nora_get_tool_spec_spec() -> str:
     """Tool spec for nora_get_tool_spec (Tier 0)."""
-    return get_prompt_registry().get("nora_get_tool_spec").body
+    return get_prompt_registry().render("nora_get_tool_spec")
 
 
 # ---------------------------------------------------------------------------

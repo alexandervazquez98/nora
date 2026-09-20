@@ -108,6 +108,67 @@ class PromptRegistry:
         except KeyError as exc:
             raise PromptNotFoundError(name) from exc
 
+    def render(self, name: str) -> str:
+        """Return the rendered body for `name`, with the watermark prepended.
+
+        Per issue #45 *Watermark Banner Rendering* (WU-2): the
+        rendered body for system prompts (files under
+        ``src/nora/prompts/``) carries the Q6-frozen banner
+
+            <!-- NORA-PROMPT: <name> v<version> [sha: <first-8-hex>] -->\n\n<body>
+
+        — a human-readable provenance tag so Open WebUI operators (and
+        any future consumer) see which version of the canonical prompt
+        the LLM is running against. The ``<!-- ... -->`` comment syntax
+        survives markdown rendering in any client.
+
+        Tool-spec files (``docs/tool_specs/*.md``) DO NOT get the banner.
+        Per issue #45 *Q8 — Tool-specs vs system-prompts front-matter
+        split*, tool-specs keep the tier-based schema and lack the
+        ``version`` / ``checksum_sha256`` metadata fields. When those
+        keys are absent from ``prompt.metadata``, ``render(name)``
+        returns ``prompt.body`` unchanged. The no-op is the design —
+        it lets every ``@mcp.prompt`` wrapper switch from
+        ``registry.get(name).body`` to ``registry.render(name)`` without
+        a per-wrapper conditional.
+
+        Caveats:
+
+        * The ``metadata``-key check is a presence test (``version`` AND
+          ``checksum_sha256``), not a value check. If a future contributor
+          adds ``version`` or ``checksum_sha256`` to a tool-spec
+          front-matter, the watermark WILL render — guard against this
+          by keeping the two schemas strictly separate.
+        * The SHA is truncated to **8 hex chars** (16 bits, ~1 in 65k
+          collision risk) deliberately for human readability. The
+          full 64-char digest lives in ``prompt.metadata["checksum_sha256"]``
+          for drift detection; the watermark is a non-secret
+          provenance tag, NOT a security token. Per the PR-zero-leak
+          playbook, HMAC fragments MUST NOT appear in user-visible
+          text — the SHA-256 of the body itself is a public checksum,
+          and its first 8 hex chars are the readability/footprint
+          compromise.
+        * ``render(name)`` is **idempotent only for tool-specs**.
+          Calling it twice on a system prompt yields two identical
+          strings because the banner is computed from immutable
+          metadata, but the design intent is one-shot rendering per
+          prompt-load, not repeated application.
+
+        Raises:
+            PromptNotFoundError: when ``name`` was not scanned at
+                boot — same fail-closed contract as ``get(name)``.
+        """
+        prompt = self.get(name)  # raises PromptNotFoundError for unknown names
+        version = prompt.metadata.get("version")
+        checksum_sha256 = prompt.metadata.get("checksum_sha256")
+        if isinstance(version, str) and isinstance(checksum_sha256, str):
+            # System-prompt path — both metadata keys present.
+            first_8 = checksum_sha256[:8]
+            return f"<!-- NORA-PROMPT: {name} v{version} [sha: {first_8}] -->\n\n{prompt.body}"
+        # Tool-spec path (or any future front-matter schema without
+        # the version-based fields) — return the body unchanged.
+        return prompt.body
+
     # ------------------------------------------------------------------
     # Boot-time construction
     # ------------------------------------------------------------------
