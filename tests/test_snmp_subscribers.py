@@ -36,6 +36,13 @@ Named tests for PR 3:
 * ``test_sm_table_unbiased_baseline_excludes_pre_existing``
 * ``test_sm_detailed_diagnostics_typed_for_luid``
 * ``test_get_intervention_history_called_before_categorize``
+
+Issue #69 (2026-09-20) — SM ``siteName`` + ``ipAddress`` exposure:
+
+* ``test_sm_table_exposes_site_name_and_ip_address``
+* ``test_sm_table_zero_ip_routes_to_pre_existing_offline``
+* ``test_sm_table_uptime_overrides_zero_ip``
+* ``test_sm_table_missing_site_name_or_ip_defaults_empty``
 """
 
 from __future__ import annotations
@@ -146,12 +153,21 @@ def _sm_table_oids() -> dict[str, str]:
     ``noSuchName`` on an AP. Columns under whispLinkTable:
     ``.46`` = smSessionUptime, ``.74`` = smCinr DL,
     ``.19`` = linkSessState, ``.1`` = linkLuid.
+
+    Issue #69 (2026-09-20): two extra columns per issue #69 — ``.33``
+    = ``linkSiteName`` (``DisplayString``) and ``.69`` = ``linkIpAddress``
+    (``IpAddress``). Operator-verified via live ``snmpwalk`` against
+    production APs (firmwares 25.0.1 / 25.1.0). These two scalars are
+    folded onto every ``SubscriberRecord`` row as ``site_name`` and
+    ``ip_address``.
     """
     return {
         "smSessionUptime": "1.3.6.1.4.1.161.19.3.1.4.1.46.0",
         "smCinr": "1.3.6.1.4.1.161.19.3.1.4.1.74.0",
         "smLinkStatus": "1.3.6.1.4.1.161.19.3.1.4.1.19.0",
         "smLuid": "1.3.6.1.4.1.161.19.3.1.4.1.1.0",
+        "smSiteName": "1.3.6.1.4.1.161.19.3.1.4.1.33.0",
+        "smIpAddress": "1.3.6.1.4.1.161.19.3.1.4.1.69.0",
     }
 
 
@@ -269,9 +285,15 @@ def _sm_session_table() -> list[tuple[str, str | int]]:
 
     Each SM occupies four OID rows in the whispLinkTable (.3.1.4.1)
     public Cambium branch — columns ``.46`` (smSessionUptime),
-    ``.74`` (smCinr), ``.19`` (smLinkStatus), ``.1`` (smLuid). Returns
-    a flat ``(oid, value)`` list — the helper walks the base OID and
-    parses.
+    ``.74`` (smCinr), ``.19`` (smLinkStatus), ``.1`` (smLuid), plus
+    the two issue #69 columns ``.33`` (linkSiteName) and ``.69``
+    (linkIpAddress). Returns a flat ``(oid, value)`` list — the helper
+    walks the base OID and parses.
+
+    Issue #69 (2026-09-20): site names use the operator's canonical
+    ``BAJ02-VVU-TIJU-NNN`` shape; IPs use TEST-NET-1 (``192.0.2.x``)
+    so the fixture stays Zero-Leakage. SM 3 (PRE_EXISTING_OFFLINE)
+    carries ``ip_address == "0.0.0.0"`` to exercise the new heuristic.
     """
     base = "1.3.6.1.4.1.161.19.3.1.4.1"
     rows = [
@@ -288,12 +310,18 @@ def _sm_session_table() -> list[tuple[str, str | int]]:
         # canonical active value.
         (f"{base}.19.1", 1),  # smLinkStatus: inSession
         (f"{base}.1.1", "001"),  # smLuid
+        # Issue #69 (2026-09-20): site_name + ip_address on SM 001.
+        (f"{base}.33.1", "BAJ02-VVU-TIJU-018"),
+        (f"{base}.69.1", "192.0.2.31"),
         # SM 2 — ACTIVE_DEGRADED: low CINR.
         (f"{base}.46.2", 43200),
         (f"{base}.74.2", 12),  # cinr < 18 → degraded
         (f"{base}.19.2", 1),  # inSession (still active, but degraded signal)
         (f"{base}.1.2", "002"),
-        # SM 3 — PRE_EXISTING_OFFLINE (uptime == 0).
+        # Issue #69 (2026-09-20): site_name + ip_address on SM 002.
+        (f"{base}.33.2", "BAJ02-VVU-TIJU-019"),
+        (f"{base}.69.2", "192.0.2.32"),
+        # SM 3 — PRE_EXISTING_OFFLINE (uptime == 0, ip == "0.0.0.0").
         (f"{base}.46.3", 0),
         (f"{base}.74.3", 0),
         # ``0`` (``idle``) is the canonical offline value; the
@@ -302,6 +330,10 @@ def _sm_session_table() -> list[tuple[str, str | int]]:
         # ``PRE_EXISTING_OFFLINE``.
         (f"{base}.19.3", 0),  # smLinkStatus: idle
         (f"{base}.1.3", "003"),
+        # Issue #69 (2026-09-20): the null-IPv4 sentinel exercises the
+        # ``ip_address == "0.0.0.0"`` → ``PRE_EXISTING_OFFLINE`` heuristic.
+        (f"{base}.33.3", "BAJ02-VVU-TIJU-020"),
+        (f"{base}.69.3", "0.0.0.0"),
     ]
     return rows
 
@@ -321,7 +353,7 @@ def test_sm_table_categorizes_online_active(
     ``session_uptime > 0`` AND linked modulation categorises as
     ``ONLINE_ACTIVE``.
     """
-    from nora.drivers.snmp_pmp450i.subscribers import SubscriberSummary
+    from nora.drivers.snmp_pmp450i.subscribers import SubscriberSummary  # noqa: F401
 
     inv = _build_inventory(tmp_path)
     registry = _build_catalog(firmware="15.2.1", include_sm_oids=True)
@@ -352,6 +384,11 @@ def test_sm_table_categorizes_online_active(
         f"Expected SM 001 in ONLINE_ACTIVE; got online={online_active_luids} "
         f"degraded={active_degraded_luids} pre_existing={pre_existing_luids}"
     )
+    # Issue #69 (2026-09-20): ``site_name`` and ``ip_address`` must be
+    # populated on the SM 001 row (the ONLINE_ACTIVE bucket).
+    online_active_row_001 = next(r for r in dumped["online_active"] if r["luid"] == "001")
+    assert online_active_row_001["site_name"] == "BAJ02-VVU-TIJU-018"
+    assert online_active_row_001["ip_address"] == "192.0.2.31"
     assert dumped["pre_existing_offline_count"] == 1
     assert dumped["baseline_size"] == 2  # 1 online + 1 degraded; pre_existing excluded
 
@@ -370,7 +407,7 @@ def test_sm_table_categorizes_active_degraded_low_cinr(
     branch: an active session (uptime > 0) but CINR below the 18 dB
     threshold is degraded, not online-active.
     """
-    from nora.drivers.snmp_pmp450i.subscribers import SubscriberSummary
+    from nora.drivers.snmp_pmp450i.subscribers import SubscriberSummary  # noqa: F401
 
     inv = _build_inventory(tmp_path)
     registry = _build_catalog(firmware="15.2.1", include_sm_oids=True)
@@ -388,6 +425,10 @@ def test_sm_table_categorizes_active_degraded_low_cinr(
         # ``1`` = ``inSession``.
         (f"{base}.19.1", 1),
         (f"{base}.1.1", "002"),
+        # Issue #69 (2026-09-20): site_name + ip_address for the
+        # single-SM test, so the new fields are asserted end-to-end.
+        (f"{base}.33.1", "BAJ02-VVU-TIJU-019"),
+        (f"{base}.69.1", "192.0.2.32"),
     ]
     canned = _FakeSnmpClient(
         values={},
@@ -406,6 +447,11 @@ def test_sm_table_categorizes_active_degraded_low_cinr(
         f"Expected SM 002 in ACTIVE_DEGRADED (cinr=12); got degraded={active_degraded_luids} "
         f"online={online_active_luids}"
     )
+    # Issue #69 (2026-09-20): ``site_name`` and ``ip_address`` flow
+    # through the fold helper onto every ACTIVE_DEGRADED row.
+    active_degraded_row_002 = next(r for r in dumped["active_degraded"] if r["luid"] == "002")
+    assert active_degraded_row_002["site_name"] == "BAJ02-VVU-TIJU-019"
+    assert active_degraded_row_002["ip_address"] == "192.0.2.32"
     assert dumped["baseline_size"] == 1
 
 
@@ -426,7 +472,7 @@ def test_sm_table_categorizes_pre_existing_offline(
     ``categorize_subscribers(...)`` runs (see
     ``test_get_intervention_history_called_before_categorize``).
     """
-    from nora.drivers.snmp_pmp450i.subscribers import SubscriberSummary
+    from nora.drivers.snmp_pmp450i.subscribers import SubscriberSummary  # noqa: F401
 
     inv = _build_inventory(tmp_path)
     registry = _build_catalog(firmware="15.2.1", include_sm_oids=True)
@@ -456,6 +502,9 @@ def test_sm_table_categorizes_pre_existing_offline(
         # ``1`` = ``inSession``.
         (f"{base}.19.1", 1),
         (f"{base}.1.1", "001"),
+        # Issue #69 (2026-09-20): site_name + ip_address on SM 001.
+        (f"{base}.33.1", "BAJ02-VVU-TIJU-018"),
+        (f"{base}.69.1", "192.0.2.31"),
         # SM 3 — recovered from a prior intervention: uptime > 0,
         # inSession, healthy CINR. Was down at intervention time
         # (``pre_existing_list`` records it), but is back online now.
@@ -463,6 +512,12 @@ def test_sm_table_categorizes_pre_existing_offline(
         (f"{base}.74.3", 22),
         (f"{base}.19.3", 1),  # inSession
         (f"{base}.1.3", "003"),
+        # Issue #69 (2026-09-20): recovered SM 003 also carries the new
+        # fields (with a real, non-zero IP — the offline-SM ``0.0.0.0``
+        # sentinel only fires when the radio has not yet associated an
+        # IP, which is not the case for a recovered SM).
+        (f"{base}.33.3", "BAJ02-VVU-TIJU-020"),
+        (f"{base}.69.3", "192.0.2.33"),
     ]
     canned = _FakeSnmpClient(
         values={},
@@ -488,6 +543,13 @@ def test_sm_table_categorizes_pre_existing_offline(
     )
     assert "003" in online_active_luids
     assert "001" in online_active_luids
+    # Issue #69 (2026-09-20): the recovered SM 001 must carry the new
+    # fields end-to-end (site_name + ip_address) so operators can
+    # identify the subscriber by session name + management IP, not
+    # just by LUID.
+    online_active_row_001 = next(r for r in dumped["online_active"] if r["luid"] == "001")
+    assert online_active_row_001["site_name"] == "BAJ02-VVU-TIJU-018"
+    assert online_active_row_001["ip_address"] == "192.0.2.31"
     assert dumped["baseline_size"] == 2
 
 
@@ -506,7 +568,7 @@ def test_sm_table_unbiased_baseline_excludes_pre_existing(
     aggregate ``baseline_size`` MUST be ``ONLINE_ACTIVE + ACTIVE_DEGRADED``
     only; ``PRE_EXISTING_OFFLINE`` SMs never inflate the candidate set.
     """
-    from nora.drivers.snmp_pmp450i.subscribers import SubscriberSummary
+    from nora.drivers.snmp_pmp450i.subscribers import SubscriberSummary  # noqa: F401
 
     inv = _build_inventory(tmp_path)
     registry = _build_catalog(firmware="15.2.1", include_sm_oids=True)
@@ -829,4 +891,187 @@ __all__ = [
     "test_sm_table_unbiased_baseline_excludes_pre_existing",
     "test_sm_detailed_diagnostics_typed_for_luid",
     "test_get_intervention_history_called_before_categorize",
+    "test_sm_table_exposes_site_name_and_ip_address",
+    "test_sm_table_zero_ip_routes_to_pre_existing_offline",
+    "test_sm_table_uptime_overrides_zero_ip",
+    "test_sm_table_missing_site_name_or_ip_defaults_empty",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Issue #69 (2026-09-20) — SM ``siteName`` + ``ipAddress`` exposure.
+# ---------------------------------------------------------------------------
+
+
+def test_sm_table_exposes_site_name_and_ip_address(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``snmp_get_sm_table`` exposes ``site_name`` and ``ip_address`` on every row.
+
+    Per issue #69 (2026-09-20): the SM table walk must surface
+    ``whispLinkEntry.33`` (linkSiteName) and ``whispLinkEntry.69``
+    (linkIpAddress) so operators can identify subscribers by session
+    name + management IP, not just by transient LUID.
+    """
+    from nora.drivers.snmp_pmp450i.subscribers import SubscriberSummary  # noqa: F401
+
+    inv = _build_inventory(tmp_path)
+    registry = _build_catalog(firmware="15.2.1", include_sm_oids=True)
+    monkeypatch.setattr(
+        "nora.drivers.snmp_pmp450i.subscribers.search_intervention_history",
+        lambda *args, **kwargs: [],
+    )
+
+    canned = _FakeSnmpClient(
+        values={},
+        walk_results={"1.3.6.1.4.1.161.19.3.1.4.1": _sm_session_table()},
+    )
+    driver = _build_driver(inventory=inv, registry=registry, canned=canned)
+
+    summary = driver.fetch_sm_table("ap-7400-01")
+    dumped = summary.model_dump(mode="json")
+
+    for bucket in ("online_active", "active_degraded", "pre_existing_offline"):
+        for row in dumped[bucket]:
+            assert "site_name" in row, f"Missing site_name in {bucket}: {row}"
+            assert "ip_address" in row, f"Missing ip_address in {bucket}: {row}"
+
+    # The fixture seeds SM 001 with site_name="BAJ02-VVU-TIJU-018"
+    # and ip_address="192.0.2.31".
+    row_001 = next(r for r in dumped["online_active"] if r["luid"] == "001")
+    assert row_001["site_name"] == "BAJ02-VVU-TIJU-018"
+    assert row_001["ip_address"] == "192.0.2.31"
+
+
+def test_sm_table_zero_ip_routes_to_pre_existing_offline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``ip_address == "0.0.0.0"`` routes the row to ``PRE_EXISTING_OFFLINE``.
+
+    Per the documented contract in ``categorize_subscribers``: a row
+    whose IP is the null IPv4 sentinel is classified pre-existing
+    offline regardless of session_uptime or link_status. This is the
+    issue #69 heuristic landing.
+    """
+    from nora.drivers.snmp_pmp450i.subscribers import SubscriberSummary  # noqa: F401
+
+    inv = _build_inventory(tmp_path)
+    registry = _build_catalog(firmware="15.2.1", include_sm_oids=True)
+    monkeypatch.setattr(
+        "nora.drivers.snmp_pmp450i.subscribers.search_intervention_history",
+        lambda *args, **kwargs: [],
+    )
+
+    # Single SM: session_uptime > 0 (active), link_status = inSession
+    # (active), but ip_address = "0.0.0.0" (no L3 association yet).
+    # Per the new heuristic, this row MUST be PRE_EXISTING_OFFLINE.
+    base = "1.3.6.1.4.1.161.19.3.1.4.1"
+    rows = [
+        (f"{base}.46.1", 86400),  # uptime > 0
+        (f"{base}.74.1", 25),  # healthy CINR
+        (f"{base}.19.1", 1),  # inSession
+        (f"{base}.1.1", "001"),
+        (f"{base}.33.1", "BAJ02-VVU-TIJU-018"),
+        (f"{base}.69.1", "0.0.0.0"),  # <-- the heuristic trigger
+    ]
+    canned = _FakeSnmpClient(
+        values={},
+        walk_results={"1.3.6.1.4.1.161.19.3.1.4.1": rows},
+    )
+    driver = _build_driver(inventory=inv, registry=registry, canned=canned)
+
+    summary = driver.fetch_sm_table("ap-7400-01")
+    dumped = summary.model_dump(mode="json")
+
+    pre_existing_luids = [r["luid"] for r in dumped["pre_existing_offline"]]
+    assert "001" in pre_existing_luids, (
+        f"SM with ip_address=0.0.0.0 MUST route to PRE_EXISTING_OFFLINE; "
+        f"got pre_existing={pre_existing_luids}"
+    )
+    assert dumped["baseline_size"] == 0  # no candidates
+
+
+def test_sm_table_uptime_overrides_zero_ip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The recovered-subscriber invariant (issue #58) is preserved.
+
+    A row with ``session_uptime > 0`` AND ``ip_address != "0.0.0.0"``
+    is categorized by signal health (CINR + modulation), never by IP
+    alone. The new heuristic must not over-condemn recovered SMs.
+    """
+    from nora.drivers.snmp_pmp450i.subscribers import SubscriberSummary  # noqa: F401
+
+    inv = _build_inventory(tmp_path)
+    registry = _build_catalog(firmware="15.2.1", include_sm_oids=True)
+    monkeypatch.setattr(
+        "nora.drivers.snmp_pmp450i.subscribers.search_intervention_history",
+        lambda *args, **kwargs: [],
+    )
+
+    base = "1.3.6.1.4.1.161.19.3.1.4.1"
+    rows = [
+        (f"{base}.46.1", 86400),
+        (f"{base}.74.1", 22),  # healthy CINR
+        (f"{base}.19.1", 1),  # inSession
+        (f"{base}.1.1", "001"),
+        (f"{base}.33.1", "BAJ02-VVU-TIJU-018"),
+        (f"{base}.69.1", "192.0.2.31"),  # real IP, NOT 0.0.0.0
+    ]
+    canned = _FakeSnmpClient(
+        values={},
+        walk_results={"1.3.6.1.4.1.161.19.3.1.4.1": rows},
+    )
+    driver = _build_driver(inventory=inv, registry=registry, canned=canned)
+
+    summary = driver.fetch_sm_table("ap-7400-01")
+    dumped = summary.model_dump(mode="json")
+
+    online_active_luids = [r["luid"] for r in dumped["online_active"]]
+    pre_existing_luids = [r["luid"] for r in dumped["pre_existing_offline"]]
+    assert "001" in online_active_luids, (
+        f"Recovered SM with real IP MUST be ONLINE_ACTIVE; got "
+        f"online={online_active_luids} pre_existing={pre_existing_luids}"
+    )
+    assert "001" not in pre_existing_luids
+    assert dumped["baseline_size"] == 1
+
+
+def test_sm_table_missing_site_name_or_ip_defaults_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Partial walk: missing columns default to empty string.
+
+    Real radios occasionally omit a column (e.g. ``linkIpAddress`` on
+    firmware builds that don't populate it). The fold must default
+    missing values to ``""`` rather than raising.
+    """
+    from nora.drivers.snmp_pmp450i.subscribers import SubscriberSummary  # noqa: F401
+
+    inv = _build_inventory(tmp_path)
+    registry = _build_catalog(firmware="15.2.1", include_sm_oids=True)
+    monkeypatch.setattr(
+        "nora.drivers.snmp_pmp450i.subscribers.search_intervention_history",
+        lambda *args, **kwargs: [],
+    )
+
+    base = "1.3.6.1.4.1.161.19.3.1.4.1"
+    # Only .33 returned, .69 missing.
+    rows = [
+        (f"{base}.46.1", 86400),
+        (f"{base}.74.1", 25),
+        (f"{base}.19.1", 1),
+        (f"{base}.1.1", "001"),
+        (f"{base}.33.1", "BAJ02-VVU-TIJU-018"),
+        # NO .69 row.
+    ]
+    canned = _FakeSnmpClient(
+        values={},
+        walk_results={"1.3.6.1.4.1.161.19.3.1.4.1": rows},
+    )
+    driver = _build_driver(inventory=inv, registry=registry, canned=canned)
+
+    summary = driver.fetch_sm_table("ap-7400-01")
+    dumped = summary.model_dump(mode="json")
+
+    row_001 = next(r for r in dumped["online_active"] if r["luid"] == "001")
+    assert row_001["site_name"] == "BAJ02-VVU-TIJU-018"
+    assert row_001["ip_address"] == ""  # default empty, not an error

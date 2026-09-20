@@ -19,10 +19,12 @@
     "frameUtilizationUlPct": "1.3.6.1.4.1.161.19.3.1.12.1.2.0",
     "smSessionUptime": "1.3.6.1.4.1.161.19.3.1.4.1.46.0",
     "smCinr": "1.3.6.1.4.1.161.19.3.1.4.1.74.0",
+    "smIpAddress": "1.3.6.1.4.1.161.19.3.1.4.1.69.0",
     "smLinkStatus": "1.3.6.1.4.1.161.19.3.1.4.1.19.0",
     "smLuid": "1.3.6.1.4.1.161.19.3.1.4.1.1.0",
     "smRetransmits": "1.3.6.1.4.1.161.19.3.1.4.1.150.0",
     "smRxLevel": "1.3.6.1.4.1.161.19.3.1.4.1.34.0",
+    "smSiteName": "1.3.6.1.4.1.161.19.3.1.4.1.33.0",
     "spectrumScanDuration": "1.3.6.1.4.1.161.19.3.3.2.220.0",
     "spectrumScanAction": "1.3.6.1.4.1.161.19.3.3.2.221.0",
     "migrateCarrierFrequency": "1.3.6.1.4.1.161.19.3.1.10.1.1.1.1",
@@ -55,7 +57,9 @@
       "smSessionUptime",
       "smCinr",
       "smLinkStatus",
-      "smLuid"
+      "smLuid",
+      "smSiteName",
+      "smIpAddress"
     ],
     "snmp_get_sm_detailed_diagnostics": [
       "smCinr",
@@ -84,7 +88,7 @@
       "rebootIfRequired"
     ]
   },
-  "hmac_sha256": "081de66d9a375c7d83debeb374f3a9590fed6f6bc5c345782ddad30ddcca1dbd",
+  "hmac_sha256": "24deb9ebf47d5b7831b6be4a047f69dcd0f3e12911d2ef6fde49e2b1bfb0bd83",
   "_provenance": {
     "source": "WHISP-BOX-MIBV2-MIB and WHISP-APS-MIB from operator's ~/Downloads/PMP450 Series 25.1 MIBS.zip (extracted 2026-09-18). Cross-checked MIB object positions against shipped 25.1.0 baseline; no zero-drift differences found.",
     "verification_date": "2026-09-18",

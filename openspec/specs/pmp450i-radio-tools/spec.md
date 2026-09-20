@@ -58,7 +58,7 @@ Both tools SHALL return typed models (`ApSummary`, `FrameUtilization`) and MUST 
 
 ### Requirement: `snmp_get_sm_table` + `snmp_get_sm_detailed_diagnostics` — Typed Reads
 
-`snmp_get_sm_table` SHALL return typed `SubscriberSummary` rows with per-row category. `snmp_get_sm_detailed_diagnostics(luid: str)` SHALL return a typed `SmDetailedDiagnostics` (jitter, CINR, Rx/Tx levels, retransmits, interface error counters).
+`snmp_get_sm_table` SHALL return typed `SubscriberSummary` rows with per-row category. `snmp_get_sm_detailed_diagnostics(luid: str)` SHALL return a typed `SmDetailedDiagnostics` (jitter, CINR, Rx/Tx levels, retransmits, interface error counters). Every `SubscriberRecord` row returned by `snmp_get_sm_table` SHALL carry two optional identity fields per issue #69: `site_name` (from `whispLinkEntry.33` / `linkSiteName`, `DisplayString`) and `ip_address` (from `whispLinkEntry.69` / `linkIpAddress`, `IpAddress`); both default to `""` when the radio omits the column.
 
 #### Scenario: unbiased baseline excludes PRE_EXISTING_OFFLINE from candidates
 
@@ -71,6 +71,24 @@ Both tools SHALL return typed models (`ApSummary`, `FrameUtilization`) and MUST 
 - GIVEN a valid `luid` for an ONLINE_ACTIVE SM
 - WHEN `snmp_get_sm_detailed_diagnostics(luid=...)` runs
 - THEN a typed `SmDetailedDiagnostics` is returned
+
+#### Scenario: site_name and ip_address populated from whispLinkEntry.33 and .69
+
+- GIVEN a Cambium PMP 450i AP whose SM-table walk returns `linkSiteName` and `linkIpAddress` columns
+- WHEN `snmp_get_sm_table` runs
+- THEN every `SubscriberRecord` row carries the `site_name` and `ip_address` fields populated from the corresponding OID values AND the typed `ip_address` is the dotted-quad form (e.g. `"192.0.2.31"`) AND `site_name` is sanitised at the MCP boundary per the standard `Sanitizer` policy
+
+#### Scenario: pre_existing_offline_includes_zero_ip_rows
+
+- GIVEN a row with `session_uptime > 0` AND `link_status == "inSession"` AND `ip_address == "0.0.0.0"` (no L3 association yet)
+- WHEN `snmp_get_sm_table` runs
+- THEN the row is classified `PRE_EXISTING_OFFLINE` AND `pre_existing_offline_count` increments accordingly
+
+#### Scenario: recovered_subscriber_not_condemned_by_zero_ip
+
+- GIVEN a row with `session_uptime > 0` AND `link_status == "inSession"` AND `ip_address != "0.0.0.0"` (recovered SM with real IP)
+- WHEN `snmp_get_sm_table` runs
+- THEN the row is categorised by signal health (CINR + modulation) AND the IP value NEVER routes the row to `PRE_EXISTING_OFFLINE` by itself
 
 ## Sub-Cluster 3 — Spectrum + HITL-Gated Migration (Slice 4)
 

@@ -95,6 +95,8 @@ TOOLS_V1: dict[str, list[str]] = {
         "smCinr",
         "smLinkStatus",
         "smLuid",
+        "smSiteName",
+        "smIpAddress",
     ],
     "snmp_get_sm_detailed_diagnostics": [
         # Issue #54 (2026-09-19): dropped FSK-only ``smJitter`` (linkAveJitter,
