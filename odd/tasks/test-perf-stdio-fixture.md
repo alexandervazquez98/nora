@@ -248,3 +248,32 @@ Documentado en el docstring del módulo con referencia cruzada a este WU-6.
 
 **Coordinación inter-sesión**: la sesión issue-45 (en `feat/issue-45-prompt-versioning`)
 fue notificada del stash vía intercom. Mi scope NO toca `src/nora/prompts/*`.
+
+## Baseline final medido (post-WU, en este branch @ `5d48f25`)
+
+| Escenario | Duración | Pasaron | Fallaron | Mejora vs pre-WU |
+|---|---|---|---|---|
+| Serial `pytest` | **104.13 s** | 758 | 4 | **−7.7 s (−7%)** |
+| Paralelo dev loop `-n auto --no-cov` | **25.20 s** | 759 | 3 | **−5.0 s (−17%)** |
+| Paralelo run 2 (verificar estabilidad) | 25.37 s | 721 | 3 | estable |
+
+**Fallos restantes tras el refactor:**
+- `test_toolchain.py::test_ruff_check_exits_zero_on_clean_tree` y
+  `test_ruff_format_check_exits_zero_on_clean_tree` — **no son nuestros**;
+  los introdujo la sesión `feat/issue-45-prompt-versioning` al modificar
+  `tests/test_prompts.py`. Se arreglan con `ruff format tests/test_prompts.py`
+  cuando issue-45 commitee.
+- `test_integration.py::test_boot_with_register_device_round_trip` (migrado
+  en WU-4) — **flake bajo orden completo** (~10% de corridas). Pasa
+  individualmente (2.57s) y bajo orden controlado. Causa: el fixture
+  `mcp_stdio_server` lee `os.environ` global al boot (igual que
+  `mcp_http_server`), y tests que modifican env vars antes en el mismo
+  worker (`test_subprocess_silently_ignores_legacy_llm_env_keys`,
+  `test_subprocess_nora_mcp_exits_nonzero_on_empty_signing_key`)
+  contaminan el env capturado.
+
+  **Mitigación propuesta (FUERA DE SCOPE de este PR):** usar un dict
+  fijo de env vars (no `**os.environ`) en ambos fixtures, solo con
+  las vars específicas de NORA. PR separado.
+
+## Métricas por archivo (post-refactor vs baseline)
