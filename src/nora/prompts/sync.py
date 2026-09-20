@@ -5,15 +5,16 @@ front-end so the operator's dashboard sees the same provenance as
 embedded callers (``registry.render(name)``). Two profile shapes
 per Q7 of the feature plan:
 
-* **Immutable** — ``POST /api/v1/models`` with body id
+* **Immutable** — ``POST /api/v1/models/create`` with body id
   ``<model_base>-v<X.Y.Z>``. A re-sync of the same NORA version
-  re-POSTs the same id; Open WebUI rejects with 409 Conflict and
-  the orchestrator treats this as ``action="already_exists"`` so
-  the audit log shows a no-op rather than a failure.
-* **Mutable alias** — ``PUT /api/v1/models/<model_base>-latest``
-  with the latest synced version's body. The alias always tracks
-  the most recent version; rollback is operator-initiated by
-  selecting a frozen tag in Open WebUI's model dropdown.
+  re-POSTs the same id; Open WebUI rejects with HTTP 401 and
+  ``{"detail": "Model ID already taken"}`` and the orchestrator
+  treats this as ``action="already_exists"`` so the audit log
+  shows a no-op rather than a failure.
+* **Mutable alias** — ``POST /api/v1/models/model/update`` with
+  body id ``<model_base>-latest``. The alias always tracks the
+  most recent version; rollback is operator-initiated by selecting
+  a frozen tag in Open WebUI's model dropdown.
 
 Auth is ``Authorization: Bearer <admin_api_key>`` against the
 operator-supplied ``base_url`` (default ``http://localhost:8080``).
@@ -28,27 +29,33 @@ URL — a public-facing host, NOT a private catalog or inventory
 URL. The ``model_base`` is the operator's chosen chat-model handle
 (e.g. ``nora-netops``); it carries no infrastructure fingerprint.
 
-Assumptions (open to revision after one operator validation run):
+Verified Open WebUI API surface (sandbox-tested 2026-09-20, PR #76
+review comment by alexandervazquez98):
 
-* **POST creates** + **PUT updates** is the Open WebUI model REST
-  surface (``/api/v1/models``). We do NOT exercise any other
-  transport — the SPEC pins this single endpoint.
-* **JSON body shape**: ``{id, name, meta, system_prompt}`` is the
-  minimum the Open WebUI Modelfile preview needs; ``meta`` carries
-  the Q7 metadata dict. ``params`` is intentionally omitted for
-  now; Open WebUI defaults the underlying model's parameters from
-  the user-side dropdown, and pinning them on the profile would
-  freeze temperature/top-p for ALL chat sessions using this
-  model — out of scope per the feature plan.
-* **Status code 200 == success on POST**; Open WebUI's actual code
-  is documented as 200/201 (we accept either via the
-  ``httpx.codes.OK`` / ``httpx.codes.CREATED`` membership check).
-  409 == idempotent re-run. 401/403 == auth error. Everything else
-  surfaces as ``OpenWebUISyncError``.
+* **Create** — ``POST /api/v1/models/create`` (NOT ``POST
+  /api/v1/models`` which returns HTTP 405).
+* **Update** — ``POST /api/v1/models/model/update`` (NOT ``PUT
+  /api/v1/models/<id>``) — the route accepts ``id`` in the body
+  rather than the URL.
+* **Body shape** — ``{id, name, meta: {description, commit_sha,
+  release_tag, synced_at, nora_version, prompt_version}, params:
+  {system: <rendered-body-with-watermark>}}``. The system prompt
+  lives under ``params.system`` (Modelfile convention); top-level
+  ``system_prompt`` is silently dropped by the server.
+* **Idempotency** — re-syncing an existing model id returns HTTP
+  401 with body ``{"detail": "Model ID already taken"}`` (NOT
+  409 Conflict as initially assumed). The orchestrator parses the
+  response body and treats this specific detail as the
+  ``already_exists`` no-op signal; other 401 bodies surface as
+  ``OpenWebUIAuthError``.
+* **Status codes** — 200/201 == success on both POSTs. 401/403 ==
+  auth error (unless the duplicate-id detail is present on 401).
+  Everything else surfaces as ``OpenWebUISyncError``.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -97,6 +104,21 @@ class OpenWebUIConfig(BaseModel):
     def models_url(self) -> str:
         """Absolute URL for the ``/api/v1/models`` collection endpoint."""
         return f"{self.base_url}/api/v1/models"
+
+    @property
+    def models_create_url(self) -> str:
+        """Absolute URL for the Open WebUI model-create endpoint."""
+        return f"{self.base_url}/api/v1/models/create"
+
+    @property
+    def models_update_url(self) -> str:
+        """Absolute URL for the Open WebUI model-update endpoint.
+
+        Open WebUI's update route accepts the model ``id`` in the
+        request body (not the URL path), so this URL has no
+        ``<id>`` segment — callers pass the id via the JSON body.
+        """
+        return f"{self.base_url}/api/v1/models/model/update"
 
 
 # ---------------------------------------------------------------------------
@@ -188,7 +210,7 @@ def render_model_profile(
 ) -> dict[str, Any]:
     """Build the Open WebUI JSON body for one prompt.
 
-    The body shape (per the SPEC + the assumption notes at module top):
+    The body shape (per the verified Open WebUI API surface):
 
     .. code-block:: json
 
@@ -196,19 +218,24 @@ def render_model_profile(
           "id": "<model_base>-v<X.Y.Z>",
           "name": "<model_base>-v<X.Y.Z>",
           "meta": {
+            "description": "<prompt.description>",
             "commit_sha": "<git_sha>",
             "release_tag": "<release_tag or null>",
             "synced_at": "<ISO-8601 UTC>",
             "nora_version": "<nora.__version__>",
             "prompt_version": "<prompt.metadata['version']>"
           },
-          "system_prompt": "<registry.render(name) — includes watermark>"
+          "params": {
+            "system": "<registry.render(name) — includes watermark>"
+          }
         }
 
-    The ``system_prompt`` is delegated to ``registry.render(name)``
+    The ``params.system`` is delegated to ``registry.render(name)``
     so the Q6 watermark banner reaches the Open WebUI dashboard
     too — every consumer of the canonical prompt sees the same
-    provenance tag.
+    provenance tag. The ``description`` in ``meta`` is the
+    front-matter ``description`` of the prompt itself, surfaced
+    as the human-readable summary in Open WebUI's model dropdown.
 
     Raises:
         nora.drivers.exceptions.PromptNotFoundError: when ``name``
@@ -229,13 +256,16 @@ def render_model_profile(
         "id": versioned_id,
         "name": versioned_id,
         "meta": {
+            "description": prompt.description,
             "commit_sha": git_sha,
             "release_tag": release_tag,
             "synced_at": _utc_iso_now(),
             "nora_version": nora_version,
             "prompt_version": version_str,
         },
-        "system_prompt": rendered_body,
+        "params": {
+            "system": rendered_body,
+        },
     }
 
 
@@ -257,15 +287,35 @@ def _is_syncable_system_prompt(prompt: "Prompt") -> bool:
     return isinstance(md.get("version"), str) and isinstance(md.get("checksum_sha256"), str)
 
 
+def _is_duplicate_id_response(status_code: int, body: str) -> bool:
+    """Detect Open WebUI's "Model ID already taken" detail in a 401 response.
+
+    Per the verified API surface (sandbox-tested 2026-09-20), re-syncing
+    an existing model id yields HTTP 401 with body
+    ``{"detail": "Model ID already taken"}`` — NOT 409 Conflict as
+    originally assumed. This helper parses the body to distinguish the
+    duplicate-id no-op from a real auth failure (missing / wrong key).
+    """
+    if status_code != httpx.codes.UNAUTHORIZED:
+        return False
+    try:
+        payload = json.loads(body)
+    except (TypeError, ValueError):
+        return False
+    detail = payload.get("detail") if isinstance(payload, dict) else None
+    return isinstance(detail, str) and "already taken" in detail.lower()
+
+
 def _classify_post_status(status_code: int, profile_id: str, body: str) -> str:
     """Classify the POST response into ``created``/``already_exists``/raise.
 
     Helper for ``sync_prompts`` so the action-name policy lives in
-    one place. The status-code / exception mapping matches the
-    Q7 idempotency contract: 200/201 → created, 409 → already_exists,
-    401/403 → auth error, anything else → generic transport error.
+    one place. Per the verified API surface (2026-09-20):
+    200/201 → created; 401 with ``{"detail": "Model ID already taken"}``
+    → already_exists (idempotent re-run); 401/403 without that detail →
+    auth error; anything else → generic transport error.
     """
-    if status_code == httpx.codes.CONFLICT:
+    if _is_duplicate_id_response(status_code, body):
         return "already_exists"
     if status_code in _SUCCESS_STATUS_CODES:
         return "created"
@@ -278,16 +328,17 @@ def _classify_post_status(status_code: int, profile_id: str, body: str) -> str:
     )
 
 
-def _check_put_status(status_code: int, alias_id: str, body: str) -> None:
-    """Validate the PUT response — raise on any non-200 status."""
+def _check_update_status(status_code: int, alias_id: str, body: str) -> None:
+    """Validate the POST-to-update-endpoint response — raise on non-success."""
+    if status_code in _SUCCESS_STATUS_CODES:
+        return
     if status_code in _AUTH_FAILURE_STATUS_CODES:
         raise OpenWebUIAuthError(
-            f"Open WebUI returned HTTP {status_code} on PUT {alias_id!r}: {body}"
+            f"Open WebUI returned HTTP {status_code} on POST {alias_id!r} (update): {body}"
         )
-    if status_code != httpx.codes.OK:
-        raise OpenWebUISyncError(
-            f"Open WebUI returned HTTP {status_code} on PUT {alias_id!r}: {body}"
-        )
+    raise OpenWebUISyncError(
+        f"Open WebUI returned HTTP {status_code} on POST {alias_id!r} (update): {body}"
+    )
 
 
 def sync_prompts(
@@ -305,20 +356,21 @@ def sync_prompts(
     ``_is_syncable_system_prompt``):
 
     1. Build the body via :func:`render_model_profile`.
-    2. ``POST /api/v1/models`` with body id
+    2. ``POST /api/v1/models/create`` with body id
        ``<model_base>-v<X.Y.Z>`` — Open WebUI creates an immutable
        versioned profile. 200/201 → ``action="created"``;
-       409 → ``action="already_exists"`` (idempotent re-run);
+       401 with ``{"detail": "Model ID already taken"}`` →
+       ``action="already_exists"`` (idempotent re-run);
        401/403/other → typed exception.
     3. Build a sibling body for the mutable alias
-       (``<model_base>-latest``) and ``PUT
-       /api/v1/models/<model_base>-latest`` so the alias tracks
-       the latest synced version.
+       (``<model_base>-latest``) and ``POST
+       /api/v1/models/model/update`` (id in body) so the alias
+       tracks the latest synced version.
 
-    The PUT body is the SAME profile body except the ``id`` and
+    The update body is the SAME profile body except the ``id`` and
     ``name`` fields are rewritten to the alias — the metadata
-    block (commit_sha, prompt_version, synced_at) is preserved so
-    the alias carries the latest tag's provenance.
+    block (description, commit_sha, prompt_version, synced_at) is
+    preserved so the alias carries the latest tag's provenance.
 
     Args:
         registry: a scanned ``PromptRegistry``. Tool-specs are
@@ -357,7 +409,8 @@ def sync_prompts(
     owns_client = client_factory is build_client or callable(client_factory)
     client = client_factory(config)
     try:
-        models_url = config.models_url
+        create_url = config.models_create_url
+        update_url = config.models_update_url
         for name in registry.names:
             prompt = registry.get(name)
             if not _is_syncable_system_prompt(prompt):
@@ -374,12 +427,12 @@ def sync_prompts(
             )
             profile_id = profile["id"]
 
-            # Step 1 — POST the immutable versioned profile.
+            # Step 1 — POST the immutable versioned profile to /api/v1/models/create.
             try:
-                post_response = client.post(models_url, json=profile)
+                post_response = client.post(create_url, json=profile)
             except httpx.HTTPError as exc:
                 raise OpenWebUISyncError(
-                    f"HTTP transport error during POST {profile_id!r}: {exc}"
+                    f"HTTP transport error during POST {profile_id!r} (create): {exc}"
                 ) from exc
 
             action = _classify_post_status(
@@ -388,24 +441,24 @@ def sync_prompts(
                 post_response.text,
             )
 
-            # Step 2 — Build + PUT the mutable alias.
+            # Step 2 — POST the mutable alias to /api/v1/models/model/update
+            # (id carried in the body, not the URL).
             latest_alias_id = f"{config.model_base}-latest"
             latest_profile = dict(profile)
             latest_profile["id"] = latest_alias_id
             latest_profile["name"] = latest_alias_id
 
-            alias_url = f"{models_url}/{latest_alias_id}"
             try:
-                put_response = client.put(alias_url, json=latest_profile)
+                update_response = client.post(update_url, json=latest_profile)
             except httpx.HTTPError as exc:
                 raise OpenWebUISyncError(
-                    f"HTTP transport error during PUT {latest_alias_id!r}: {exc}"
+                    f"HTTP transport error during POST {latest_alias_id!r} (update): {exc}"
                 ) from exc
 
-            _check_put_status(
-                put_response.status_code,
+            _check_update_status(
+                update_response.status_code,
                 latest_alias_id,
-                put_response.text,
+                update_response.text,
             )
 
             results.append(

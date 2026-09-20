@@ -159,11 +159,13 @@ nora prompt sync \
 
 ### What gets created
 
-- `<model_base>-v<X.Y.Z>` — **immutable** versioned profile (POST).
-  Re-running sync with the same NORA version is a no-op (server returns
-  `409 CONFLICT`, treated as success).
-- `<model_base>-latest` — **mutable alias** updated in place (PUT) to
-  point at the freshly-synced version.
+- `<model_base>-v<X.Y.Z>` — **immutable** versioned profile (POST to
+  `/api/v1/models/create`). Re-running sync with the same NORA version
+  is a no-op (server returns HTTP 401 with body
+  `{"detail": "Model ID already taken"}`, treated as success).
+- `<model_base>-latest` — **mutable alias** updated in place (POST to
+  `/api/v1/models/model/update` with id in body) to point at the
+  freshly-synced version.
 
 `<model_base>` defaults to `nora-netops` and is configurable via
 `--model-base`.

@@ -572,7 +572,7 @@ the Open WebUI duplicate-id pattern — either the spec's original
 text ``"Uh-oh! This model id is already registered..."``
 verified against ``constants.py:55``; both substrings are matched)
 and POSTs the `<base>-latest` update to `POST /api/v1/models/model/update`
-with the alias id carried in the body (mutable alias). Both carry)
+with the alias id carried in the body (mutable alias). Both carry
 metadata `{commit_sha, release_tag, synced_at, nora_version, prompt_version}`.
 
 ### Instant rollback

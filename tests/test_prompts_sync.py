@@ -6,28 +6,31 @@ Maps the prompt-versioning WU-3 contract:
   from ``base_url`` and carries the operator-overridable defaults
   (``http://localhost:8080``, ``nora-netops``, 30s, 2 retries).
 * ``render_model_profile`` — builds the JSON body for one prompt:
-  ``{id, name, meta, params, system_prompt}`` plus the Q7 metadata
-  block (``commit_sha``, ``release_tag``, ``synced_at``, ``nora_version``,
-  ``prompt_version``). Pulls the body via ``registry.render(name)`` so
-  the watermark banner is included.
-* ``sync_prompts`` — orchestrates a POST for the immutable
-  ``<base>-v<X.Y.Z>`` profile (409 = idempotent success) and a PUT
-  for the mutable ``<base>-latest`` alias. Returns one result dict
-  per prompt with ``action in {"created", "already_exists", "updated"}``.
-* Exception contract — typed errors on 401/403/5xx; 409 is success.
+  ``{id, name, meta, params: {system: <rendered>}}`` plus the Q7
+  metadata block (``description``, ``commit_sha``, ``release_tag``,
+  ``synced_at``, ``nora_version``, ``prompt_version``). Pulls the
+  body via ``registry.render(name)`` so the watermark banner is
+  included.
+* ``sync_prompts`` — orchestrates a POST to ``/api/v1/models/create``
+  for the immutable ``<base>-v<X.Y.Z>`` profile and a POST to
+  ``/api/v1/models/model/update`` (id in body) for the mutable
+  ``<base>-latest`` alias. Returns one result dict per prompt with
+  ``action in {"created", "already_exists", "updated"}``.
+* Exception contract — typed errors on 401/403/5xx; a 401 with body
+  ``{"detail": "Model ID already taken"}`` is treated as the
+  idempotent ``already_exists`` signal (verified API surface per
+  PR #76 sandbox test).
 
 Zero-Leakage: ``http://testnet`` / ``192.0.2.x`` style addresses only.
 Hermeticity: ``httpx.MockTransport`` wired into ``build_client`` via
 the optional ``client_factory`` injection point — no real network,
 no ``.env`` mutation, no console scripts.
 
-The Open WebUI REST surface used here (PUT to ``/api/v1/models`` for
-mutating an existing record vs. POST for creation) is the documented
-behavior of Open WebUI's ``models.create`` / ``models.update``
-endpoints; the SPEC pins POST for *new* model creation only
-(immutable profiles), and Open WebUI's general PUT-mutates-resource
-contract for the mutable alias. See the assumption notes in
-``sync.render_model_profile``'s docstring.
+The Open WebUI REST surface used here (``POST /api/v1/models/create``
+for new model creation and ``POST /api/v1/models/model/update`` for
+mutating an existing one with id-in-body) is the verified behaviour
+of Open WebUI's ``models.create`` / ``models.update`` endpoints per
+the sandbox validation captured in PR #76's review thread.
 """
 
 from __future__ import annotations
@@ -160,13 +163,18 @@ def test_config_requires_admin_api_key() -> None:
 
 
 def test_render_model_profile_uses_registry_render() -> None:
-    """``system_prompt`` comes from ``registry.render(name)`` so the watermark is included.
+    """``params.system`` comes from ``registry.render(name)`` so the watermark is included.
 
     Q6 freezes the watermark banner; WU-3 builds the Open WebUI
     payload on top of ``render()``, not the bare ``body``, so the
     LLM running in Open WebUI sees the same provenance tag as
     embedded callers (the MCP server wrappers already switched in
     WU-2).
+
+    The system prompt lives under ``params.system`` (Modelfile
+    convention) per the verified Open WebUI API surface — a
+    top-level ``system_prompt`` field is silently dropped by the
+    server, so this test pins the nested path.
     """
     from nora.prompts.sync import OpenWebUIConfig, render_model_profile
 
@@ -182,13 +190,13 @@ def test_render_model_profile_uses_registry_render() -> None:
         git_sha="abcdef12",
         release_tag="v0.3.5",
     )
-    system_prompt_field = body["system_prompt"]
-    assert "Test body line" in system_prompt_field
+    system_field = body["params"]["system"]
+    assert "Test body line" in system_field
     # Watermark banner (Q6 format).
-    assert "NORA-PROMPT" in system_prompt_field
-    assert "netops_orchestrator" in system_prompt_field
-    assert "0.3.5" in system_prompt_field
-    assert "sha:" in system_prompt_field
+    assert "NORA-PROMPT" in system_field
+    assert "netops_orchestrator" in system_field
+    assert "0.3.5" in system_field
+    assert "sha:" in system_field
 
 
 def test_render_model_profile_includes_metadata_fields() -> None:
@@ -261,16 +269,20 @@ def test_render_model_profile_uses_custom_model_base() -> None:
 
 
 # ---------------------------------------------------------------------------
-# sync_prompts — POST/PUT orchestration via httpx.MockTransport
+# sync_prompts — POST-to-create + POST-to-update orchestration via httpx.MockTransport
 # ---------------------------------------------------------------------------
 
 
 def test_sync_prompts_posts_versioned_profile() -> None:
-    """MockTransport returns 200 → exactly one POST per registered prompt, body id is versioned.
+    """MockTransport 200 → 2 POSTs/prompt (create + update), all POST, no PUT.
 
-    Per Q7, the immutable profile is created via POST. The PUT for
-    the mutable ``<base>-latest`` alias follows on the SAME body so
-    the alias tracks the latest synced tag.
+    Per Q7 and the verified Open WebUI API surface (PR #76 review
+    comment by alexandervazquez98): the immutable
+    ``<base>-v<X.Y.Z>`` profile is created via ``POST
+    /api/v1/models/create``; the mutable ``<base>-latest`` alias
+    is updated via ``POST /api/v1/models/model/update`` (id is
+    carried in the body, not the URL). Both endpoints are POST — no
+    PUT is used.
     """
     from nora.prompts.sync import (
         OpenWebUIConfig,
@@ -291,10 +303,9 @@ def test_sync_prompts_posts_versioned_profile() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         seen.append(request)
         bodies.append(json.loads(request.content.decode("utf-8")))
-        # POST returns 200 (treated as success), PUT returns 200 too.
-        # Whether Open WebUI returns 200 or 201 on create is documented
-        # as \"either is valid\"; ``httpx.codes.OK`` is the canonical
-        # accepted value here.
+        # 200 == success on both create and update endpoints.
+        # Open WebUI's create endpoint returns 200 or 201
+        # (``httpx.codes.OK`` is the canonical accepted value here).
         return httpx.Response(httpx.codes.OK, json={"id": "ok"})
 
     def client_factory(cfg: OpenWebUIConfig) -> httpx.Client:
@@ -309,28 +320,69 @@ def test_sync_prompts_posts_versioned_profile() -> None:
         client_factory=client_factory,
     )
 
-    # 2 prompts × (POST + PUT) = 4 requests.
+    # 2 prompts × (POST create + POST update) = 4 wire requests.
     assert len(seen) == 4, (
-        f"sync_prompts must POST + PUT per prompt; got {len(seen)} requests: "
-        f"methods={[r.method for r in seen]}"
+        f"sync_prompts must POST create + POST update per prompt; got {len(seen)} "
+        f"requests: methods={[r.method for r in seen]}"
     )
     methods = [r.method for r in seen]
-    assert methods.count("POST") == 2, f"expected exactly 2 POSTs, got methods={methods}"
-    assert methods.count("PUT") == 2, f"expected exactly 2 PUTs, got methods={methods}"
-
-    # Each POST body should carry the versioned id (Q7 immutable profile).
-    post_bodies = [b for req, b in zip(seen, bodies) if req.method == "POST"]
-    post_ids = sorted(b["id"] for b in post_bodies)
-    assert post_ids == ["nora-netops-v0.3.5", "nora-netops-v0.3.5"], (
-        f"versioned POST ids should be nora-netops-v0.3.5 (with one per prompt), got {post_ids}"
+    assert methods.count("POST") == 4, f"expected all 4 POSTs, got methods={methods}"
+    # No PUT — the update endpoint takes POST with id in the body.
+    assert "PUT" not in methods, (
+        f"PUT must NOT appear (use POST /api/v1/models/model/update); got methods={methods}"
     )
 
-    # `latest` PUT body id is the mutable alias.
-    put_bodies = [b for req, b in zip(seen, bodies) if req.method == "PUT"]
-    put_ids = sorted(b["id"] for b in put_bodies)
-    assert put_ids == ["nora-netops-latest", "nora-netops-latest"], (
-        f"latest PUT ids should be nora-netops-latest, got {put_ids}"
+    # Per-prompt interleaving: the create POST goes to /api/v1/models/create
+    # and the update POST goes to /api/v1/models/model/update.
+    urls = [str(r.url) for r in seen]
+    assert urls[0].endswith("/api/v1/models/create"), (
+        f"first POST must target /api/v1/models/create; got {urls[0]!r}"
     )
+    assert urls[1].endswith("/api/v1/models/model/update"), (
+        f"second POST must target /api/v1/models/model/update; got {urls[1]!r}"
+    )
+    assert urls[2].endswith("/api/v1/models/create"), (
+        f"third POST must target /api/v1/models/create; got {urls[2]!r}"
+    )
+    assert urls[3].endswith("/api/v1/models/model/update"), (
+        f"fourth POST must target /api/v1/models/model/update; got {urls[3]!r}"
+    )
+
+    # Aggregate URL pattern counts (defence-in-depth against silent routing
+    # regressions — two creates + two updates must be observable).
+    create_urls = [u for u in urls if "/api/v1/models/create" in u]
+    update_urls = [u for u in urls if "/api/v1/models/model/update" in u]
+    assert len(create_urls) == 2, f"expected 2 create POSTs; got {create_urls!r}"
+    assert len(update_urls) == 2, f"expected 2 update POSTs; got {update_urls!r}"
+
+    # Create POST bodies: params.system (NOT top-level system_prompt),
+    # id starts with nora-netops-v<X.Y.Z>.
+    create_bodies = [b for req, b in zip(seen, bodies) if "/api/v1/models/create" in str(req.url)]
+    assert len(create_bodies) == 2
+    for b in create_bodies:
+        assert "system_prompt" not in b, (
+            "top-level system_prompt is silently dropped by Open WebUI; "
+            f"got keys={list(b.keys())!r}"
+        )
+        assert "params" in b and "system" in b["params"], (
+            f"system prompt must live under params.system; got body={b!r}"
+        )
+        assert b["id"].startswith("nora-netops-v"), (
+            f"create POST id must be versioned (nora-netops-v<X.Y.Z>); got {b['id']!r}"
+        )
+        assert "NORA-PROMPT" in b["params"]["system"], (
+            "watermark banner must be present in params.system"
+        )
+
+    # Update POST bodies: id == nora-netops-latest (in the body, not URL).
+    update_bodies = [
+        b for req, b in zip(seen, bodies) if "/api/v1/models/model/update" in str(req.url)
+    ]
+    assert len(update_bodies) == 2
+    for b in update_bodies:
+        assert b["id"] == "nora-netops-latest", (
+            f"update POST id must be the latest alias; got {b['id']!r}"
+        )
 
     # Result shape — two result entries, all "created" (initial POST was 200).
     assert len(results) == 2
@@ -342,15 +394,18 @@ def test_sync_prompts_posts_versioned_profile() -> None:
     _ = OpenWebUISyncError
 
 
-def test_sync_prompts_treats_409_as_idempotent_success() -> None:
-    """A 409 from POST is treated as idempotent success (already_exists).
+def test_sync_prompts_treats_duplicate_id_as_idempotent_success() -> None:
+    """A 401 with the duplicate-id detail is treated as idempotent success (already_exists).
 
     Q7 says the immutable profile is created fresh per run. If the
-    same NORA version is re-synced, Open WebUI rejects the POST
-    with 409 Conflict because the id (``<base>-v<X.Y.Z>``) already
-    exists. We surface this as ``action="already_exists"`` so the
-    operator's audit log shows the sync was a no-op rather than a
-    failure.
+    same NORA version is re-synced, Open WebUI rejects the create
+    POST with HTTP 401 (NOT 409 Conflict as originally assumed)
+    and body ``{"detail": "Model ID already taken"}`` because the
+    id (``<base>-v<X.Y.Z>``) already exists. The orchestrator
+    parses the response body and surfaces this as
+    ``action="already_exists"`` so the operator's audit log shows
+    the sync was a no-op rather than a failure — distinct from a
+    real auth failure which surfaces ``OpenWebUIAuthError``.
     """
     from nora.prompts.sync import OpenWebUIConfig, sync_prompts
 
@@ -358,9 +413,17 @@ def test_sync_prompts_treats_409_as_idempotent_success() -> None:
     config = OpenWebUIConfig(admin_api_key="dummy", model_base="nora-netops")
 
     def handler(request: httpx.Request) -> httpx.Response:
-        # POST returns 409 (already exists), PUT still succeeds.
-        if request.method == "POST":
-            return httpx.Response(httpx.codes.CONFLICT, json={"detail": "exists"})
+        # Dispatch by URL pattern (both endpoints are POST): the
+        # create endpoint returns the duplicate-id detail, the
+        # update endpoint succeeds. URL-based dispatch matches the
+        # verified Open WebUI API surface where every mutation
+        # verb is POST.
+        url = str(request.url)
+        if "/api/v1/models/create" in url:
+            return httpx.Response(
+                httpx.codes.UNAUTHORIZED,
+                json={"detail": "Model ID already taken"},
+            )
         return httpx.Response(httpx.codes.OK, json={"id": "ok"})
 
     def client_factory(cfg: OpenWebUIConfig) -> httpx.Client:
@@ -377,21 +440,32 @@ def test_sync_prompts_treats_409_as_idempotent_success() -> None:
 
     assert len(results) == 1
     entry = results[0]
-    assert entry["action"] == "already_exists", f"409 must surface as already_exists; got {entry!r}"
-    assert entry["http_status"] == 409
+    assert entry["action"] == "already_exists", (
+        f"401 with duplicate-id detail must surface as already_exists; got {entry!r}"
+    )
+    assert entry["http_status"] == 401
     assert entry["name"] == "netops_orchestrator"
     assert entry["version"] == "0.3.5"
 
 
-def test_sync_prompts_puts_latest_alias() -> None:
-    """The PUT body for ``<base>-latest`` carries the same Q7 metadata fields."""
+def test_sync_prompts_posts_to_update_endpoint_for_latest_alias() -> None:
+    """The POST body to the update endpoint for ``<base>-latest`` carries the Q7 metadata fields.
+
+    Per the verified Open WebUI API surface, the mutable alias is
+    updated via ``POST /api/v1/models/model/update`` (id in body,
+    not URL) — NOT ``PUT /api/v1/models/<id>``. The ``params.system``
+    payload is the same body used for the immutable create POST;
+    only the ``id``/``name`` are rewritten to the alias.
+    """
     from nora.prompts.sync import OpenWebUIConfig, sync_prompts
 
     registry = _make_registry([("netops_orchestrator", "0.3.5", "Body.\n")])
     config = OpenWebUIConfig(admin_api_key="dummy", model_base="nora-netops")
+    seen: list[httpx.Request] = []
     captured_bodies: list[dict[str, Any]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
         captured_bodies.append(json.loads(request.content.decode("utf-8")))
         return httpx.Response(httpx.codes.OK, json={"id": "ok"})
 
@@ -407,17 +481,46 @@ def test_sync_prompts_puts_latest_alias() -> None:
         client_factory=client_factory,
     )
 
-    put_body = next(b for i, b in enumerate(captured_bodies) if i == 1)
-    # PUT body id matches the mutable alias (Q7).
-    assert put_body["id"] == "nora-netops-latest"
-    # Metadata fields are carried through to the alias PUT.
-    assert put_body["meta"]["commit_sha"] == "deadbeef"
-    assert put_body["meta"]["release_tag"] == "v0.3.5"
-    assert put_body["meta"]["nora_version"] == "0.3.5"
+    # Second wire request is the update POST (after the create POST at [0]).
+    update_request = seen[1]
+    assert update_request.method == "POST", (
+        f"alias update must be POST (NOT PUT); got method={update_request.method!r}"
+    )
+    assert "/api/v1/models/model/update" in str(update_request.url), (
+        f"alias update must hit /api/v1/models/model/update; got url={update_request.url!r}"
+    )
+
+    # Update POST body id matches the mutable alias (Q7).
+    update_body = captured_bodies[1]
+    assert update_body["id"] == "nora-netops-latest", (
+        f"update POST body id must be nora-netops-latest; got {update_body['id']!r}"
+    )
+    # params.system (NOT top-level system_prompt).
+    assert "system_prompt" not in update_body, (
+        "top-level system_prompt is silently dropped by Open WebUI; "
+        f"got keys={list(update_body.keys())!r}"
+    )
+    assert "params" in update_body and "system" in update_body["params"], (
+        f"update body must carry params.system; got {update_body!r}"
+    )
+    # Metadata fields are carried through to the alias update.
+    assert update_body["meta"]["commit_sha"] == "deadbeef"
+    assert update_body["meta"]["release_tag"] == "v0.3.5"
+    assert update_body["meta"]["nora_version"] == "0.3.5"
 
 
-def test_sync_prompts_raises_on_401() -> None:
-    """401 from server → ``OpenWebUIAuthError``."""
+def test_sync_prompts_raises_on_auth_failure_401() -> None:
+    """A NON-duplicate 401 from server → ``OpenWebUIAuthError``.
+
+    Per the verified Open WebUI API surface: a 401 with body
+    ``{"detail": "Model ID already taken"}`` is the duplicate-id
+    no-op signal and is treated as ``action="already_exists"`` (see
+    ``test_sync_prompts_treats_duplicate_id_as_idempotent_success``).
+    Any other 401 body — e.g. ``{"detail": "Invalid token"}`` from a
+    missing or wrong ``admin_api_key`` — is a real auth failure and
+    surfaces ``OpenWebUIAuthError`` so the operator must fix the
+    credentials.
+    """
     from nora.prompts.sync import (
         OpenWebUIAuthError,
         OpenWebUIConfig,
@@ -428,7 +531,9 @@ def test_sync_prompts_raises_on_401() -> None:
     config = OpenWebUIConfig(admin_api_key="dummy", model_base="nora-netops")
 
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(httpx.codes.UNAUTHORIZED, json={"detail": "auth"})
+        # NON-duplicate 401: a real auth failure (missing/wrong token),
+        # NOT the "Model ID already taken" duplicate-id detail.
+        return httpx.Response(httpx.codes.UNAUTHORIZED, json={"detail": "Invalid token"})
 
     def client_factory(cfg: OpenWebUIConfig) -> httpx.Client:
         return _make_mock_client(handler)
@@ -557,7 +662,7 @@ def test_sync_prompts_skips_tool_specs() -> None:
     # Only the system prompt was synced.
     assert len(results) == 1
     assert results[0]["name"] == "netops_orchestrator"
-    # 1 system prompt × (POST + PUT) = 2 wire requests.
+    # 1 system prompt × (POST create + POST update) = 2 wire requests.
     assert len(captured) == 2
 
 
@@ -571,9 +676,9 @@ __all__ = [
     "test_render_model_profile_includes_versioned_id",
     "test_render_model_profile_uses_custom_model_base",
     "test_sync_prompts_posts_versioned_profile",
-    "test_sync_prompts_treats_409_as_idempotent_success",
-    "test_sync_prompts_puts_latest_alias",
-    "test_sync_prompts_raises_on_401",
+    "test_sync_prompts_treats_duplicate_id_as_idempotent_success",
+    "test_sync_prompts_posts_to_update_endpoint_for_latest_alias",
+    "test_sync_prompts_raises_on_auth_failure_401",
     "test_sync_prompts_raises_on_403",
     "test_sync_prompts_raises_on_500",
     "test_sync_prompts_skips_tool_specs",
