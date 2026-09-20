@@ -1088,6 +1088,9 @@ _EXPOSED_PROMPTS: tuple[str, ...] = (
     "snmp_reboot_radio",
     "snmp_run_spectrum_analysis",
     "nora_get_tool_spec",  # NEW: meta-tool bridge
+    "icmp_run_sector_stability_probe",  # Issue #61 / PR1 — ICMP stability probe.
+    "icmp_get_sector_stability_progress",  # Issue #61 / PR1 — ICMP progress poll.
+    "icmp_cancel_sector_stability_probe",  # Issue #61 / PR1 — ICMP cancel.
 )
 
 
@@ -1146,8 +1149,26 @@ def _get_device_lifecycle_summary_spec() -> str:
 
 @mcp.prompt(name="icmp_list_probe_runs")
 def _icmp_list_probe_runs_spec() -> str:
-    """Tool spec for icmp_list_probe_runs (Tier 1)."""
+    """Tool spec for icmp_list_probe_runs (Tier 0)."""
     return get_prompt_registry().get("icmp_list_probe_runs").body
+
+
+@mcp.prompt(name="icmp_run_sector_stability_probe")
+def _icmp_run_sector_stability_probe_spec() -> str:
+    """Tool spec for icmp_run_sector_stability_probe (Tier 0)."""
+    return get_prompt_registry().get("icmp_run_sector_stability_probe").body
+
+
+@mcp.prompt(name="icmp_get_sector_stability_progress")
+def _icmp_get_sector_stability_progress_spec() -> str:
+    """Tool spec for icmp_get_sector_stability_progress (Tier 0)."""
+    return get_prompt_registry().get("icmp_get_sector_stability_progress").body
+
+
+@mcp.prompt(name="icmp_cancel_sector_stability_probe")
+def _icmp_cancel_sector_stability_probe_spec() -> str:
+    """Tool spec for icmp_cancel_sector_stability_probe (Tier 0)."""
+    return get_prompt_registry().get("icmp_cancel_sector_stability_probe").body
 
 
 @mcp.prompt(name="save_intervention_record")

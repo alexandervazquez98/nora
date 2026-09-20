@@ -202,7 +202,6 @@ def test_subprocess_nora_mcp_exposes_fifteen_tools(
     assert tool_names == expected, (
         f"`nora-mcp` (HTTP) must expose exactly the 18 thin tools in order; got {tool_names!r}"
     )
-    )
 
 
 def test_subprocess_python_dash_m_nora_exposes_same_tools(
@@ -239,8 +238,7 @@ def test_subprocess_python_dash_m_nora_exposes_same_tools(
         "nora_get_tool_spec",
     ]
     assert tool_names == expected, (
-        f"`python -m nora` (HTTP) must expose exactly the 18 thin tools in order; got {tool_names!r}"
-    )
+        f"`python -m nora` (HTTP) must expose the 18 thin tools in order; got {tool_names!r}"
     )
 
 
