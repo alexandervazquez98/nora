@@ -247,8 +247,18 @@ def snmp_get_sm_table(device_id: str) -> dict[str, Any]:
     Returns a ``SubscriberSummary`` carrying three buckets
     (``ONLINE_ACTIVE``, ``ACTIVE_DEGRADED``, ``PRE_EXISTING_OFFLINE``)
     plus the ``baseline_size`` (ONLINE + DEGRADED; the pre-existing
-    bucket is the cross-checked exclusion). The helper applies the
-    PRE_DIAGNOSTIC cross-check via
+    bucket is the cross-checked exclusion). Every ``SubscriberRecord``
+    row in every bucket carries two optional fields per issue #69:
+
+    * ``site_name`` — ``whispLinkEntry.33`` (``linkSiteName``,
+      ``DisplayString``), e.g. ``"BAJ02-VVU-TIJU-017"``. Free-text;
+      sanitised at the MCP boundary.
+    * ``ip_address`` — ``whispLinkEntry.69`` (``linkIpAddress``,
+      ``IpAddress``), e.g. ``"192.0.2.31"``. Typed scalar; the null
+      IPv4 sentinel ``"0.0.0.0"`` is the heuristic trigger that routes
+      the row to ``PRE_EXISTING_OFFLINE``.
+
+    The helper applies the PRE_DIAGNOSTIC cross-check via
     ``search_intervention_history(stage="PRE_DIAGNOSTIC")`` BEFORE
     ``categorize_subscribers(...)`` runs; reordering the calls breaks
     the cross-check.
