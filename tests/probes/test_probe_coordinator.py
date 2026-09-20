@@ -600,16 +600,27 @@ def test_run_probe_breaks_early_when_consumer_stops(
 
     async def _run() -> int:
         count = 0
-        async for _ in run_probe(
+        # Explicitly pin the generator so we can ``aclose()`` it
+        # deterministically. Under Python 3.12, breaking out of an
+        # ``async for`` does NOT immediately execute the generator's
+        # ``finally:`` block before ``asyncio.run()`` closes the
+        # event loop; relying on it makes ``close_count`` flaky when
+        # the test runs in isolation. The field-test observation on
+        # PR #75 (2026-09-20) called this out.
+        gen = run_probe(
             driver=driver,
             device_id="ap-7400-01",
             settings=settings,
             duration_seconds=60,
             interval_seconds=0.01,
-        ):
-            count += 1
-            if count >= 3:
-                break
+        )
+        try:
+            async for _ in gen:
+                count += 1
+                if count >= 3:
+                    break
+        finally:
+            await gen.aclose()
         return count
 
     count = asyncio.run(_run())
