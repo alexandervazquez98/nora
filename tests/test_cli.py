@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import json
 from pathlib import Path
 
 
@@ -361,3 +362,125 @@ def test_cli_py_does_not_import_llm_or_journal() -> None:
             if any(node.module == b or node.module.startswith(b + ".") for b in banned):
                 offenders.append((node.lineno, "importfrom", node.module))
     assert offenders == [], f"cli.py must not import from LLM/journal; got: {offenders}"
+
+
+# ---------------------------------------------------------------------------
+# `nora prompt sync` sub-command — issue #45 / WU-3.
+# ---------------------------------------------------------------------------
+
+
+def test_nora_prompt_sync_invokes_sync_prompts(
+    monkeypatch: object,
+    capsys: object,
+) -> None:
+    """`nora prompt sync` dispatches to ``nora.prompts.sync.sync_prompts``.
+
+    Patches the ``sync_prompts`` symbol on the source module so the
+    dispatcher (which imports it through the module attribute) sees
+    the stub. Asserts:
+
+    * exit code 0
+    * stub called with an ``OpenWebUIConfig`` whose fields match the
+      CLI flags (base URL + admin key + model_base defaults to
+      ``nora-netops``)
+    * ``nora_version`` / ``git_sha`` are forwarded verbatim
+    * stdout carries the JSON result list (one line)
+    """
+    from nora.prompts import sync as sync_mod
+    from nora.prompts.sync import OpenWebUIConfig
+
+    captured: dict[str, object] = {}
+    fake_result = [
+        {
+            "name": "netops_orchestrator",
+            "version": "0.3.5",
+            "action": "created",
+            "http_status": 200,
+        }
+    ]
+
+    def fake_sync_prompts(registry, config, *, nora_version, git_sha, release_tag, **_kwargs):
+        captured["registry"] = registry
+        captured["config"] = config
+        captured["nora_version"] = nora_version
+        captured["git_sha"] = git_sha
+        captured["release_tag"] = release_tag
+        return fake_result
+
+    monkeypatch.setattr(sync_mod, "sync_prompts", fake_sync_prompts)
+    # Skip the MCP boot path so the dispatcher never tries to launch
+    # the FastMCP server in the test process.
+    monkeypatch.setattr("nora.cli.main", lambda *a, **kw: None)
+
+    from nora import __main__ as main_mod
+
+    rc = main_mod.main(
+        [
+            "prompt",
+            "sync",
+            "--base-url",
+            "http://x",
+            "--admin-api-key",
+            "dummy",
+            "--nora-version",
+            "0.3.5",
+            "--git-sha",
+            "abc123",
+        ]
+    )
+
+    assert rc == 0, f"`nora prompt sync` must exit 0; got code={rc!r}"
+    cfg = captured["config"]
+    assert isinstance(cfg, OpenWebUIConfig), (
+        f"sync_prompts must receive an OpenWebUIConfig; got {type(cfg).__name__}"
+    )
+    assert cfg.base_url == "http://x"
+    assert cfg.admin_api_key == "dummy"
+    assert cfg.model_base == "nora-netops", (
+        f"default model_base must be `nora-netops`; got {cfg.model_base!r}"
+    )
+    assert captured["nora_version"] == "0.3.5"
+    assert captured["git_sha"] == "abc123"
+    # `release_tag` defaults to None when the flag is omitted.
+    assert captured["release_tag"] is None
+
+    stdout = capsys.readouterr().out
+    payload = json.loads(stdout.strip())
+    assert payload == fake_result
+
+
+def test_nora_prompt_sync_missing_admin_key_exits_nonzero(
+    monkeypatch: object,
+    capsys: object,
+) -> None:
+    """`nora prompt sync` without ``--admin-api-key`` AND without
+    ``OPENWEBUI_ADMIN_API_KEY`` env var exits non-zero with a stderr
+    message that names the missing key.
+
+    The CLI dispatcher MUST resolve the admin API key from CLI > env
+    and fail-closed when neither is set — the open-chat ``sync`` must
+    never run against an unauthenticated Open WebUI surface.
+    """
+    monkeypatch.delenv("OPENWEBUI_ADMIN_API_KEY", raising=False)
+    # Skip the MCP boot path.
+    monkeypatch.setattr("nora.cli.main", lambda *a, **kw: None)
+
+    from nora import __main__ as main_mod
+
+    rc = main_mod.main(
+        [
+            "prompt",
+            "sync",
+            "--base-url",
+            "http://x",
+            # NOTE: no --admin-api-key flag.
+        ]
+    )
+
+    assert rc != 0, f"missing admin-api-key + missing env var must exit non-zero; got code={rc!r}"
+    captured = capsys.readouterr()
+    stderr = captured.err
+    assert "OPENWEBUI_ADMIN_API_KEY" in stderr or "admin-api-key" in stderr, (
+        f"stderr must name the missing OPENWEBUI_ADMIN_API_KEY / admin-api-key; "
+        f"got stderr={stderr!r}"
+    )
