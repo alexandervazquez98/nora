@@ -174,7 +174,7 @@ def test_python_dash_m_nora_emits_deprecation_warning(tmp_path: Path) -> None:
         f"DeprecationWarning must mention the removal version; got: {stderr!r}"
     )
 
-    # Assertion 2: parse tools/list reply to confirm the nine-tool surface.
+    # Assertion 2: parse tools/list reply to confirm the 15-tool surface.
     tools: list[dict] = []
     for line in stdout.splitlines():
         line = line.strip()
@@ -204,7 +204,8 @@ def test_python_dash_m_nora_emits_deprecation_warning(tmp_path: Path) -> None:
         "save_intervention_record",
         "register_device",
         "hitl_mint_token",
+        "nora_get_tool_spec",
     }
     assert tool_names == expected, (
-        f"`python -m nora` must expose the same 14 tools as nora-mcp; got {tool_names}"
+        f"`python -m nora` must expose the same 15 tools as nora-mcp; got {tool_names}"
     )

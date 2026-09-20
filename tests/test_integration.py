@@ -207,10 +207,10 @@ def _boot_server(
 # ---------------------------------------------------------------------------
 
 
-def test_subprocess_responds_to_tools_list_with_fourteen_tools(
+def test_subprocess_responds_to_tools_list_with_fifteen_tools(
     mcp_http_client: McpHttpClient,
 ) -> None:
-    """A real MCP server exposes the thirteen-tool surface in `tools/list`.
+    """A real MCP server exposes the fifteen-tool surface in `tools/list`.
 
     Refactored in WU-#1a: this test no longer boots a fresh stdio
     subprocess per call. It uses the session-scoped HTTP MCP server
@@ -219,15 +219,17 @@ def test_subprocess_responds_to_tools_list_with_fourteen_tools(
     is still covered by the `_boot_server` tests below.
 
     WU-4 / PR #44 follow-up plan added ``hitl_mint_token``; the
-    expected set is therefore 13 tools post-merge.
+    PR #73 follow-up added ``nora_get_tool_spec``. The expected set
+    is therefore 15 tools post-merge.
     """
     init_reply = mcp_http_client.initialize()
     assert init_reply.get("id") == 1, f"initialize must echo id=1; got: {init_reply!r}"
     mcp_http_client.initialized()
     parsed_reply = mcp_http_client.tools_list()
 
-    # The reply's `result.tools` array MUST list exactly the thirteen thin tools
-    # (12 pre-WU-4 + ``hitl_mint_token`` from WU-4 / PR #44).
+    # The reply's `result.tools` array MUST list exactly the 15 thin tools
+    # (13 pre-PR-#73 + ``hitl_mint_token`` from WU-4 / PR #44 +
+    # ``nora_get_tool_spec`` from PR #73 follow-up).
     tools = parsed_reply["result"].get("tools", [])
     names = {t.get("name") for t in tools}
     expected = {
@@ -245,8 +247,9 @@ def test_subprocess_responds_to_tools_list_with_fourteen_tools(
         "save_intervention_record",
         "register_device",
         "hitl_mint_token",
+        "nora_get_tool_spec",
     }
-    assert names == expected, f"Expected exactly the 14 thin tools; got {names}"
+    assert names == expected, f"Expected exactly the 15 thin tools; got {names}"
 
 
 def test_subprocess_emits_structured_startup_log_on_stderr(tmp_path: Path) -> None:

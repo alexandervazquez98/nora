@@ -804,6 +804,7 @@ _EXPOSED_PROMPTS: tuple[str, ...] = (
     "snmp_migrate_radio_frequency",
     "snmp_reboot_radio",
     "snmp_run_spectrum_analysis",
+    "nora_get_tool_spec",  # NEW: meta-tool bridge
 )
 
 
@@ -817,6 +818,30 @@ def netops_orchestrator() -> str:
 def snmp_pmp450i() -> str:
     """PMP 450i SNMP driver operator-facing system prompt."""
     return get_prompt_registry().get("snmp_pmp450i").body
+
+
+# ---------------------------------------------------------------------------
+# Meta-tool: spec lookup bridge.
+#
+# Lets the LLM follow §7 of `netops_orchestrator.md` from any MCP client,
+# including clients that do NOT surface `prompts/get` as a callable tool.
+# Internally delegates to the same `PromptRegistry` as the `@mcp.prompt`
+# wrappers below, so the source of truth is one and the same.
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool
+def nora_get_tool_spec(name: str) -> str:
+    """Return the canonical Markdown body of the named NORA tool-spec.
+
+    The orchestrator (netops_orchestrator.md §7) directs the LLM to call
+    this tool BEFORE invoking any other `@mcp.tool`, so the precise
+    parameter contract, tier classification, and governance protocol are
+    resolved at runtime rather than guessed from prior knowledge. Returns
+    the same body that `prompts/get` would surface to clients that bridge
+    prompts into tools.
+    """
+    return get_prompt_registry().get(name).body
 
 
 # Tool-spec prompts — one thin wrapper per `docs/tool_specs/<tool>.md`.
@@ -900,6 +925,12 @@ def _snmp_reboot_radio_spec() -> str:
 def _snmp_run_spectrum_analysis_spec() -> str:
     """Tool spec for snmp_run_spectrum_analysis (Tier 1)."""
     return get_prompt_registry().get("snmp_run_spectrum_analysis").body
+
+
+@mcp.prompt(name="nora_get_tool_spec")
+def _nora_get_tool_spec_spec() -> str:
+    """Tool spec for nora_get_tool_spec (Tier 0)."""
+    return get_prompt_registry().get("nora_get_tool_spec").body
 
 
 # ---------------------------------------------------------------------------
@@ -1027,6 +1058,16 @@ _ALLOWED_UNCATALOGUED_TOOLS: frozenset[str] = frozenset(
         # coverage. See the deferred-tier-classification note near
         # `_EXPECTED_TOOL_TIERS` for the related follow-up.
         "hitl_mint_token",
+        # PR #73 review follow-up — meta-tool: spec lookup bridge.
+        # The `nora_get_tool_spec` tool exposes the in-memory
+        # `PromptRegistry` over MCP; it has no OID catalog envelope
+        # and never will (it consumes the registry, not SNMP). The
+        # allow-list entry keeps the boot-time tool-registration
+        # guard green; the tier-classification guard
+        # (`verify_tools_have_tier_classification`) skips it because
+        # it is absent from `_EXPECTED_TOOL_TIERS` (the canonical
+        # 3-tier taxonomy applies to wire-affecting operators).
+        "nora_get_tool_spec",
         # Issue #42 / `2026-09-15-register-device-mcp`: both
         # `register_device` and `snmp_get_pmp450i_radio_metrics` were
         # retired from this allow-list once their catalog envelope
