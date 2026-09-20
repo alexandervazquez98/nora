@@ -1,6 +1,13 @@
 ---
 name: netops_orchestrator
 description: Lead NOC Wireless Infrastructure Orchestrator prompt with unbiased baseline audit, intervention memory lifecycle, and interference correlation.
+version: "0.3.5"
+nora_compatibility: ">=0.3.4,<0.4.0"
+governance:
+  tier_0: 13
+  tier_1: 1
+  tier_2: 3
+checksum_sha256: 5fc013dd83c66925a8310409ec9a4c84dcf2fa65cfd9c33b1a6f8f717ed1e514
 ---
 
 # Lead NetOps Orchestrator (Cambium PMP 450i Network Operations)

@@ -6,6 +6,7 @@ Maps Prompt-R1..R7 scenarios from
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -22,12 +23,18 @@ from nora.prompts.registry import Prompt, PromptRegistry
 
 def test_registry_loads_once_and_never_reloads(tmp_prompts_dir: Path) -> None:
     """The registry freezes after `scan`; later writes to the dir are ignored."""
-    target = tmp_prompts_dir / "snmp_pmp450i.md"
-    target.write_text("---\nname: snmp_pmp450i\ndescription: first\n---\nbody-1\n")
+    target = _write_versioned_prompt(
+        tmp_prompts_dir,
+        name="snmp_pmp450i",
+        description="first",
+        body_text="body-1\n",
+    )
     registry = PromptRegistry.scan(tmp_prompts_dir)
     first_body = registry.get("snmp_pmp450i").body
 
     # Operator drops an updated file: registry must NOT pick it up.
+    # (The second write's front-matter is intentionally incomplete —
+    # the registry never re-reads it.)
     target.write_text("---\nname: snmp_pmp450i\ndescription: second\n---\nbody-2\n")
     assert registry.get("snmp_pmp450i").body == first_body
 
@@ -59,8 +66,12 @@ def test_override_directory_wins_over_package_data(
     tmp_prompts_dir: Path,
 ) -> None:
     """An override file with body "OVERRIDDEN" wins over the shipped copy."""
-    override = tmp_prompts_dir / "snmp_pmp450i.md"
-    override.write_text("---\nname: snmp_pmp450i\ndescription: override\n---\nOVERRIDDEN\n")
+    _write_versioned_prompt(
+        tmp_prompts_dir,
+        name="snmp_pmp450i",
+        description="override",
+        body_text="OVERRIDDEN\n",
+    )
     registry = PromptRegistry.scan(tmp_prompts_dir)
     assert registry.get("snmp_pmp450i").body.strip() == "OVERRIDDEN"
 
@@ -69,8 +80,12 @@ def test_settings_prompts_dir_is_used(tmp_prompts_dir: Path) -> None:
     """`Settings.prompts_dir` overrides packaged data."""
     from nora.config import Settings
 
-    target = tmp_prompts_dir / "snmp_pmp450i.md"
-    target.write_text("---\nname: snmp_pmp450i\ndescription: from-settings\n---\nfrom-settings\n")
+    _write_versioned_prompt(
+        tmp_prompts_dir,
+        name="snmp_pmp450i",
+        description="from-settings",
+        body_text="from-settings\n",
+    )
     settings = Settings(_env_file=None, _env_file_encoding=None, nora_prompts_dir=tmp_prompts_dir)
     registry = PromptRegistry.from_settings(settings)
     assert registry.get("snmp_pmp450i").body.strip() == "from-settings"
@@ -133,8 +148,12 @@ def test_second_get_call_does_no_io(
     tmp_prompts_dir: Path,
 ) -> None:
     """The second `registry.get(name)` call MUST NOT trigger I/O."""
-    target = tmp_prompts_dir / "snmp_pmp450i.md"
-    target.write_text("---\nname: snmp_pmp450i\ndescription: d\n---\nbody\n")
+    target = _write_versioned_prompt(
+        tmp_prompts_dir,
+        name="snmp_pmp450i",
+        description="d",
+        body_text="body\n",
+    )
     registry = PromptRegistry.scan(tmp_prompts_dir)
 
     # First call is allowed to read (during scan itself, not here).
@@ -360,6 +379,217 @@ def test_orchestrator_prompt_names_all_shipped_tool_specs() -> None:
     assert not missing, (
         f"Orchestrator prompt must reference every shipped tool by name; missing: {sorted(missing)}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Issue #45 — Prompt Versioning Frontmatter Schema (WU-1)
+#
+# Asserts the version-based front-matter schema enforced by
+# `PromptRegistry._validate_system_prompt` on files under
+# `src/nora/prompts/` (system prompts):
+#
+#   name             — must match the basename (sans .md)
+#   description      — non-empty str
+#   version          — strict SemVer triple (e.g. "0.3.5")
+#   nora_compatibility — SemVer range (e.g. ">=0.3.4,<0.4.0"); validated
+#                        against `nora.__version__` via packaging
+#   governance       — dict with non-negative ints for tier_0/1/2
+#   checksum_sha256  — 64-char lowercase hex; matched against
+#                      sha256(body_bytes) computed at scan time
+#
+# Tool-spec files (`docs/tool_specs/*.md`) keep the tier-based schema
+# unchanged — covered by the regression test at the end of this block.
+# ---------------------------------------------------------------------------
+
+
+def _write_versioned_prompt(
+    prompts_dir: Path,
+    *,
+    name: str = "test_prompt",
+    description: str = "Test versioned prompt.",
+    version: str = "0.3.5",
+    nora_compatibility: str = ">=0.3.4,<0.4.0",
+    governance: dict[str, int] | None = None,
+    body_text: str = "Test body line.\n",
+    checksum_sha256: str | None = None,
+) -> Path:
+    """Write a versioned system prompt to `prompts_dir` and return the path.
+
+    `body_text` is exactly what the registry will surface as
+    `Prompt.body` after front-matter stripping (one leading newline is
+    removed by the parser). If `checksum_sha256` is None, the helper
+    computes the correct value from `body_text`.
+    """
+    if governance is None:
+        governance = {"tier_0": 0, "tier_1": 0, "tier_2": 0}
+    if checksum_sha256 is None:
+        checksum_sha256 = hashlib.sha256(body_text.encode("utf-8")).hexdigest()
+    fm_lines = [
+        f"name: {name}",
+        f"description: {description}",
+        f"version: {version}",
+        # `nora_compatibility` is quoted because the leading `>` triggers
+        # YAML's folded block-scalar heuristic (`>=` is read as `>` +
+        # non-whitespace); an unquoted SpecifierSet breaks yaml.safe_load.
+        f'nora_compatibility: "{nora_compatibility}"',
+        "governance:",
+        f"  tier_0: {governance['tier_0']}",
+        f"  tier_1: {governance['tier_1']}",
+        f"  tier_2: {governance['tier_2']}",
+        f"checksum_sha256: {checksum_sha256}",
+    ]
+    fm_block = "\n".join(fm_lines)
+    target = prompts_dir / f"{name}.md"
+    target.write_text(f"---\n{fm_block}\n---\n{body_text}")
+    return target
+
+
+def test_registry_rejects_prompt_with_mismatched_checksum(tmp_prompts_dir: Path) -> None:
+    """A system prompt with a wrong `checksum_sha256` is dropped at scan.
+
+    Per issue #45 *Checksum Drift Detection*: the registry computes
+    `sha256(body_bytes)` at scan time and refuses to load a prompt
+    whose declared checksum does not match. The operator cannot lie.
+    """
+    wrong_checksum = "0" * 64
+    _write_versioned_prompt(
+        tmp_prompts_dir,
+        name="bad_checksum",
+        checksum_sha256=wrong_checksum,
+    )
+    registry = PromptRegistry.scan(tmp_prompts_dir)
+    with pytest.raises(PromptNotFoundError) as exc:
+        registry.get("bad_checksum")
+    assert "bad_checksum" in str(exc.value)
+
+
+def test_registry_rejects_prompt_with_invalid_nora_compatibility(
+    tmp_prompts_dir: Path,
+) -> None:
+    """A `nora_compatibility` value that is not a parseable SpecifierSet fails.
+
+    Per issue #45 *Compatibility Range Enforcement*: the front-matter
+    range MUST parse via `packaging.specifiers.SpecifierSet`; a
+    non-range string raises `InvalidSpecifier` and the prompt is
+    dropped at scan.
+    """
+    _write_versioned_prompt(
+        tmp_prompts_dir,
+        name="bad_compat",
+        nora_compatibility="not-a-semver-range",
+    )
+    registry = PromptRegistry.scan(tmp_prompts_dir)
+    with pytest.raises(PromptNotFoundError) as exc:
+        registry.get("bad_compat")
+    assert "bad_compat" in str(exc.value)
+
+
+def test_registry_rejects_prompt_with_non_semver_version(tmp_prompts_dir: Path) -> None:
+    """A `version` value that is not a strict SemVer triple fails.
+
+    Per issue #45 *System-Prompt Versioning*: `version` MUST be a strict
+    `MAJOR.MINOR.PATCH` triple. Single-segment ("1") or non-numeric
+    ("abc") values are rejected at scan.
+    """
+    _write_versioned_prompt(
+        tmp_prompts_dir,
+        name="bad_version",
+        version="not-semver",
+    )
+    registry = PromptRegistry.scan(tmp_prompts_dir)
+    with pytest.raises(PromptNotFoundError) as exc:
+        registry.get("bad_version")
+    assert "bad_version" in str(exc.value)
+
+
+def test_registry_accepts_prompt_with_valid_frontmatter(tmp_prompts_dir: Path) -> None:
+    """A versioned prompt with all required fields and a correct checksum loads.
+
+    Per issue #45 *System-Prompt Versioning*: a `name`-matching prompt
+    with a valid `description`, strict-SemVer `version`, parseable
+    `nora_compatibility`, well-shaped `governance`, and a checksum that
+    matches `sha256(body_bytes)` MUST load through `scan`.
+    """
+    body = "Acceptance body for the versioned prompt.\n"
+    _write_versioned_prompt(
+        tmp_prompts_dir,
+        name="good_prompt",
+        version="0.3.5",
+        nora_compatibility=">=0.3.4,<0.4.0",
+        governance={"tier_0": 1, "tier_1": 0, "tier_2": 0},
+        body_text=body,
+    )
+    registry = PromptRegistry.scan(tmp_prompts_dir)
+    prompt = registry.get("good_prompt")
+    assert isinstance(prompt, Prompt)
+    assert prompt.name == "good_prompt"
+    assert prompt.description == "Test versioned prompt."
+    assert prompt.body == body
+    # metadata exposes the validated front-matter for downstream callers.
+    assert prompt.metadata["version"] == "0.3.5"
+    assert prompt.metadata["nora_compatibility"] == ">=0.3.4,<0.4.0"
+    assert prompt.metadata["governance"] == {"tier_0": 1, "tier_1": 0, "tier_2": 0}
+    assert prompt.metadata["checksum_sha256"] == hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def test_registry_drops_prompt_when_nora_compatibility_unsatisfied(
+    tmp_prompts_dir: Path,
+) -> None:
+    """A `nora_compatibility` range that excludes `nora.__version__` drops the prompt.
+
+    Per issue #45 *Compatibility Range Enforcement*: the registry fails
+    closed when the front-matter range does not satisfy
+    `nora.__version__`. The package's current version is 0.3.5 (see
+    `src/nora/__init__.py`); `>=99.0.0` excludes it.
+    """
+    _write_versioned_prompt(
+        tmp_prompts_dir,
+        name="future_only",
+        nora_compatibility=">=99.0.0",
+    )
+    registry = PromptRegistry.scan(tmp_prompts_dir)
+    with pytest.raises(PromptNotFoundError) as exc:
+        registry.get("future_only")
+    assert "future_only" in str(exc.value)
+
+
+def test_tool_specs_keep_tier_based_schema(tmp_path: Path) -> None:
+    """Tool-spec files under `tool_specs/` keep the tier-based schema unchanged.
+
+    Per issue #45 *Q8 — Tool-specs vs system-prompts front-matter split*:
+    the existing tier-based validator (`_validate_tool_spec`) is the
+    authoritative schema for `docs/tool_specs/*.md` and MUST continue
+    to accept a `tier: 0|1|2` front-matter WITHOUT the new version-based
+    fields. This is the regression test that proves WU-1 did NOT touch
+    the tool-spec code path.
+    """
+    import nora  # local import — keeps module-level imports tight.
+
+    tool_specs_dir = tmp_path / "tool_specs"
+    tool_specs_dir.mkdir()
+    spec = tool_specs_dir / "snmp_get_ap_summary.md"
+    spec.write_text(
+        "---\n"
+        "name: snmp_get_ap_summary\n"
+        "description: Read a typed AP summary.\n"
+        "tier: 0\n"
+        "---\n"
+        "Tool body for snmp_get_ap_summary.\n"
+    )
+    registry = PromptRegistry.scan(tool_specs_dir)
+    prompt = registry.get("snmp_get_ap_summary")
+    assert isinstance(prompt, Prompt)
+    assert prompt.metadata["tier"] == 0
+    # The version-based fields are NOT exposed for tool-spec prompts.
+    assert "version" not in prompt.metadata
+    assert "checksum_sha256" not in prompt.metadata
+    assert "nora_compatibility" not in prompt.metadata
+    assert "governance" not in prompt.metadata
+    # Sanity: the registry refuses the new fields' presence in a
+    # tool-spec scan — a system-prompt-style front-matter in a
+    # tool-spec dir still loads as a tool-spec (the validator is
+    # not invoked when the new fields are absent).
+    assert nora.__version__ == "0.3.5"
 
 
 # ---------------------------------------------------------------------------
@@ -722,8 +952,20 @@ def test_prompt_registry_scan_accepts_multiple_sources(tmp_path: Path) -> None:
     dir_a.mkdir()
     dir_b.mkdir()
 
-    (dir_a / "alpha.md").write_text("---\nname: alpha\ndescription: from a\n---\nbody-alpha\n")
-    (dir_b / "beta.md").write_text("---\nname: beta\ndescription: from b\n---\nbody-beta\n")
+    # Both dirs are non-tool-spec, so files here use the version-based
+    # schema enforced by `PromptRegistry._validate_system_prompt`.
+    _write_versioned_prompt(
+        dir_a,
+        name="alpha",
+        description="from a",
+        body_text="body-alpha\n",
+    )
+    _write_versioned_prompt(
+        dir_b,
+        name="beta",
+        description="from b",
+        body_text="body-beta\n",
+    )
 
     registry = PromptRegistry.scan([dir_a, dir_b])
 
@@ -1043,4 +1285,11 @@ __all__ = [
     "test_nora_get_tool_spec_prompt_is_registered",
     "test_nora_get_tool_spec_raises_on_unknown_name",
     "test_nora_get_tool_spec_returns_registry_body",
+    # Issue #45 — version-based front-matter schema (WU-1)
+    "test_registry_rejects_prompt_with_mismatched_checksum",
+    "test_registry_rejects_prompt_with_invalid_nora_compatibility",
+    "test_registry_rejects_prompt_with_non_semver_version",
+    "test_registry_accepts_prompt_with_valid_frontmatter",
+    "test_registry_drops_prompt_when_nora_compatibility_unsatisfied",
+    "test_tool_specs_keep_tier_based_schema",
 ]

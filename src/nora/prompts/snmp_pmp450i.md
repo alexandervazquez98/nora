@@ -1,6 +1,13 @@
 ---
 name: snmp_pmp450i
 description: Operator-facing system prompt for the Cambium PMP 450i SNMP driver tool.
+version: "0.3.5"
+nora_compatibility: ">=0.3.4,<0.4.0"
+governance:
+  tier_0: 1
+  tier_1: 0
+  tier_2: 0
+checksum_sha256: ef264a80e7e9e38466e5b326739c55a6c32b2e23be3e87d18119b5d7fccbbc84
 ---
 
 # snmp_get_pmp450i_radio_metrics
