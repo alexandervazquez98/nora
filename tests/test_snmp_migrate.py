@@ -91,12 +91,23 @@ def _radio_seed_oids() -> dict[str, str]:
 
 
 def _sm_table_oids() -> dict[str, str]:
-    """SM table OID names + dotted OIDs (slice 3 additions)."""
+    """SM table OID names + dotted OIDs (slice 3 additions).
+
+    Issue #69 (2026-09-20): ``smSiteName`` (``whispLinkEntry.33`` =
+    ``linkSiteName``, ``DisplayString``) and ``smIpAddress``
+    (``whispLinkEntry.69`` = ``linkIpAddress``, ``IpAddress``) are
+    required by the schema gate in
+    :func:`_build_sm_table_column_map` after the WU-1 extension of
+    ``SM_TABLE_OID_NAMES``. Operator-verified via live ``snmpwalk``
+    against production APs (firmwares 25.0.1 / 25.1.0).
+    """
     return {
         "smSessionUptime": "1.3.6.1.4.1.161.19.3.1.4.1.46.0",
         "smCinr": "1.3.6.1.4.1.161.19.3.1.4.1.74.0",
         "smLinkStatus": "1.3.6.1.4.1.161.19.3.1.4.1.19.0",
         "smLuid": "1.3.6.1.4.1.161.19.3.1.4.1.1.0",
+        "smSiteName": "1.3.6.1.4.1.161.19.3.1.4.1.33.0",
+        "smIpAddress": "1.3.6.1.4.1.161.19.3.1.4.1.69.0",
     }
 
 
@@ -144,19 +155,30 @@ def _sm_subtree_rows(
 ) -> list[tuple[str, str | int]]:
     """Build a synthetic SM-table subtree response covering three categories.
 
-    Each SM occupies four OID rows in the public Cambium branch
-    (smSessionUptime, smCinr, smLinkStatus, smLuid). ONLINE_ACTIVE
-    rows carry uptime > 0 AND inSession (``linkSessState = 1``)
-    AND healthy CINR. ACTIVE_DEGRADED rows carry uptime > 0 AND
-    inSession AND CINR < 18. PRE_EXISTING_OFFLINE rows carry uptime
-    == 0 (the central categoriser treats this as pre-existing offline
-    even without history).
+    Each SM occupies six OID rows in the public Cambium branch
+    (smSessionUptime, smCinr, smLinkStatus, smLuid, smSiteName,
+    smIpAddress). ONLINE_ACTIVE rows carry uptime > 0 AND inSession
+    (``linkSessState = 1``) AND healthy CINR. ACTIVE_DEGRADED rows
+    carry uptime > 0 AND inSession AND CINR < 18.
+    PRE_EXISTING_OFFLINE rows carry uptime == 0 (the central
+    categoriser treats this as pre-existing offline even without
+    history).
 
     Issue #58 (2026-09-19): ``linkSessState`` is an INTEGER enum per
     WHISP-APS-MIB (``idle=0``, ``inSession=1``, ``clearing=2``, ...).
     The fixture used to emit the legacy ``"LINKED"`` / ``"DOWN"``
     strings — the radio never returns those. ``1`` is the active
     value; ``0`` is the offline value.
+
+    Issue #69 (2026-09-20): every SM also seeds ``linkSiteName``
+    (``.33``) and ``linkIpAddress`` (``.69``) so the WU-1 schema
+    extension (``SM_TABLE_OID_NAMES`` now requires all six names)
+    is satisfied. IPs use TEST-NET-1 (``192.0.2.x``) to stay
+    Zero-Leakage. PRE_EXISTING_OFFLINE SMs also carry real IPs —
+    the migrate tests do not exercise the ``0.0.0.0`` heuristic
+    (the ``session_uptime == 0`` trigger already routes them to
+    PRE_EXISTING_OFFLINE), so a real IP keeps the fixture honest
+    without overloading the heuristic semantics.
     """
     base = "1.3.6.1.4.1.161.19.3.1.4.1"
     rows: list[tuple[str, str | int]] = []
@@ -168,6 +190,8 @@ def _sm_subtree_rows(
                 (f"{base}.74.{sm_index}", 25),
                 (f"{base}.19.{sm_index}", 1),  # inSession
                 (f"{base}.1.{sm_index}", luid),
+                (f"{base}.33.{sm_index}", f"BAJ02-VVU-TIJU-{17 + sm_index:03d}"),
+                (f"{base}.69.{sm_index}", f"192.0.2.{30 + sm_index}"),
             ]
         )
         sm_index += 1
@@ -178,6 +202,8 @@ def _sm_subtree_rows(
                 (f"{base}.74.{sm_index}", 12),
                 (f"{base}.19.{sm_index}", 1),  # inSession (degraded signal)
                 (f"{base}.1.{sm_index}", luid),
+                (f"{base}.33.{sm_index}", f"BAJ02-VVU-TIJU-{17 + sm_index:03d}"),
+                (f"{base}.69.{sm_index}", f"192.0.2.{30 + sm_index}"),
             ]
         )
         sm_index += 1
@@ -188,6 +214,8 @@ def _sm_subtree_rows(
                 (f"{base}.74.{sm_index}", 0),
                 (f"{base}.19.{sm_index}", 0),  # idle
                 (f"{base}.1.{sm_index}", luid),
+                (f"{base}.33.{sm_index}", f"BAJ02-VVU-TIJU-{17 + sm_index:03d}"),
+                (f"{base}.69.{sm_index}", f"192.0.2.{30 + sm_index}"),
             ]
         )
         sm_index += 1

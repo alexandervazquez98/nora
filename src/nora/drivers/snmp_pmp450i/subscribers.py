@@ -72,11 +72,24 @@ class SubscriberRecord(BaseModel):
     """One SM row read from the SM-table subtree.
 
     Fields map 1:1 to the slice-3 SM-table OID subtree walk
-    (``smSessionUptime``, ``smCinr``, ``smLinkStatus``, ``smLuid``).
+    (``smSessionUptime``, ``smCinr``, ``smLinkStatus``, ``smLuid``)
+    plus the two issue #69 columns ``linkSiteName``
+    (``whispLinkEntry.33`` → ``site_name``) and ``linkIpAddress``
+    (``whispLinkEntry.69`` → ``ip_address``).
+
     The categorisation is NOT stored on the record — every record is a
     raw wire observation; the categorisation is computed at fold time
     by :func:`categorize_subscribers` so the bucket assignment is
     always derived from the live record + the cross-checked history.
+
+    Issue #69 (2026-09-20): ``site_name`` defaults to ``""`` and
+    ``ip_address`` defaults to ``""`` so partial walks (e.g. a radio
+    that omits ``linkIpAddress``) collapse to a typed empty string
+    rather than raising. ``ip_address`` is the dotted-quad form
+    (``"192.0.2.31"`` or the null sentinel ``"0.0.0.0"``); the
+    WHISP-APS-MIB ``IpAddress`` wire type renders through puresnmp as
+    a Python :class:`ipaddress.IPv4Address` and the fold coerces via
+    :func:`str`.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -86,6 +99,8 @@ class SubscriberRecord(BaseModel):
     cinr_db: int = 0
     link_status: str = "DOWN"
     modulation: str = ""
+    site_name: str = ""
+    ip_address: str = ""
 
 
 class SmDetailedDiagnostics(BaseModel):
@@ -164,6 +179,15 @@ class SubscriberSummary(BaseModel):
 # production firmware. ``smSnrH`` (``linkRadioAggrSmHCalculatedSnr``)
 # and ``ssrLink`` (``linkRadioAggrSignalStrengthRatio``) were added
 # as OFDM-correct per-LUID metrics.
+#
+# Issue #69 (2026-09-20): two extra OIDs — ``smSiteName``
+# (``whispLinkEntry.33`` = ``linkSiteName``, ``DisplayString``) and
+# ``smIpAddress`` (``whispLinkEntry.69`` = ``linkIpAddress``,
+# ``IpAddress``) — surface on every ``SubscriberRecord`` so operators
+# can identify subscribers by session name + management IP, not just
+# by transient LUID. Operator-verified via live ``snmpwalk`` against
+# production APs (firmwares 25.0.1 / 25.1.0); the column positions
+# are stable across PMP 450i firmwares 15.2.1 → 25.1.0.
 # ---------------------------------------------------------------------------
 
 SM_TABLE_OID_NAMES: tuple[str, ...] = (
@@ -171,6 +195,8 @@ SM_TABLE_OID_NAMES: tuple[str, ...] = (
     "smCinr",
     "smLinkStatus",
     "smLuid",
+    "smSiteName",
+    "smIpAddress",
 )
 
 SM_DIAGNOSTICS_OID_NAMES: tuple[str, ...] = (
@@ -218,6 +244,8 @@ SM_TABLE_SLOT_BY_NAME: Final[dict[str, str]] = {
     "smCinr": "cinr",
     "smLinkStatus": "link",
     "smLuid": "luid",
+    "smSiteName": "site_name",
+    "smIpAddress": "ip",
 }
 
 # CINR threshold (dB) below which an active SM is considered degraded.
@@ -309,14 +337,19 @@ def categorize_subscribers(
     """Classify every SM row into one of three buckets.
 
     The bucket assignment is the single source of truth for the
-    slice-3 unbiased baseline. PRE_EXISTING_OFFLINE takes priority
-    (a row whose ``luid`` is in the cross-checked exclusion set, OR
-    whose ``session_uptime == 0``, OR whose ``ip == "0.0.0.0"`` is
-    classified PRE_EXISTING_OFFLINE regardless of any other signal).
+    slice-3 unbiased baseline. PRE_EXISTING_OFFLINE takes priority (a
+    row whose ``session_uptime == 0``, OR whose ``link_status`` is in
+    :data:`_LINK_SESS_OFFLINE_STATES`, OR whose ``ip_address ==
+    "0.0.0.0"`` is classified PRE_EXISTING_OFFLINE regardless of any
+    other signal). The three triggers are OR'd so a row matching any
+    one is routed to PRE_EXISTING_OFFLINE; the recovered-subscriber
+    invariant (issue #58: ``session_uptime > 0`` AND ``link_status ==
+    "inSession"`` AND ``ip_address != "0.0.0.0"``) MUST be
+    categorised by signal health, never by IP alone.
 
     Of the remaining rows, ``ONLINE_ACTIVE`` is the default for a
     healthy active session (``session_uptime > 0``, ``link_status ==
-    "LINKED"``, modulation NOT in the degraded set, ``cinr_db >=
+    "inSession"``, modulation NOT in the degraded set, ``cinr_db >=
     18``). An active session with degraded signal falls into
     ``ACTIVE_DEGRADED``.
 
@@ -357,7 +390,20 @@ def categorize_subscribers(
         # ``"idle"``). Membership in ``_LINK_SESS_OFFLINE_STATES``
         # matches every non-active enum value; ``"inSession"`` and
         # ``"registering"`` are the two active states.
-        if row.session_uptime == 0 or row.link_status in _LINK_SESS_OFFLINE_STATES:
+        # Issue #69 (2026-09-20): the ``ip_address == "0.0.0.0"``
+        # heuristic — a row whose IP is the null IPv4 sentinel is
+        # classified PRE_EXISTING_OFFLINE regardless of session_uptime
+        # or link_status. This closes the docstring-vs-code gap that
+        # the original placeholder promised. The OR with
+        # ``session_uptime == 0`` keeps the recovered-subscriber
+        # invariant intact (an SM with ``session_uptime > 0`` AND
+        # ``link_status == "inSession"`` AND ``ip_address != "0.0.0.0"``
+        # is NEVER condemned to PRE_EXISTING_OFFLINE by this predicate).
+        if (
+            row.session_uptime == 0
+            or row.link_status in _LINK_SESS_OFFLINE_STATES
+            or row.ip_address == "0.0.0.0"
+        ):
             buckets["PRE_EXISTING_OFFLINE"].append(row)
             continue
         if row.luid in pre_existing_list:
@@ -500,6 +546,8 @@ def _fold_sm_table(
                 cinr_db=int(slot.get("cinr", 0) or 0),
                 link_status=_coerce_link_sess_state(slot.get("link")),
                 modulation=str(slot.get("modulation", "")),
+                site_name=str(slot.get("site_name", "")),
+                ip_address=str(slot.get("ip", "")),
             )
         )
     return records
