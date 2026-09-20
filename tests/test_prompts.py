@@ -356,15 +356,6 @@ def test_orchestrator_prompt_names_all_shipped_tool_specs() -> None:
     text = (package_dir / "netops_orchestrator.md").read_text()
 
     expected = _shipped_tool_spec_names()
-    # PR #73 follow-up — `nora_get_tool_spec` is the meta-tool bridge
-    # that lets the LLM follow §7 from any MCP client. It is a Tier-0
-    # passive lookup, not a wire-affecting operator, so it does NOT
-    # appear in the per-tier tool lists at §6. The orchestrator prompt
-    # references it via §7 (the lookup protocol description itself);
-    # FT4 (separate worker) extends §7 to mention `nora_get_tool_spec`
-    # explicitly. Until FT4 lands, exclude the meta-tool from the
-    # per-tier enumeration check below.
-    expected -= {"nora_get_tool_spec"}
     missing = {n for n in expected if n not in text}
     assert not missing, (
         f"Orchestrator prompt must reference every shipped tool by name; missing: {sorted(missing)}"

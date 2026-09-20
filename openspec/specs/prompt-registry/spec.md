@@ -252,6 +252,53 @@ exposed via `@mcp.prompt`.
 - WHEN the server is booted
 - THEN a typed `PromptNotFoundError` is raised AND the server does not start
 
+### Requirement: Tool-Bridged Spec Lookup
+
+The FastMCP server MUST expose a Tier-0 `@mcp.tool` named
+`nora_get_tool_spec(name: str) -> str` whose body returns
+`PromptRegistry.get(name).body`. The bridge tool MUST be reachable
+via `tools/list` AND `tools/call` from any MCP client (the standard
+tool-calling schema the LLM sees during a turn), so that the LLM can
+resolve tool → spec on demand without relying on the host client to
+bridge MCP `prompts/get` into callable tools. The bridge tool is
+exempt from the OID-catalog envelope and the `_EXPECTED_TOOL_TIERS`
+taxonomy because it consumes the in-memory registry rather than
+acting as a wire-affecting operator; its `_ALLOWED_UNCATALOGUED_TOOLS`
+entry documents this exemption.
+
+#### Scenario: bridge tool is registered on the FastMCP instance
+
+- GIVEN the FastMCP server is booted with the shipped tool surface
+- WHEN `mcp.list_tools()` is awaited
+- THEN the set of names includes `nora_get_tool_spec`
+
+#### Scenario: bridge tool returns the registry body byte-for-byte
+
+- GIVEN `PromptRegistry` is initialised with the shipped prompts + tool-specs
+- WHEN `nora_get_tool_spec(name="<tool>")` is invoked via `tools/call`
+- THEN the returned string equals `PromptRegistry.get(<tool>).body`
+
+#### Scenario: bridge tool surfaces PromptNotFoundError on unknown names
+
+- GIVEN `nora_get_tool_spec` is registered
+- WHEN it is invoked with `name="no_such_tool"`
+- THEN the FastMCP tool error envelope references the unknown name
+  AND the registry layer's `PromptNotFoundError` (or wrapped equivalent)
+  is reachable from the exception chain
+
+#### Scenario: bridge tool is Tier 0
+
+- GIVEN `docs/tool_specs/nora_get_tool_spec.md` declares `tier: 0`
+- WHEN boot validates the spec
+- THEN the validator accepts it (tier 0 implies neither
+  `requires_operator_confirmed` nor `requires_hitl_token`)
+
+#### Scenario: orchestrator §7 directs the LLM to the bridge tool
+
+- GIVEN the shipped `netops_orchestrator.md` body
+- WHEN a content scan looks for the pattern `nora_get_tool_spec(name=`
+- THEN the pattern appears at least once
+
 ## Resolved Decisions
 
 - **Q1 (composition mechanism) — frozen as per-tool `@mcp.prompt`:** Each tool-spec is exposed as a separate MCP prompt whose name matches the tool name (e.g. `@mcp.prompt def snmp_reboot_radio() -> str`). The LLM resolves tool→spec at runtime via `get_prompt(name="<tool>")`. The FastMCP server keeps one thin wrapper per tool; the canonical body lives in `docs/tool_specs/<tool>.md` and is fetched through `PromptRegistry.get(...)`. *(Decided 2026-09-20 while implementing issue #72's canonical prompt source layer.)*
