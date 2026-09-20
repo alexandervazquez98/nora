@@ -320,6 +320,48 @@ def test_tool_spec_prompt_body_matches_registry_body() -> None:
         server_mod._current_prompt_registry = previous  # type: ignore[attr-defined]
 
 
+def test_orchestrator_prompt_directs_llm_to_read_spec_before_invoke() -> None:
+    """`netops_orchestrator.md` MUST teach the LLM to call
+    `get_prompt(name=<tool>)` before invoking tools.
+
+    Per `prompt-registry` *Orchestrator Prompt Body Augmentation*
+    requirement and issue #72 canonical prompt source layer. The orchestrator
+    prompt is the system context the LLM plans against; without explicit
+    guidance to read the per-tool spec, the LLM falls back to vague prior
+    knowledge and skips the governance contract.
+    """
+    package_dir = Path(__file__).resolve().parent.parent / "src" / "nora" / "prompts"
+    text = (package_dir / "netops_orchestrator.md").read_text()
+
+    # Pattern: the orchestrator body must mention the MCP prompt-call shape.
+    assert "get_prompt(name=" in text, (
+        "Orchestrator prompt must teach the LLM to call `get_prompt(name=<tool>)` "
+        "before invoking tools; pattern `get_prompt(name=` not found in body."
+    )
+    # Mandatory language: must or shall or required.
+    lower = text.lower()
+    assert any(token in lower for token in ("must ", "shall ", "mandatory")), (
+        "Orchestrator prompt must use mandatory language when describing the spec lookup."
+    )
+
+
+def test_orchestrator_prompt_names_all_shipped_tool_specs() -> None:
+    """`netops_orchestrator.md` references every shipped `docs/tool_specs/<tool>.md` by name.
+
+    Per `prompt-registry` *Orchestrator Prompt Body Augmentation*. Each
+    tool's tier classification must be reachable from the body so the LLM
+    can resolve tool → tier → spec lookup chain without leaving the prompt.
+    """
+    package_dir = Path(__file__).resolve().parent.parent / "src" / "nora" / "prompts"
+    text = (package_dir / "netops_orchestrator.md").read_text()
+
+    expected = _shipped_tool_spec_names()
+    missing = {n for n in expected if n not in text}
+    assert not missing, (
+        f"Orchestrator prompt must reference every shipped tool by name; missing: {sorted(missing)}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Negative coverage — registry env-var surface
 # ---------------------------------------------------------------------------
@@ -844,7 +886,9 @@ __all__ = [
     "test_tool_spec_metadata_exposes_tier_and_prerequisites",
     "test_tool_spec_validator_enforces_uses_operator_confirmed_equals_for_tier_1",
     # Issue #72 — per-tool MCP prompt exposure
-    "test_server_exposes_all_tool_spec_prompts",
     "test_exposed_prompts_allowlist_matches_mcp_list_prompts",
+    "test_orchestrator_prompt_directs_llm_to_read_spec_before_invoke",
+    "test_orchestrator_prompt_names_all_shipped_tool_specs",
+    "test_server_exposes_all_tool_spec_prompts",
     "test_tool_spec_prompt_body_matches_registry_body",
 ]
