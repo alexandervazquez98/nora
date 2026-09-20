@@ -13,6 +13,7 @@ import json
 import os
 import socket
 import subprocess
+import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -355,6 +356,87 @@ class McpHttpClient:
     def initialized(self) -> None:
         # Notification (no `id`); FastMCP returns 202 Accepted with empty body.
         self.request("notifications/initialized")
+
+    def tools_list(self, *, id: int = 2) -> dict[str, Any]:
+        return self.request("tools/list", id=id)
+
+
+class McpStdioClient:
+    """JSON-RPC over stdio MCP, newline-delimited JSON.
+
+    Mirrors `McpHttpClient` but writes one JSON-RPC frame per line to stdin
+    and reads one response line from stdout. Notifications (frames without
+    `id`) are sent via `send_notification()` — they do NOT expect a reply
+    and the implementation must not block waiting for one.
+
+    A lock serializes stdin/stdout access so concurrent calls do not
+    interleave frames (Popen pipes are not safe for parallel R/W).
+    """
+
+    def __init__(self, proc: subprocess.Popen[bytes]) -> None:
+        self._proc = proc
+        self._lock = threading.Lock()
+
+    def request(
+        self,
+        method: str,
+        params: dict[str, Any] | None = None,
+        *,
+        id: int,
+    ) -> dict[str, Any]:
+        if id is None:
+            raise ValueError(
+                "request() is for JSON-RPC requests only; "
+                "use send_notification() for notifications"
+            )
+        frame: dict[str, Any] = {"jsonrpc": "2.0", "method": method, "id": id}
+        if params is not None:
+            frame["params"] = params
+
+        line = (json.dumps(frame) + "\n").encode("utf-8")
+        with self._lock:
+            assert self._proc.stdin is not None
+            self._proc.stdin.write(line)
+            self._proc.stdin.flush()
+
+            assert self._proc.stdout is not None
+            response_line = self._proc.stdout.readline()
+            if not response_line:
+                raise RuntimeError(
+                    f"server closed stdout (no response) after method={method!r}"
+                )
+            return json.loads(response_line.decode("utf-8"))
+
+    def send_notification(
+        self,
+        method: str,
+        params: dict[str, Any] | None = None,
+    ) -> None:
+        frame: dict[str, Any] = {"jsonrpc": "2.0", "method": method}
+        if params is not None:
+            frame["params"] = params
+
+        line = (json.dumps(frame) + "\n").encode("utf-8")
+        with self._lock:
+            assert self._proc.stdin is not None
+            self._proc.stdin.write(line)
+            self._proc.stdin.flush()
+            # Notifications: do NOT read stdout; the server does not reply.
+
+    def initialize(self) -> dict[str, Any]:
+        return self.request(
+            "initialize",
+            {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "pytest", "version": "0.0.0"},
+            },
+            id=1,
+        )
+
+    def initialized(self) -> None:
+        # Notification: server does not reply.
+        self.send_notification("notifications/initialized")
 
     def tools_list(self, *, id: int = 2) -> dict[str, Any]:
         return self.request("tools/list", id=id)
