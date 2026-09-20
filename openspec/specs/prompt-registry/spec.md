@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Defines how NORA loads system prompts at boot. The `PromptRegistry` reads Markdown files from package data (or an operator override directory), validates a front-matter contract, and exposes a stable per-session lookup. Hot-reload is forbidden; a missing prompt at boot is fatal. The first shipped prompt, `snmp_pmp450i.md`, instructs the LLM about the typed `RadioMetricsReport` schema and zero-leakage rules.
+Defines how NORA loads system prompts at boot. The `PromptRegistry` reads Markdown files from package data (or an operator override directory), validates a front-matter contract, and exposes a stable per-session lookup. Hot-reload is forbidden, a missing prompt at boot is fatal. The FastMCP server exposes every registered prompt via `@mcp.prompt`, so the LLM can resolve tool→spec on demand (see the *Per-Tool MCP Prompt Exposure* requirement below). The first shipped prompt, `snmp_pmp450i.md`, instructs the LLM about the typed `RadioMetricsReport` schema and zero-leakage rules.
 
 ## Requirements
 
@@ -158,20 +158,55 @@ matter; the LLM resolves tool→spec via the composed prompt.
 - THEN both appear AND the Tier-1 protocol precedes the Tier-2
   protocol
 
-### Requirement: Tool-Spec Front-Matter Schema (Frozen Subset)
+### Requirement: Tool-Spec Front-Matter Schema (Frozen)
 
 Tool-spec files (`docs/tool_specs/*.md`) SHALL carry YAML front-matter
-with at minimum `name`, `description`, AND `tier: 0 | 1 | 2`. The full
-schema (whether `requires_operator_confirmed` and
-`requires_hitl_token` are mandatory) is **OPEN QUESTION 4** for design
-phase. Until design freezes the schema, only `tier` is contract-
-bearing; extended fields MAY appear but are not yet validated.
+with exactly:
+
+- `name: str` — MUST equal the file basename (sans `.md`).
+- `description: str` — MUST be a non-empty single-line summary.
+- `tier: 0 | 1 | 2` — the impact tier per `tool-service-impact-tiers`.
+
+Cross-field conditional requirements (mandatory when the corresponding
+tier is declared):
+
+- `tier: 1` ⇒ `requires_operator_confirmed: true` is mandatory.
+- `tier: 2` ⇒ `requires_hitl_token: true` is mandatory.
+
+Validation failures raise `PromptNotFoundError` and the offending spec
+is NOT registered. `name` matching the basename and `description`
+non-empty remain unconditional. The tier-conditional invariants are
+enforced by `PromptRegistry._validate_tool_spec` at boot time.
 
 #### Scenario: every tool-spec file declares tier
 
-- GIVEN each of the eleven `docs/tool_specs/<tool_name>.md` files
+- GIVEN each `docs/tool_specs/<tool_name>.md` file shipped with the project
 - WHEN front-matter is parsed
 - THEN `tier` is present AND its value is one of `0`, `1`, `2`
+
+#### Scenario: tier-1 tool-spec declares requires_operator_confirmed
+
+- GIVEN a tool-spec file declaring `tier: 1`
+- WHEN front-matter is parsed
+- THEN `requires_operator_confirmed == true` is present
+
+#### Scenario: tier-2 tool-spec declares requires_hitl_token
+
+- GIVEN a tool-spec file declaring `tier: 2`
+- WHEN front-matter is parsed
+- THEN `requires_hitl_token == true` is present
+
+#### Scenario: tier-1 tool-spec without requires_operator_confirmed is rejected
+
+- GIVEN a `docs/tool_specs/foo.md` declaring `tier: 1` but no `requires_operator_confirmed`
+- WHEN boot validates it
+- THEN a typed `PromptNotFoundError` is raised AND `foo` is NOT registered
+
+#### Scenario: tier-2 tool-spec without requires_hitl_token is rejected
+
+- GIVEN a `docs/tool_specs/foo.md` declaring `tier: 2` but no `requires_hitl_token`
+- WHEN boot validates it
+- THEN a typed `PromptNotFoundError` is raised AND `foo` is NOT registered
 
 #### Scenario: README.md has no tier marker
 
@@ -179,20 +214,49 @@ bearing; extended fields MAY appear but are not yet validated.
 - WHEN front-matter is parsed
 - THEN `tier` is absent (the README is not a tool)
 
-## Open Questions (deferred to design)
+### Requirement: Per-Tool MCP Prompt Exposure
 
-- **Q1 (composition mechanism):** inline `<!-- tool: name -->` marker
-  resolved at scan time, vs runtime name-lookup at `@mcp.prompt` call
-  time. Spec does not choose; design owns.
-- **Q4 (front-matter schema):** whether `requires_operator_confirmed`
-  and `requires_hitl_token` are mandatory on tool-spec front-matter.
-  Schema must freeze BEFORE `docs/tool_specs/*.md` files are authored.
+The FastMCP server MUST expose every tool-spec under
+`docs/tool_specs/*.md` as an `@mcp.prompt` whose name equals the tool
+name. The wrapper function MUST return
+`PromptRegistry.get(name).body` (i.e., the canonical Markdown body
+shipped in `docs/tool_specs/`). The shipped orchestrator prompt
+(`netops_orchestrator`) and the historical `snmp_pmp450i` prompt are
+also exposed under the same mechanism for symmetry. Boot MUST fail
+fast (typed `PromptNotFoundError`) if any registered tool-spec is not
+exposed via `@mcp.prompt`.
 
-## Cross-References
+#### Scenario: every tool-spec is reachable via get_prompt
 
-`tool-service-impact-tiers` (canonical mapping), `secure-configuration`
-(`nora_tool_specs_dir` setting), `nora-mcp-server` (boot wires
-`from_settings` with both dirs).
+- GIVEN all 13 tool-spec files are present in `docs/tool_specs/` with valid front-matter
+- WHEN the FastMCP server is booted
+- THEN `prompts/list` returns 13 entries whose names match the tool-spec basenames
+- AND each `get_prompt(name=<tool>)` returns the body of the matching `docs/tool_specs/<tool>.md`
+
+#### Scenario: netops_orchestrator prompt is reachable
+
+- GIVEN `src/nora/prompts/netops_orchestrator.md` is shipped
+- WHEN the FastMCP server is booted
+- THEN `get_prompt(name="netops_orchestrator")` returns the orchestrator body
+
+#### Scenario: tool-spec body equals registry body
+
+- GIVEN any `docs/tool_specs/<tool>.md` registered successfully
+- WHEN `get_prompt(name=<tool>)` is called via MCP
+- THEN the returned body equals `PromptRegistry.get(<tool>).body` byte-for-byte
+
+#### Scenario: boot fails when a tool-spec is not exposed via @mcp.prompt
+
+- GIVEN a tool-spec file `docs/tool_specs/<tool>.md` exists and is registered
+- AND no `@mcp.prompt` named `<tool>` is registered on the FastMCP server
+- WHEN the server is booted
+- THEN a typed `PromptNotFoundError` is raised AND the server does not start
+
+## Resolved Decisions
+
+- **Q1 (composition mechanism) — frozen as per-tool `@mcp.prompt`:** Each tool-spec is exposed as a separate MCP prompt whose name matches the tool name (e.g. `@mcp.prompt def snmp_reboot_radio() -> str`). The LLM resolves tool→spec at runtime via `get_prompt(name="<tool>")`. The FastMCP server keeps one thin wrapper per tool; the canonical body lives in `docs/tool_specs/<tool>.md` and is fetched through `PromptRegistry.get(...)`. *(Decided 2026-09-20 while implementing issue #72's canonical prompt source layer.)*
+- **Q4 (front-matter schema) — frozen as tier-conditional mandatory:** Tool-spec front-matter MUST contain `name`, `description`, AND `tier: 0 | 1 | 2`. Additionally: `tier: 1` ⇒ `requires_operator_confirmed: true` is mandatory; `tier: 2` ⇒ `requires_hitl_token: true` is mandatory. The validator in `PromptRegistry._validate_tool_spec` enforces these cross-field invariants at boot; a violation raises `PromptNotFoundError` and the spec is dropped from the registry. *(Decided 2026-09-20 while implementing issue #72's canonical prompt source layer.)*
+
 ## Cross-References
 
 - `secure-configuration` — `prompts_dir` follows the additive `Settings` pattern; env-var surface inherits the locked-no-hardcoded-values rule.
