@@ -170,9 +170,12 @@ nora prompt sync \
 - `<model_base>-latest` — **mutable alias** updated in place (POST to
   `/api/v1/models/model/update` with id in body) to point at the
   freshly-synced version. On a fresh deployment where the alias
-  does not yet exist, the orchestrator detects the 404 NOT_FOUND
-  from the update route and falls back to a POST on `/create`
-  with the same body — the alias is seeded automatically.
+  does not yet exist, the orchestrator detects the 404/401 NOT_FOUND
+  pattern from the update route (per the verified Open WebUI router
+  at `routers/models.py:785`, missing records on the update route
+  return HTTP 401 + the not-found detail) and falls back to a POST
+  on `/create` with the same body — the alias is seeded
+  automatically.
 
 `<model_base>` defaults to `nora-netops` and is configurable via
 `--model-base`.

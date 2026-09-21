@@ -338,17 +338,31 @@ def _is_duplicate_id_response(status_code: int, body: str) -> bool:
 
 
 def _is_alias_not_found_response(status_code: int, body: str) -> bool:
-    """Detect Open WebUI's "alias does not exist yet" detail in a 404 response.
+    """Detect Open WebUI's "alias does not exist yet" detail.
 
-    Per the verified API surface (sandbox-tested 2026-09-21), a
-    first-time sync for the mutable alias (``<model_base>-latest``)
-    yields HTTP 404 NOT_FOUND on the update POST with body
+    Per the verified API surface (sandbox-tested 2026-09-21 and
+    2026-09-22), a first-time sync for the mutable alias
+    (``<model_base>-latest``) yields HTTP 401 UNAUTHORIZED (NOT 404
+    as initially assumed) with body
     ``{"detail": "We could not find what you're looking for :/"}``.
-    The orchestrator's upsert pattern treats this as the signal to
-    fall back to the create endpoint with the same body, so the
-    alias is seeded on a fresh deployment without operator action.
+    The Open WebUI router at ``routers/models.py:785`` raises::
+
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    so the response is 401 + the standard not-found detail string.
+    We accept BOTH 401 and 404 with that detail so the upsert
+    fallback fires regardless of which status code Open WebUI
+    chooses to return for a missing record on the update route.
+
+    Distinct from ``_is_duplicate_id_response`` (which matches the
+    ``"already registered"`` / ``"already taken"`` substrings on the
+    create POST): both helpers may inspect 401 responses, but the
+    ``detail`` content disambiguates.
     """
-    if status_code != httpx.codes.NOT_FOUND:
+    if status_code not in (httpx.codes.NOT_FOUND, httpx.codes.UNAUTHORIZED):
         return False
     try:
         payload = json.loads(body)
@@ -383,14 +397,20 @@ def _classify_post_status(status_code: int, profile_id: str, body: str) -> str:
 def _check_update_status(status_code: int, alias_id: str, body: str) -> None:
     """Validate the POST-to-update-endpoint response — raise on non-success.
 
-    NOTE: does NOT raise on HTTP 404 — the orchestrator inspects the
-    body via ``_is_alias_not_found_response`` and falls back to the
-    create endpoint for a first-time sync. Any other non-success
-    status raises as before.
+    Does NOT raise on the alias-not-found pattern (HTTP 401 OR 404
+    with detail containing ``"could not find"``) — the orchestrator
+    inspects the body via ``_is_alias_not_found_response`` and falls
+    back to the create endpoint for a first-time sync.
+
+    IMPORTANT: the alias-not-found check MUST come BEFORE the auth
+    failure check, because Open WebUI returns HTTP 401 with the
+    not-found detail (see PR #76 round-3 sandbox comment). Without
+    this ordering the alias-not-found path would be misclassified as
+    an auth error.
     """
     if status_code in _SUCCESS_STATUS_CODES:
         return
-    if status_code == httpx.codes.NOT_FOUND and _is_alias_not_found_response(status_code, body):
+    if _is_alias_not_found_response(status_code, body):
         # Caller handles the upsert fallback; do not raise.
         return
     if status_code in _AUTH_FAILURE_STATUS_CODES:

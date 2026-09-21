@@ -798,6 +798,82 @@ def test_sync_prompts_falls_back_to_create_when_alias_does_not_exist() -> None:
     assert bodies[2]["id"] == "nora-netops-latest"
 
 
+def test_sync_prompts_falls_back_to_create_when_alias_returns_401_not_found() -> None:
+    """First-time sync for the mutable alias seeds via POST /create when
+    POST /update returns HTTP 401 UNAUTHORIZED with the not-found detail
+    (the ACTUAL server behaviour per Open WebUI's routers/models.py:785).
+
+    Per PR #76 round-3 sandbox comment: Open WebUI's update router
+    returns ``HTTPException(status_code=HTTP_401_UNAUTHORIZED,
+    detail=ERROR_MESSAGES.NOT_FOUND)`` for a missing record, NOT 404
+    NOT_FOUND as the original implementation assumed. The
+    ``_is_alias_not_found_response`` helper now accepts BOTH status
+    codes, and ``_check_update_status`` checks the alias-not-found
+    pattern BEFORE the auth-failure check, so a 401 with the
+    not-found detail triggers the upsert fallback rather than
+    raising ``OpenWebUIAuthError``.
+
+    This test is the operational twin of
+    ``test_sync_prompts_falls_back_to_create_when_alias_does_not_exist``
+    (which mocks the 404 path). Both must pass.
+    """
+    from nora.prompts.sync import OpenWebUIConfig, sync_prompts
+
+    registry = _make_registry([("netops_orchestrator", "0.3.5", "Body.\n")])
+    config = OpenWebUIConfig(admin_api_key="dummy", model_base="nora-netops")
+    seen: list[httpx.Request] = []
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        bodies.append(json.loads(request.content.decode("utf-8")))
+        url = str(request.url)
+        if "/api/v1/models/create" in url:
+            # Create succeeds for both the versioned profile and the alias fallback.
+            return httpx.Response(httpx.codes.OK, json={"id": "ok"})
+        if "/api/v1/models/model/update" in url:
+            # Open WebUI returns HTTP 401 + the not-found detail for a missing record.
+            return httpx.Response(
+                httpx.codes.UNAUTHORIZED,
+                json={"detail": "We could not find what you're looking for :/"},
+            )
+        return httpx.Response(httpx.codes.OK, json={"id": "ok"})
+
+    def client_factory(cfg: OpenWebUIConfig) -> httpx.Client:
+        return _make_mock_client(handler)
+
+    # Should NOT raise — the upsert fallback should seed the alias via /create.
+    results = sync_prompts(
+        registry,
+        config,
+        nora_version="0.3.5",
+        git_sha="abc",
+        release_tag=None,
+        client_factory=client_factory,
+    )
+
+    assert len(results) == 1
+    assert results[0]["action"] == "created"
+    assert results[0]["http_status"] == 200
+
+    # Wire-call sequence:
+    # 1. POST /api/v1/models/create (versioned profile) — 200
+    # 2. POST /api/v1/models/model/update (alias first try) — 401 with not-found detail
+    # 3. POST /api/v1/models/create (alias fallback) — 200
+    assert len(seen) == 3, (
+        f"upsert fallback expected 3 wire calls (create + update + create), got {len(seen)}: "
+        f"methods={[r.method for r in seen]}, urls={[str(r.url) for r in seen]}"
+    )
+    urls = [str(r.url) for r in seen]
+    assert urls[0].endswith("/api/v1/models/create")
+    assert urls[1].endswith("/api/v1/models/model/update")
+    assert urls[2].endswith("/api/v1/models/create"), (
+        f"third wire call must be the alias fallback to /create; got {urls[2]}"
+    )
+    # The alias fallback body MUST carry the alias id (not the versioned id).
+    assert bodies[2]["id"] == "nora-netops-latest"
+
+
 __all__ = [
     "test_config_defaults",
     "test_config_strips_trailing_slash_from_base_url",
@@ -808,6 +884,7 @@ __all__ = [
     "test_render_model_profile_includes_versioned_id",
     "test_render_model_profile_uses_custom_model_base",
     "test_sync_prompts_falls_back_to_create_when_alias_does_not_exist",
+    "test_sync_prompts_falls_back_to_create_when_alias_returns_401_not_found",
     "test_sync_prompts_posts_to_update_endpoint_for_latest_alias",
     "test_sync_prompts_posts_versioned_profile",
     "test_sync_prompts_raises_on_auth_failure_401",
