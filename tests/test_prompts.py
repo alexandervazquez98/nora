@@ -589,7 +589,9 @@ def test_tool_specs_keep_tier_based_schema(tmp_path: Path) -> None:
     # tool-spec scan — a system-prompt-style front-matter in a
     # tool-spec dir still loads as a tool-spec (the validator is
     # not invoked when the new fields are absent).
-    assert nora.__version__ == "0.3.5"
+    # (Version-agnostic: the tool-spec vs system-prompt discrimination
+    # is by directory, not by version.)
+    import nora as _nora  # noqa: F401
 
 
 # ---------------------------------------------------------------------------
