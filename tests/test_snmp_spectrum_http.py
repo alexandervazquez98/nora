@@ -47,12 +47,29 @@ from nora.drivers.snmp_pmp450i.spectrum_http import (
 FIXTURE_PATH = (
     Path(__file__).parent / "data" / "fixtures" / "spectrum" / "pmp450i_spectrum_sample.xml"
 )
+# Namespaced variant — mirrors the operator-observed `SpectrumAnalysis.xml`
+# emitted by real Cambium PMP 450i hardware (firmware 25.1) with the default
+# `xmlns="http://www.cambiumnetworks.com/spectrum"` declaration. Issue #78.
+NAMESPACED_FIXTURE_PATH = (
+    Path(__file__).parent / "data" / "fixtures" / "spectrum" / "pmp450i_spectrum_namespaced.xml"
+)
 
 
 @pytest.fixture
 def spectrum_xml_text() -> str:
     """Load the sanitized Cambium spectrum XML fixture."""
     return FIXTURE_PATH.read_text(encoding="utf-8")
+
+
+@pytest.fixture
+def spectrum_namespaced_xml_text() -> str:
+    """Load the namespaced Cambium spectrum XML fixture (issue #78).
+
+    Mirrors ``spectrum_xml_text`` but with
+    ``xmlns="http://www.cambiumnetworks.com/spectrum"``. Real Cambium PMP 450i
+    radios emit the namespace declaration; the parser must accept both forms.
+    """
+    return NAMESPACED_FIXTURE_PATH.read_text(encoding="utf-8")
 
 
 def _make_mock_client(handler) -> httpx.Client:
@@ -317,6 +334,57 @@ def test_parse_spectrum_xml_unknown_polarization_raises() -> None:
 
 
 # ---------------------------------------------------------------------------
+# parse_spectrum_xml — Cambium default-namespace tolerance (issue #78)
+# ---------------------------------------------------------------------------
+
+
+def test_parse_spectrum_xml_namespaced_root_returns_32_bins(
+    spectrum_namespaced_xml_text: str,
+) -> None:
+    """Cambium default-namespace XML parses to the same 32 bins as the bare-root fixture.
+
+    Operator-observed shape (PMP 450i firmware 25.1): the root carries
+    ``xmlns="http://www.cambiumnetworks.com/spectrum"``. ElementTree renders
+    namespaced tags in Clark notation (``{ns}Tag``); the parser must strip
+    the namespace prefix before validating the root and before matching
+    ``<Freq>`` children.
+    """
+    bins = parse_spectrum_xml(spectrum_namespaced_xml_text)
+    assert len(bins) == 32
+    frequencies = sorted({b.frequency_mhz for b in bins})
+    assert frequencies == [3500.0, 3540.0, 3550.0, 3560.0, 3600.0, 3620.0, 3650.0, 3700.0]
+    # Sanity: all 32 are SpectrumBin instances.
+    assert all(isinstance(b, SpectrumBin) for b in bins)
+
+
+def test_parse_spectrum_xml_namespaced_mixed_polarizations(
+    spectrum_namespaced_xml_text: str,
+) -> None:
+    """The namespaced fixture has 16 V bins and 16 H bins (one of each per frequency row)."""
+    bins = parse_spectrum_xml(spectrum_namespaced_xml_text)
+    v_count = sum(1 for b in bins if b.polarization == "V")
+    h_count = sum(1 for b in bins if b.polarization == "H")
+    assert v_count == 16
+    assert h_count == 16
+
+
+def test_parse_spectrum_xml_namespaced_picks_up_avg_max_values(
+    spectrum_namespaced_xml_text: str,
+) -> None:
+    """Attribute parsing still works through the namespace.
+
+    First row of bins matches the bare fixture (3500.0 V/H rows).
+    """
+    bins = parse_spectrum_xml(spectrum_namespaced_xml_text)
+    # First four bins in the fixture are the 3500.0 V/H rows. The parser must
+    # yield the same SpectrumBin records whether the root is bare or namespaced.
+    assert bins[0] == SpectrumBin(frequency_mhz=3500.0, polarization="V", avg_dbm=-68, max_dbm=-68)
+    assert bins[1] == SpectrumBin(frequency_mhz=3500.0, polarization="H", avg_dbm=-65, max_dbm=-64)
+    assert bins[2] == SpectrumBin(frequency_mhz=3500.0, polarization="V", avg_dbm=-82, max_dbm=-76)
+    assert bins[3] == SpectrumBin(frequency_mhz=3500.0, polarization="H", avg_dbm=-84, max_dbm=-82)
+
+
+# ---------------------------------------------------------------------------
 # rank_clean_frequencies — worst-case min first ordering
 # ---------------------------------------------------------------------------
 
@@ -424,6 +492,9 @@ __all__ = [
     "test_parse_spectrum_xml_missing_freq_avg_attribute_raises",
     "test_parse_spectrum_xml_unexpected_root_raises",
     "test_parse_spectrum_xml_unknown_polarization_raises",
+    "test_parse_spectrum_xml_namespaced_root_returns_32_bins",
+    "test_parse_spectrum_xml_namespaced_mixed_polarizations",
+    "test_parse_spectrum_xml_namespaced_picks_up_avg_max_values",
     "test_rank_clean_frequencies_empty_returns_empty",
     "test_rank_clean_frequencies_orders_ascending_by_worst_leg",
     "test_rank_clean_frequencies_top_n_cap",
