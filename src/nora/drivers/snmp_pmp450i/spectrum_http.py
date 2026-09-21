@@ -269,6 +269,24 @@ _SPECTRUM_FREQ_ATTR_AVG: Final[str] = "avg"
 _SPECTRUM_FREQ_ATTR_MAX: Final[str] = "max"
 
 
+def _local_tag(tag: str) -> str:
+    """Strip the Clark-notation namespace prefix from an ElementTree tag.
+
+    Namespaced elements render as
+    ``"{http://www.cambiumnetworks.com/spectrum}Spectrum_Analyzer"``. This
+    helper returns the substring after the closing ``"}"`` when present, or
+    the original tag otherwise. Used by :func:`parse_spectrum_xml` to accept
+    both bare-root and default-namespace Cambium payloads (issue #78).
+
+    Defensive: a malformed Clark tag without a closing ``}`` is returned
+    unchanged (parsing already passed, so this is unreachable in practice;
+    the guard exists for forward-compat with non-Cambium namespaces).
+    """
+    if "}" in tag:
+        return tag.split("}", 1)[1]
+    return tag
+
+
 def parse_spectrum_xml(xml_text: str) -> list[SpectrumBin]:
     """Parse a ``SpectrumAnalysis.xml`` payload into ``SpectrumBin`` records.
 
@@ -282,6 +300,12 @@ def parse_spectrum_xml(xml_text: str) -> list[SpectrumBin]:
           <Freq f="3500.0 H" avg="-65" max="-64" />
           ...
         </Spectrum_Analyzer>
+
+    **Cambium default namespace (issue #78)**: real PMP 450i firmware 25.1
+    emits the root with ``xmlns="http://www.cambiumnetworks.com/spectrum"``.
+    ``xml.etree.ElementTree`` renders namespaced tags in Clark notation
+    (``{ns}Tag``); this parser strips that prefix before validation so
+    both the bare-root and namespaced-root shapes are accepted.
 
     Empty ``<Spectrum_Analyzer></Spectrum_Analyzer>`` is valid and
     returns ``[]`` (the sweep ran but no bins were captured — operator
@@ -305,14 +329,21 @@ def parse_spectrum_xml(xml_text: str) -> list[SpectrumBin]:
             line=int(getattr(exc, "position", (0, 0))[0]) if getattr(exc, "position", None) else 0,
         ) from exc
 
-    if root.tag != _SPECTRUM_ANALYZER_ROOT:
+    if root.tag != _SPECTRUM_ANALYZER_ROOT and _local_tag(root.tag) != _SPECTRUM_ANALYZER_ROOT:
         raise SpectrumXmlParseError(
             message=(f"unexpected root element <{root.tag}>; expected <{_SPECTRUM_ANALYZER_ROOT}>"),
             line=0,
         )
 
     bins: list[SpectrumBin] = []
-    for freq_el in root.findall(_SPECTRUM_FREQ_ELEMENT):
+    # ``root.findall(_SPECTRUM_FREQ_ELEMENT)`` does NOT match default-namespace
+    # children in stdlib ElementTree (issue #78). Iterate ``root`` directly and
+    # filter by local name, stripping the Clark-notation prefix. Direct
+    # iteration also skips text nodes, comments, and processing instructions
+    # — same effective behaviour as ``findall``.
+    for freq_el in root:
+        if _local_tag(freq_el.tag) != _SPECTRUM_FREQ_ELEMENT:
+            continue
         try:
             f_attr = freq_el.get(_SPECTRUM_FREQ_ATTR_F, "")
             avg_attr = freq_el.get(_SPECTRUM_FREQ_ATTR_AVG, "")
