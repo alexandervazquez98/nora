@@ -161,11 +161,18 @@ nora prompt sync \
 
 - `<model_base>-v<X.Y.Z>` — **immutable** versioned profile (POST to
   `/api/v1/models/create`). Re-running sync with the same NORA version
-  is a no-op (server returns HTTP 401 with body
-  `{"detail": "Model ID already taken"}`, treated as success).
+  is a no-op. The server returns HTTP 401 with a body whose
+  ``detail`` field contains the duplicate-id pattern — either
+  ``"already taken"`` or ``"already registered"`` (verified against
+  Open WebUI's ``constants.py:55`` ``MODEL_ID_TAKEN`` constant); both
+  substrings are matched by the orchestrator and surface as
+  ``action="already_exists"``).
 - `<model_base>-latest` — **mutable alias** updated in place (POST to
   `/api/v1/models/model/update` with id in body) to point at the
-  freshly-synced version.
+  freshly-synced version. On a fresh deployment where the alias
+  does not yet exist, the orchestrator detects the 404 NOT_FOUND
+  from the update route and falls back to a POST on `/create`
+  with the same body — the alias is seeded automatically.
 
 `<model_base>` defaults to `nora-netops` and is configurable via
 `--model-base`.

@@ -30,7 +30,8 @@ URL. The ``model_base`` is the operator's chosen chat-model handle
 (e.g. ``nora-netops``); it carries no infrastructure fingerprint.
 
 Verified Open WebUI API surface (sandbox-tested 2026-09-20, PR #76
-review comment by alexandervazquez98):
+review comment by alexandervazquez98, and 2026-09-21 post-fix
+sandbox re-test):
 
 * **Create** — ``POST /api/v1/models/create`` (NOT ``POST
   /api/v1/models`` which returns HTTP 405).
@@ -43,14 +44,31 @@ review comment by alexandervazquez98):
   lives under ``params.system`` (Modelfile convention); top-level
   ``system_prompt`` is silently dropped by the server.
 * **Idempotency** — re-syncing an existing model id returns HTTP
-  401 with body ``{"detail": "Model ID already taken"}`` (NOT
-  409 Conflict as initially assumed). The orchestrator parses the
-  response body and treats this specific detail as the
-  ``already_exists`` no-op signal; other 401 bodies surface as
-  ``OpenWebUIAuthError``.
-* **Status codes** — 200/201 == success on both POSTs. 401/403 ==
-  auth error (unless the duplicate-id detail is present on 401).
-  Everything else surfaces as ``OpenWebUISyncError``.
+  401 with body ``{"detail": "Uh-oh! This model id is already
+  registered. Please choose another model id string."}`` (NOT 409
+  Conflict, and the substring to match is ``"already registered"``
+  — not ``"already taken"`` as the spec text suggested). The
+  orchestrator parses the response body via
+  ``_is_duplicate_id_response`` and treats the substring match as
+  the ``already_exists`` no-op signal; other 401 bodies surface as
+  ``OpenWebUIAuthError``. The helper matches BOTH ``"already
+  taken"`` and ``"already registered"`` for forward-compat with
+  Open WebUI text variations.
+* **Alias upsert** — on a fresh deployment where the mutable alias
+  ``<model_base>-latest`` does not yet exist, ``POST
+  /api/v1/models/model/update`` returns HTTP 404 NOT_FOUND with
+  body ``{"detail": "We could not find what you're looking for
+  :/"}``. The orchestrator detects this via
+  ``_is_alias_not_found_response`` and falls back to a POST on the
+  **create** endpoint with the same body, seeding the alias. The
+  create-fallback reuses ``_classify_post_status`` so a race where
+  the alias appears between the 404 and the retry still classifies
+  correctly.
+* **Status codes** — 200/201 == success on both POSTs. 401 with
+  the duplicate-id detail == ``already_exists``. 401/403 with
+  other details == auth error. 404 with the alias-not-found detail
+  == trigger for the upsert fallback. Everything else surfaces as
+  ``OpenWebUISyncError``.
 """
 
 from __future__ import annotations
@@ -288,13 +306,23 @@ def _is_syncable_system_prompt(prompt: "Prompt") -> bool:
 
 
 def _is_duplicate_id_response(status_code: int, body: str) -> bool:
-    """Detect Open WebUI's "Model ID already taken" detail in a 401 response.
+    """Detect Open WebUI's "model id already in use" detail in a 401 response.
 
-    Per the verified API surface (sandbox-tested 2026-09-20), re-syncing
-    an existing model id yields HTTP 401 with body
-    ``{"detail": "Model ID already taken"}`` — NOT 409 Conflict as
-    originally assumed. This helper parses the body to distinguish the
-    duplicate-id no-op from a real auth failure (missing / wrong key).
+    Per the verified API surface (sandbox-tested 2026-09-20 / 2026-09-21),
+    re-syncing an existing model id yields HTTP 401 with a
+    ``{"detail": "..."}`` body whose message indicates the id is taken.
+    The exact substring varies across Open WebUI versions:
+
+    * ``"Model ID already taken"`` (original spec text).
+    * ``"Uh-oh! This model id is already registered. Please choose
+      another model id string."`` (verified in the Open WebUI source at
+      ``constants.py:55`` — ``MODEL_ID_TAKEN`` constant — see PR #76
+      post-fix sandbox comment).
+
+    We match EITHER substring so both shapes classify as the
+    idempotent ``already_exists`` no-op signal. Returns ``False`` for
+    any non-401 status, non-JSON body, or auth-failure detail that
+    does not indicate a duplicate id.
     """
     if status_code != httpx.codes.UNAUTHORIZED:
         return False
@@ -303,7 +331,31 @@ def _is_duplicate_id_response(status_code: int, body: str) -> bool:
     except (TypeError, ValueError):
         return False
     detail = payload.get("detail") if isinstance(payload, dict) else None
-    return isinstance(detail, str) and "already taken" in detail.lower()
+    if not isinstance(detail, str):
+        return False
+    lowered = detail.lower()
+    return "already taken" in lowered or "already registered" in lowered
+
+
+def _is_alias_not_found_response(status_code: int, body: str) -> bool:
+    """Detect Open WebUI's "alias does not exist yet" detail in a 404 response.
+
+    Per the verified API surface (sandbox-tested 2026-09-21), a
+    first-time sync for the mutable alias (``<model_base>-latest``)
+    yields HTTP 404 NOT_FOUND on the update POST with body
+    ``{"detail": "We could not find what you're looking for :/"}``.
+    The orchestrator's upsert pattern treats this as the signal to
+    fall back to the create endpoint with the same body, so the
+    alias is seeded on a fresh deployment without operator action.
+    """
+    if status_code != httpx.codes.NOT_FOUND:
+        return False
+    try:
+        payload = json.loads(body)
+    except (TypeError, ValueError):
+        return False
+    detail = payload.get("detail") if isinstance(payload, dict) else None
+    return isinstance(detail, str) and "could not find" in detail.lower()
 
 
 def _classify_post_status(status_code: int, profile_id: str, body: str) -> str:
@@ -329,8 +381,17 @@ def _classify_post_status(status_code: int, profile_id: str, body: str) -> str:
 
 
 def _check_update_status(status_code: int, alias_id: str, body: str) -> None:
-    """Validate the POST-to-update-endpoint response — raise on non-success."""
+    """Validate the POST-to-update-endpoint response — raise on non-success.
+
+    NOTE: does NOT raise on HTTP 404 — the orchestrator inspects the
+    body via ``_is_alias_not_found_response`` and falls back to the
+    create endpoint for a first-time sync. Any other non-success
+    status raises as before.
+    """
     if status_code in _SUCCESS_STATUS_CODES:
+        return
+    if status_code == httpx.codes.NOT_FOUND and _is_alias_not_found_response(status_code, body):
+        # Caller handles the upsert fallback; do not raise.
         return
     if status_code in _AUTH_FAILURE_STATUS_CODES:
         raise OpenWebUIAuthError(
@@ -460,6 +521,28 @@ def sync_prompts(
                 latest_alias_id,
                 update_response.text,
             )
+
+            # Upsert fallback: if the alias does not exist yet (HTTP
+            # 404 NOT_FOUND), seed it via the create endpoint with the
+            # same body. Subsequent syncs hit the update path normally.
+            if _is_alias_not_found_response(update_response.status_code, update_response.text):
+                logger.debug("alias %r does not exist yet; falling back to create", latest_alias_id)
+                try:
+                    create_alias_response = client.post(create_url, json=latest_profile)
+                except httpx.HTTPError as exc:
+                    raise OpenWebUISyncError(
+                        f"HTTP transport error during POST {latest_alias_id!r} "
+                        f"(alias create fallback): {exc}"
+                    ) from exc
+                # The create fallback reuses the same classifier — if
+                # the alias raced into existence between the 404 and
+                # our retry, the duplicate-id detail yields
+                # action="already_exists" (no-op, correct outcome).
+                _classify_post_status(
+                    create_alias_response.status_code,
+                    latest_alias_id,
+                    create_alias_response.text,
+                )
 
             results.append(
                 {

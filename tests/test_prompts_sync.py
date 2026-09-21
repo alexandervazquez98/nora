@@ -666,6 +666,138 @@ def test_sync_prompts_skips_tool_specs() -> None:
     assert len(captured) == 2
 
 
+# ---------------------------------------------------------------------------
+# sync_prompts — duplicate-id detail string variation (PR #76 sandbox)
+# ---------------------------------------------------------------------------
+
+
+def test_sync_prompts_treats_already_registered_detail_as_idempotent() -> None:
+    """HTTP 401 with body containing 'already registered' (Open WebUI MODEL_ID_TAKEN
+    constant at constants.py:55) is also treated as the idempotent ``already_exists``
+    signal.
+
+    Per PR #76 post-fix sandbox comment: Open WebUI's actual duplicate-id
+    error string is ``"Uh-oh! This model id is already registered. Please
+    choose another model id string."`` (constants.py:55). The original
+    implementation only matched ``"already taken"`` (the spec's original
+    text). This test pins the broader match so future Open WebUI text
+    variations don't silently break idempotency classification.
+    """
+    from nora.prompts.sync import OpenWebUIConfig, sync_prompts
+
+    registry = _make_registry([("netops_orchestrator", "0.3.5", "Body.\n")])
+    config = OpenWebUIConfig(admin_api_key="dummy", model_base="nora-netops")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        # Create POST returns 401 with the Open WebUI source-constant text.
+        if "/api/v1/models/create" in str(request.url):
+            return httpx.Response(
+                httpx.codes.UNAUTHORIZED,
+                json={
+                    "detail": (
+                        "Uh-oh! This model id is already registered. "
+                        "Please choose another model id string."
+                    )
+                },
+            )
+        return httpx.Response(httpx.codes.OK, json={"id": "ok"})
+
+    def client_factory(cfg: OpenWebUIConfig) -> httpx.Client:
+        return _make_mock_client(handler)
+
+    results = sync_prompts(
+        registry,
+        config,
+        nora_version="0.3.5",
+        git_sha="abc",
+        release_tag=None,
+        client_factory=client_factory,
+    )
+
+    assert len(results) == 1
+    entry = results[0]
+    assert entry["action"] == "already_exists", (
+        f"401 with 'already registered' must surface as already_exists; got {entry!r}"
+    )
+    assert entry["http_status"] == 401
+    assert entry["name"] == "netops_orchestrator"
+    assert entry["version"] == "0.3.5"
+
+
+# ---------------------------------------------------------------------------
+# sync_prompts — upsert fallback for first-time mutable alias (PR #76 sandbox)
+# ---------------------------------------------------------------------------
+
+
+def test_sync_prompts_falls_back_to_create_when_alias_does_not_exist() -> None:
+    """First-time sync for the mutable alias seeds via POST /create when
+    POST /update returns 404 NOT_FOUND with the alias-not-found detail.
+
+    Per PR #76 post-fix sandbox comment: a fresh deployment where
+    ``<model_base>-latest`` does not yet exist yields HTTP 404 on
+    ``POST /api/v1/models/model/update`` with body
+    ``{"detail": "We could not find what you're looking for :/"}``.
+    The orchestrator catches this and POSTs again to the create endpoint
+    with the same body, so the alias is seeded without operator action.
+    """
+    from nora.prompts.sync import OpenWebUIConfig, sync_prompts
+
+    registry = _make_registry([("netops_orchestrator", "0.3.5", "Body.\n")])
+    config = OpenWebUIConfig(admin_api_key="dummy", model_base="nora-netops")
+    seen: list[httpx.Request] = []
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        bodies.append(json.loads(request.content.decode("utf-8")))
+        url = str(request.url)
+        if "/api/v1/models/create" in url:
+            # Create always succeeds (both versioned profile AND alias fallback).
+            return httpx.Response(httpx.codes.OK, json={"id": "ok"})
+        if "/api/v1/models/model/update" in url:
+            # Alias does not exist yet — first-time-sync NOT_FOUND.
+            return httpx.Response(
+                httpx.codes.NOT_FOUND,
+                json={"detail": "We could not find what you're looking for :/"},
+            )
+        # Defensive default — should not reach here.
+        return httpx.Response(httpx.codes.OK, json={"id": "ok"})
+
+    def client_factory(cfg: OpenWebUIConfig) -> httpx.Client:
+        return _make_mock_client(handler)
+
+    # Should NOT raise — the upsert fallback should seed the alias.
+    results = sync_prompts(
+        registry,
+        config,
+        nora_version="0.3.5",
+        git_sha="abc",
+        release_tag=None,
+        client_factory=client_factory,
+    )
+
+    assert len(results) == 1
+    assert results[0]["action"] == "created"
+    assert results[0]["http_status"] == 200
+
+    # Wire-call sequence:
+    # 1. POST /api/v1/models/create (versioned profile) — 200
+    # 2. POST /api/v1/models/model/update (alias first try) — 404
+    # 3. POST /api/v1/models/create (alias fallback) — 200
+    assert len(seen) == 3, (
+        f"upsert fallback expected 3 wire calls (create + update + create), got {len(seen)}: "
+        f"urls={[str(r.url) for r in seen]}"
+    )
+    urls = [str(r.url) for r in seen]
+    assert urls[0].endswith("/api/v1/models/create")
+    assert urls[1].endswith("/api/v1/models/model/update")
+    assert urls[2].endswith("/api/v1/models/create"), (
+        f"third wire call must be the alias fallback to /create; got {urls[2]}"
+    )
+    # The alias fallback body MUST carry the alias id (not the versioned id).
+    assert bodies[2]["id"] == "nora-netops-latest"
+
+
 __all__ = [
     "test_config_defaults",
     "test_config_strips_trailing_slash_from_base_url",
@@ -675,11 +807,13 @@ __all__ = [
     "test_render_model_profile_includes_metadata_fields",
     "test_render_model_profile_includes_versioned_id",
     "test_render_model_profile_uses_custom_model_base",
-    "test_sync_prompts_posts_versioned_profile",
-    "test_sync_prompts_treats_duplicate_id_as_idempotent_success",
+    "test_sync_prompts_falls_back_to_create_when_alias_does_not_exist",
     "test_sync_prompts_posts_to_update_endpoint_for_latest_alias",
+    "test_sync_prompts_posts_versioned_profile",
     "test_sync_prompts_raises_on_auth_failure_401",
     "test_sync_prompts_raises_on_403",
     "test_sync_prompts_raises_on_500",
     "test_sync_prompts_skips_tool_specs",
+    "test_sync_prompts_treats_already_registered_detail_as_idempotent",
+    "test_sync_prompts_treats_duplicate_id_as_idempotent_success",
 ]
