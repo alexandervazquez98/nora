@@ -4,6 +4,25 @@ Day-2 operations: key management, updates, log interpretation, integration
 contracts, troubleshooting. Read INSTALL.md first if the service is not
 yet running.
 
+## For developers
+
+If you're contributing code or tests, start with
+[`[CONTRIBUTING.md]`](CONTRIBUTING.md). It covers the test execution
+workflow (dev loop / pre-PR / CI), when to use shared fixtures vs
+inline subprocess, how to mark flaky-under-xdist tests, and the
+fixtures recipe (`scope="session"` + `worker_id`, fixed env dict, not
+`**os.environ`).
+
+For the architectural rationale of the testing strategy (xdist
+parallelism opt-in, session-scoped subprocess fixtures, `no_xdist`
+marker), see [`[ADR-0002]`](docs/adr/0002-testing-strategy.md).
+
+The sections below are operator-facing (install, deploy, key management,
+OpenChat integration). Keep them focused on the production deployment
+contract, not on development workflow.
+
+---
+
 ## Test execution workflow
 
 Three execution modes, each tuned for a different loop. Pick the one that
@@ -476,3 +495,122 @@ schema; the cross-validator at scan time enforces
 `{tier 1 ⇒ requires_operator_confirmed=True}`,
 `{tier 2 ⇒ requires_hitl_token=True}`, and
 `{tier ∈ {0, 1, 2}}`.
+
+## PromptOps Workflow (issue #45)
+
+System prompts (`src/nora/prompts/*.md`) are versioned and synchronised
+to Open WebUI as immutable, tagged model profiles with a mutable
+`latest` alias. The SSoT (Single Source of Truth) is the Git tree;
+Open WebUI is a downstream consumer that mirrors the Git state.
+
+### Front-matter contract (system prompts)
+
+Every prompt at `src/nora/prompts/<name>.md` MUST declare front-matter
+with:
+
+| Field | Type | Required | Validation |
+|-------|------|----------|------------|
+| `name` | string | yes | matches filename (sans `.md`) |
+| `description` | string | yes | non-empty |
+| `version` | string (SemVer) | yes | `packaging.version.Version` must parse |
+| `nora_compatibility` | string (SemVer range) | yes | `packaging.specifiers.SpecifierSet`; MUST contain `nora.__version__` |
+| `governance` | dict | yes | non-neg ints for `tier_0`, `tier_1`, `tier_2` |
+| `checksum_sha256` | 64-char lowercase hex | yes | `sha256(body_bytes).hexdigest()` MUST match the declared value |
+
+`PromptRegistry._validate_system_prompt` enforces this at boot; a
+violation raises `PromptNotFoundError` and the prompt is dropped.
+
+### SemVer policy for prompts
+
+| Bump | Meaning | Example |
+|------|---------|---------|
+| Patch | Clarity, typo fixes, additional few-shot examples | `0.3.5` → `0.3.6` |
+| Minor | Tool additions, new governance rules, new operational sections | `0.3.5` → `0.4.0` |
+| Major | Structural governance shifts or breaking behavioural modifications | `0.3.5` → `1.0.0` |
+
+The SemVer signal feeds into the NORA version bump: a prompt Minor
+warrants a NORA Minor.
+
+### Bumping a prompt
+
+1. Edit the prompt body in `src/nora/prompts/<name>.md`.
+2. Update `version` in front-matter.
+3. The `checksum_sha256` is computed at scan time — the operator does
+   NOT compute it manually. After bumping `version`, run a local boot
+   (e.g. `nora mcp` once) to confirm the registry accepts the new
+   checksum.
+4. Commit with a Conventional Commit message
+   (`feat(prompts): ...` / `fix(prompts): ...` / `docs(prompts): ...`).
+5. Push. Bump the NORA package version per the SemVer policy above.
+6. Run `nora prompt sync` to publish the new immutable profile and
+   update the `latest` alias in Open WebUI.
+
+### Manual sync to Open WebUI
+
+```bash
+nora prompt sync \
+    --base-url "$OPENWEBUI_BASE_URL" \
+    --admin-api-key "$OPENWEBUI_ADMIN_API_KEY" \
+    --model-base nora-netops \
+    --git-sha "$(git rev-parse HEAD)" \
+    --release-tag "$(git describe --tags --exact-match 2>/dev/null || echo)"
+```
+
+The sync is idempotent — re-running produces the same end state.
+
+Required env vars (override via flags):
+
+| Env var | Default | Purpose |
+|---------|---------|---------|
+| `OPENWEBUI_BASE_URL` | `http://localhost:8080` | Open WebUI base URL |
+| `OPENWEBUI_ADMIN_API_KEY` | (required) | Bearer token for the Open WebUI REST API |
+
+The sync POSTs `<base>-v<X.Y.Z>` (immutable, via `POST /api/v1/models/create` —
+treated as success on HTTP 401 with body whose ``detail`` matches
+the Open WebUI duplicate-id pattern — either the spec's original
+``"Model ID already taken"`` substring or the actual server-constant
+text ``"Uh-oh! This model id is already registered..."``
+verified against ``constants.py:55``; both substrings are matched)
+and POSTs the `<base>-latest` update to `POST /api/v1/models/model/update`
+with the alias id carried in the body (mutable alias). Both carry
+metadata `{commit_sha, release_tag, synced_at, nora_version, prompt_version}`.
+
+### Instant rollback
+
+When a newly deployed prompt misbehaves against the underlying LLM:
+
+1. Open the Open WebUI model dropdown.
+2. Select the prior frozen version tag (`nora-netops:v<prev>`).
+3. Done — no SSH, no config edit, no NORA restart.
+
+The mutable `latest` alias continues to point at the broken prompt
+until the next successful sync overwrites it. Operators who want to
+**pin** a known-good prompt can update Open WebUI's chat-template
+default to a specific frozen tag.
+
+### Watermark banner
+
+Every `@mcp.prompt` wrapper and `nora_get_tool_spec` tool returns a
+banner prepended to the rendered body:
+
+```
+<!-- NORA-PROMPT: <name> v<version> [sha: <first-8-hex>] -->
+
+<body>
+```
+
+The banner lets operators ask the LLM "what prompt version are you
+running?" and get a deterministic answer from the visible chat
+context. The SHA is truncated to 8 hex chars for human readability;
+the full 64-char digest is in `Prompt.metadata["checksum_sha256"]`
+for drift detection.
+
+### Troubleshooting
+
+| Symptom | Likely cause | Fix |
+|---------|--------------|-----|
+| Boot fails with `PromptNotFoundError: <name>: checksum_mismatch` | Body was edited without updating checksum (or without bumping version) | Either revert the body, or recompute the checksum by re-running a local boot — the registry computes and reports the expected value in the error message |
+| Boot fails with `PromptNotFoundError: <name>: nora_compatibility_unsatisfied` | Prompt declares a `nora_compatibility` range that doesn't contain the running `nora.__version__` | Either bump NORA to satisfy the range, or relax the prompt's range |
+| `nora prompt sync` returns `OpenWebUIAuthError` | Invalid or missing API key | Confirm `OPENWEBUI_ADMIN_API_KEY` is set and has model-create permission |
+| `nora prompt sync` returns `OpenWebUISyncError: HTTP transport error` | Open WebUI not reachable at `--base-url` | Confirm `curl <base-url>/api/v1/models -I` returns 200 |
+| Open WebUI shows stale prompt after sync | Front-end cached the old model definition | In Open WebUI admin, force-refresh the model entry or restart the Open WebUI container |

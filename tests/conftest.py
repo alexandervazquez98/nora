@@ -13,6 +13,7 @@ import json
 import os
 import socket
 import subprocess
+import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -360,6 +361,87 @@ class McpHttpClient:
         return self.request("tools/list", id=id)
 
 
+class McpStdioClient:
+    """JSON-RPC over stdio MCP, newline-delimited JSON.
+
+    Mirrors `McpHttpClient` but writes one JSON-RPC frame per line to stdin
+    and reads one response line from stdout. Notifications (frames without
+    `id`) are sent via `send_notification()` — they do NOT expect a reply
+    and the implementation must not block waiting for one.
+
+    A lock serializes stdin/stdout access so concurrent calls do not
+    interleave frames (Popen pipes are not safe for parallel R/W).
+    """
+
+    def __init__(self, proc: subprocess.Popen[bytes]) -> None:
+        self._proc = proc
+        self._lock = threading.Lock()
+
+    def request(
+        self,
+        method: str,
+        params: dict[str, Any] | None = None,
+        *,
+        id: int,
+    ) -> dict[str, Any]:
+        if id is None:
+            raise ValueError(
+                "request() is for JSON-RPC requests only; "
+                "use send_notification() for notifications"
+            )
+        frame: dict[str, Any] = {"jsonrpc": "2.0", "method": method, "id": id}
+        if params is not None:
+            frame["params"] = params
+
+        line = (json.dumps(frame) + "\n").encode("utf-8")
+        with self._lock:
+            assert self._proc.stdin is not None
+            self._proc.stdin.write(line)
+            self._proc.stdin.flush()
+
+            assert self._proc.stdout is not None
+            response_line = self._proc.stdout.readline()
+            if not response_line:
+                raise RuntimeError(
+                    f"server closed stdout (no response) after method={method!r}"
+                )
+            return json.loads(response_line.decode("utf-8"))
+
+    def send_notification(
+        self,
+        method: str,
+        params: dict[str, Any] | None = None,
+    ) -> None:
+        frame: dict[str, Any] = {"jsonrpc": "2.0", "method": method}
+        if params is not None:
+            frame["params"] = params
+
+        line = (json.dumps(frame) + "\n").encode("utf-8")
+        with self._lock:
+            assert self._proc.stdin is not None
+            self._proc.stdin.write(line)
+            self._proc.stdin.flush()
+            # Notifications: do NOT read stdout; the server does not reply.
+
+    def initialize(self) -> dict[str, Any]:
+        return self.request(
+            "initialize",
+            {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "pytest", "version": "0.0.0"},
+            },
+            id=1,
+        )
+
+    def initialized(self) -> None:
+        # Notification: server does not reply.
+        self.send_notification("notifications/initialized")
+
+    def tools_list(self, *, id: int = 2) -> dict[str, Any]:
+        return self.request("tools/list", id=id)
+
+
 def _free_port() -> int:
     """Ask the OS for an unused TCP port on 127.0.0.1."""
     s = socket.socket()
@@ -475,3 +557,106 @@ def mcp_http_client(mcp_http_server: tuple[str, int, subprocess.Popen[bytes]]) -
     """Per-test JSON-RPC client over the shared HTTP MCP server."""
     host, port, _proc = mcp_http_server
     return McpHttpClient(f"http://{host}:{port}/mcp")
+
+
+@pytest.fixture(scope="session")
+def mcp_stdio_server(
+    worker_id: str, tmp_path_factory: pytest.TempPathFactory
+) -> Iterator[subprocess.Popen[bytes]]:
+    """One nora-mcp subprocess per pytest-xdist worker, sharing stdio across tests.
+
+    Mirrors `mcp_http_server` but uses stdio transport (the default for
+    `nora-mcp`). Each worker boots exactly one `nora-mcp` process on a
+    hermetic tmp tree; tests in the same worker share the proc and pay
+    only the JSON-RPC round-trip cost per assertion.
+
+    Cleanup: terminate the process, wait up to 5s, then SIGKILL on
+    timeout. Drain stderr so the parent runner doesn't see a broken-
+    pipe warning at fixture teardown.
+
+    Tests that assert on stdout/stderr framing of the subprocess (e.g.
+    `test_subprocess_keeps_stdout_reserved_for_jsonrpc`,
+    `test_subprocess_emits_structured_startup_log_on_stderr`,
+    `intervention_writer/test_stdio_smoke.py`) MUST NOT use this fixture;
+    they need a fresh subprocess per test to assert on per-boot framing.
+    """
+    from nora.data import BUILTIN_BASELINE_SIGNING_KEY
+
+    project_root = Path(__file__).resolve().parent.parent
+    venv_py = project_root / ".venv" / "bin" / "python"
+    if not venv_py.exists():
+        pytest.skip("venv python not present")
+    py = str(venv_py)
+
+    # Per-worker tmp dir so parallel workers don't collide on catalogs /
+    # devices.yaml.
+    tmp = tmp_path_factory.mktemp(f"mcp_stdio_{worker_id}")
+    (tmp / "catalogs").mkdir(exist_ok=True)
+    (tmp / "devices.yaml").write_text("# empty hermetic inventory\n")
+
+    env = {
+        **os.environ,
+        "NORA_OID_CATALOG_SIGNING_KEY": BUILTIN_BASELINE_SIGNING_KEY,
+        "NORA_OID_CATALOGS_PATH": str(tmp / "catalogs"),
+        "NORA_DEVICES_INVENTORY_PATH": str(tmp / "devices.yaml"),
+        "NORA_MCP_TRANSPORT": "stdio",
+    }
+
+    proc = subprocess.Popen(
+        [
+            py,
+            "-m",
+            "nora.cli",
+            "--transport=stdio",
+        ],
+        cwd=str(project_root),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        bufsize=0,
+    )
+
+    # Wait for the server to be ready by probing `initialize`. FastMCP's
+    # stdio server is "ready" the moment the subprocess boots; we just
+    # need to make sure it didn't crash on startup. Poll briefly with
+    # `initialize`; if it responds, the server is up.
+    ready_deadline = time.monotonic() + 10.0
+    while time.monotonic() < ready_deadline:
+        if proc.poll() is not None:
+            err = b""
+            try:
+                assert proc.stderr is not None
+                err = proc.stderr.read() or b""
+            except Exception:
+                pass
+            pytest.fail(
+                f"nora-mcp exited before ready (rc={proc.returncode}); "
+                f"stderr: {err.decode(errors='replace')!r}"
+            )
+        try:
+            client = McpStdioClient(proc)
+            client.initialize()
+            break
+        except Exception:
+            time.sleep(0.1)
+    else:
+        proc.kill()
+        proc.wait()
+        pytest.fail("nora-mcp never responded to initialize within 10s")
+
+    try:
+        yield proc
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+        try:
+            assert proc.stderr is not None
+            proc.stderr.read()
+        except Exception:
+            pass

@@ -4,6 +4,22 @@ Boots the server as a real subprocess, drives the MCP handshake over
 JSON-RPC, calls `save_intervention_record` with a valid payload, and
 asserts the resulting `.json` lands under the configured
 `NORA_INTERVENTIONS_DIR`.
+
+Why this test uses an inline subprocess and NOT the session-scoped
+`mcp_stdio_server` fixture (`tests/conftest.py`):
+
+- Per-test `NORA_INTERVENTIONS_DIR`: this test creates a fresh
+  `tempfile.mkdtemp(prefix="nora-writer-smoke-")` and asserts
+  `len(json_files) == 1`. Sharing the fixture would mean all tests
+  in the same worker write to the same directory, breaking the
+  "exactly one INT-*.json on disk" assertion.
+- Per-boot env-var injection: the env block includes a per-test
+  `NORA_INTERVENTIONS_DIR`; the session-scoped fixture captures
+  its env once at boot and cannot be re-configured per test
+  without losing the shared-boot benefit.
+
+See `odd/tasks/test-perf-stdio-fixture.md` WU-6 for the full rationale
+and the list of stdio-specific tests that intentionally remain inline.
 """
 
 from __future__ import annotations

@@ -77,7 +77,8 @@ Top archivos por tiempo cumulative en suite completa (con xdist):
 
 **Patrón dominante**: muchos tests hacen `subprocess.run([python, "-m", "pytest" or "nora", ...])`,
 pagan el cold start (~1.5s) + boot + teardown cada uno. **Oportunidad grande**
-(NO incluida en este PR, scope creep): session-scoped fixture que comparte un
+(deferrred to a separate branch — closed 2026-09-20 in `feat/test-perf-stdio-fixture`,
+see follow-up #1 below): session-scoped fixture que comparte un
 único server boot entre estos tests → ahorro estimado **30-40 s** (suite bajaría
 a ~10-12 s).
 
@@ -116,9 +117,22 @@ conocidos.
 
 ## Follow-ups recomendados (issues separadas)
 
-1. **`test(integration): session-scoped MCP server fixture`** — Compartir
-   un único subprocess boot entre `test_integration.py`, `test_integration_boot.py`,
-   `test_server.py`, `test_main_alias.py`. Ahorro estimado: 30-40 s.
+1. **`test(integration): session-scoped MCP server fixture`** — ✅ **CERRADO
+   2026-09-20** en la rama `feat/test-perf-stdio-fixture` (commits `0d43a46`,
+   `630a3f9`, `5db62a3`, `6e53db9`). Ver `odd/tasks/test-perf-stdio-fixture.md`
+   para el detalle work-unit-por-work-unit. Resumen:
+   - Añadidos `McpStdioClient` y fixture `mcp_stdio_server(scope="session")`
+     en `tests/conftest.py` (paralelo al `mcp_http_server` existente de WU-#1a).
+   - Migrados 2 tests transport-agnostic en `tests/test_integration.py`.
+   - Tests stdio-specific (`test_integration_boot.py` completo, 1 test en
+     `test_server.py`, 1 test en `test_main_alias.py`, 1 test en
+     `test_oid_catalog_integration.py`, `test_stdio_smoke.py` del
+     intervention_writer) permanecen inline con justificación documentada.
+   - Ahorro medido: tests/test_integration.py 7.55s (era 10.97s, **−31%**);
+     tests/test_integration_boot.py 9.77s (era 15.93s, **−39%**); combinado
+     **11.29s** (era 17.72s, **−36%**) bajo `-n auto --no-cov -m "not no_xdist"`.
+     Ahorro estimado original (30-40s) se cumplió en estos dos archivos; los
+     4 archivos restantes no eran migrables según análisis WU-5.
 
 2. **`test(installer): git clone --depth=1`** — **YA IMPLEMENTADO** desde
    el commit `04f9588` (issue #22). `scripts/bootstrap.sh:241,244` ya usa
