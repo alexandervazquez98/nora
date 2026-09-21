@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Spectrum_Analyzer xmlns="http://www.cambiumnetworks.com/spectrum">
+  <Freq f="3500.0 V" avg="-68" max="-68" />
+  <Freq f="3500.0 H" avg="-65" max="-64" />
+  <Freq f="3500.0 V" avg="-82" max="-76" />
+  <Freq f="3500.0 H" avg="-84" max="-82" />
+
+  <Freq f="3540.0 V" avg="-75" max="-73" />
+  <Freq f="3540.0 H" avg="-73" max="-72" />
+  <Freq f="3540.0 V" avg="-85" max="-83" />
+  <Freq f="3540.0 H" avg="-86" max="-84" />
+
+  <Freq f="3550.0 V" avg="-79" max="-79" />
+  <Freq f="3550.0 H" avg="-79" max="-79" />
+  <Freq f="3550.0 V" avg="-88" max="-87" />
+  <Freq f="3550.0 H" avg="-87" max="-87" />
+
+  <Freq f="3560.0 V" avg="-82" max="-81" />
+  <Freq f="3560.0 H" avg="-81" max="-79" />
+  <Freq f="3560.0 V" avg="-88" max="-87" />
+  <Freq f="3560.0 H" avg="-91" max="-90" />
+
+  <Freq f="3600.0 V" avg="-70" max="-69" />
+  <Freq f="3600.0 H" avg="-68" max="-66" />
+  <Freq f="3600.0 V" avg="-80" max="-78" />
+  <Freq f="3600.0 H" avg="-82" max="-80" />
+
+  <Freq f="3620.0 V" avg="-65" max="-63" />
+  <Freq f="3620.0 H" avg="-63" max="-61" />
+  <Freq f="3620.0 V" avg="-78" max="-76" />
+  <Freq f="3620.0 H" avg="-80" max="-78" />
+
+  <Freq f="3650.0 V" avg="-60" max="-59" />
+  <Freq f="3650.0 H" avg="-57" max="-57" />
+  <Freq f="3650.0 V" avg="-76" max="-76" />
+  <Freq f="3650.0 H" avg="-79" max="-79" />
+
+  <Freq f="3700.0 V" avg="-72" max="-70" />
+  <Freq f="3700.0 H" avg="-70" max="-68" />
+  <Freq f="3700.0 V" avg="-82" max="-80" />
+  <Freq f="3700.0 H" avg="-84" max="-82" />
+</Spectrum_Analyzer>
