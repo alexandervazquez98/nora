@@ -49,6 +49,13 @@ _BANNED_MODULES: tuple[str, ...] = (
 # enforcement stays surgical.
 _AIRGAP_EXCEPTIONS: dict[str, frozenset[str]] = {
     "src/nora/drivers/snmp_pmp450i/spectrum_http.py": frozenset({"httpx"}),
+    # Issue #45 / WU-3 — the Open WebUI declarative sync layer.
+    # `httpx` is the only outbound HTTP client for the sync flow
+    # (POST + PUT against ``/api/v1/models``); the dispatch test
+    # uses ``httpx.MockTransport`` for hermeticity. Adding the
+    # exception keeps the surgical air-gap policy: every other
+    # driver / prompt file MUST NOT name any banned module.
+    "src/nora/prompts/sync.py": frozenset({"httpx"}),
 }
 
 

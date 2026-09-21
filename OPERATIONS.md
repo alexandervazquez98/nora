@@ -575,6 +575,8 @@ and POSTs the `<base>-latest` update to `POST /api/v1/models/model/update`
 with the alias id carried in the body (mutable alias). Both carry
 metadata `{commit_sha, release_tag, synced_at, nora_version, prompt_version}`.
 
+The mutable `<base>-latest` alias is updated via `POST /api/v1/models/model/update`. On a fresh deployment where the alias does not yet exist, Open WebUI returns HTTP 401 with body `{"detail": "We could not find what you're looking for :/"}` (the router at `routers/models.py:785` raises `HTTPException(401, ERROR_MESSAGES.NOT_FOUND)` for missing records). The orchestrator detects this pattern and falls back to a POST on `/create` with the same body — the alias is seeded automatically.
+
 ### Instant rollback
 
 When a newly deployed prompt misbehaves against the underlying LLM:

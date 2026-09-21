@@ -1,14 +1,19 @@
-"""`nora` entry point — sub-command dispatcher (issue #43 / WU-2).
+"""`nora` entry point — sub-command dispatcher (issue #43 / WU-2 + WU-3).
 
 Per `openspec/changes/2026-09-15-3tier-tool-governance/specs/nora-mcp-server/spec.md`
 R-NEW-7: `nora` argv-dispatches on `argv[1]`.
 
-* `nora mcp`        → existing ``cli.main()`` boot (FastMCP server).
-* `nora hitl mint …` → new operator-facing CLI handler that emits a
-  signed ``HitlApprovalToken`` JSON payload on stdout.
-* `nora` (no args)  → DEPRECATION alias; emits ``DeprecationWarning``
-  then calls ``cli.main()`` for back-compat with operators that boot
-  NORA via ``python -m nora``.
+* `nora mcp`              → existing ``cli.main()`` boot (FastMCP server).
+* `nora hitl mint …`      → operator-facing CLI handler that emits a
+                            signed ``HitlApprovalToken`` JSON payload on stdout.
+* `nora prompt sync …`    → issue #45 WU-3 — pushes versioned system prompts
+                            to the operator's Open WebUI instance via the
+                            declarative REST sync (``POST`` immutable
+                            ``<base>-v<X.Y.Z>`` + ``PUT`` mutable
+                            ``<base>-latest``).
+* `nora` (no args)        → DEPRECATION alias; emits ``DeprecationWarning``
+                            then calls ``cli.main()`` for back-compat with
+                            operators that boot NORA via ``python -m nora``.
 * unknown sub-command → ``argparse`` style help to stderr + exit 2.
 
 The dispatcher mirrors Unix ``git`` / ``cargo`` conventions and keeps
@@ -21,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import warnings
 
@@ -31,18 +37,21 @@ warnings.simplefilter("always", DeprecationWarning)
 
 
 def _build_dispatch_parser() -> argparse.ArgumentParser:
-    """Build the top-level argparse with `hitl` sub-parser.
+    """Build the top-level argparse with `hitl` + `prompt` sub-parsers.
 
     Kept private so a caller can't mutate the dispatcher's state. The
-    sub-command names — `mcp`, `hitl` — are part of the operator-facing
-    CLI contract; adding a new sub-command is an explicit code change.
+    sub-command names — `mcp`, `hitl`, `prompt` — are part of the
+    operator-facing CLI contract; adding a new sub-command is an
+    explicit code change.
     """
     parser = argparse.ArgumentParser(
         prog="nora",
         description=(
             "NORA — Network Operations & Remediation Assistant. "
             "Use `nora mcp` to boot the FastMCP server, "
-            "or `nora hitl mint ...` to mint a HITL approval token."
+            "`nora hitl mint ...` to mint a HITL approval token, "
+            "or `nora prompt sync ...` to push versioned system prompts "
+            "to an Open WebUI instance."
         ),
     )
     subparsers = parser.add_subparsers(dest="subcommand", metavar="SUBCOMMAND")
@@ -77,6 +86,59 @@ def _build_dispatch_parser() -> argparse.ArgumentParser:
             "Token time-to-live in seconds (default: "
             "Settings.nora_hitl_token_ttl_seconds, typically 900)."
         ),
+    )
+
+    # `nora prompt sync` — issue #45 WU-3 — declarative Open WebUI sync.
+    # The dispatcher calls the sync module's ``sync_prompts`` function
+    # in-process (no subprocess) so the operator gets typed exceptions
+    # and JSON output without paying a Python startup per sync.
+    prompt_parser = subparsers.add_parser(
+        "prompt",
+        help="Prompt-registry operations (sync versioned system prompts to chat front-ends).",
+    )
+    prompt_subparsers = prompt_parser.add_subparsers(
+        dest="prompt_command", metavar="PROMPT_COMMAND"
+    )
+    sync_parser = prompt_subparsers.add_parser(
+        "sync",
+        help=(
+            "Sync versioned system prompts to Open WebUI. "
+            "Pushes the immutable `<base>-v<X.Y.Z>` profile and updates "
+            "the mutable `<base>-latest` alias in place."
+        ),
+    )
+    sync_parser.add_argument(
+        "--base-url",
+        default="http://localhost:8080",
+        help="Open WebUI base URL (default: http://localhost:8080; env: OPENWEBUI_BASE_URL).",
+    )
+    sync_parser.add_argument(
+        "--admin-api-key",
+        default=None,
+        help=(
+            "Open WebUI admin API key (env: OPENWEBUI_ADMIN_API_KEY). "
+            "CLI flag wins over env; one of the two MUST be set."
+        ),
+    )
+    sync_parser.add_argument(
+        "--model-base",
+        default="nora-netops",
+        help="Model handle prefix (default: nora-netops).",
+    )
+    sync_parser.add_argument(
+        "--nora-version",
+        default=None,
+        help="NORA version stamped into metadata (default: nora.__version__).",
+    )
+    sync_parser.add_argument(
+        "--git-sha",
+        default="unknown",
+        help="Git commit SHA stamped into metadata (default: 'unknown').",
+    )
+    sync_parser.add_argument(
+        "--release-tag",
+        default=None,
+        help="Optional release tag (e.g. v0.3.5) stamped into metadata.",
     )
 
     return parser
@@ -119,6 +181,81 @@ def _dispatch_hitl_mint(args: argparse.Namespace) -> int:
 
     payload = token.model_dump(mode="json")
     sys.stdout.write(json.dumps(payload) + "\n")
+    sys.stdout.flush()
+    return 0
+
+
+def _dispatch_prompt_sync(args: argparse.Namespace) -> int:
+    """Handle `nora prompt sync` — push versioned prompts to Open WebUI.
+
+    Resolves ``admin_api_key`` from CLI > env (``OPENWEBUI_ADMIN_API_KEY``);
+    one of the two MUST be set or the dispatcher exits 2 with a stderr
+    message naming the missing key. The registry is built from the
+    default ``Settings`` (so operator-overridden ``NORA_PROMPTS_DIR``
+    applies), then ``sync_prompts`` is called in-process — no
+    subprocess, no boot of the FastMCP server.
+
+    Returns the exit code (0 success, 1 sync error, 2 missing key).
+    On success, stdout carries a JSON array of result dicts (one per
+    synced prompt). On any ``OpenWebUISyncError`` /
+    ``OpenWebUIAuthError`` the message is prefixed with ``nora:
+    `` on stderr so the operator can grep the audit log.
+    """
+    # Lazy imports — keep the dispatcher's import cost paid only when
+    # `nora prompt sync` is invoked.
+    from nora import __version__ as nora_version
+    from nora.config import Settings
+    from nora.prompts.registry import PromptRegistry
+    from nora.prompts.sync import (
+        OpenWebUIAuthError,
+        OpenWebUIConfig,
+        OpenWebUISyncError,
+        sync_prompts,
+    )
+
+    # Resolve admin API key: CLI flag > env var. Fail-closed.
+    admin_api_key = args.admin_api_key or os.environ.get("OPENWEBUI_ADMIN_API_KEY")
+    if not admin_api_key:
+        sys.stderr.write(
+            "nora: missing OPENWEBUI_ADMIN_API_KEY env var or --admin-api-key flag; "
+            "refusing to sync against an unauthenticated Open WebUI surface.\n"
+        )
+        return 2
+
+    # CLI flag > env var on base_url too (parenthesise the precedence clearly).
+    base_url = args.base_url or os.environ.get("OPENWEBUI_BASE_URL", "http://localhost:8080")
+
+    # `nora_version`: explicit `--nora-version` flag wins; fall back
+    # to the package metadata otherwise. Operators running from a
+    # tarball install see `nora.__version__` automatically.
+    resolved_nora_version = args.nora_version or nora_version
+
+    config = OpenWebUIConfig(
+        base_url=base_url,
+        admin_api_key=admin_api_key,
+        model_base=args.model_base,
+    )
+
+    # Real registry from default Settings — same surface as `nora mcp`
+    # boot, so operators see consistent prompt discovery.
+    registry = PromptRegistry.from_settings(Settings())
+
+    try:
+        results = sync_prompts(
+            registry,
+            config,
+            nora_version=resolved_nora_version,
+            git_sha=args.git_sha,
+            release_tag=args.release_tag,
+        )
+    except OpenWebUIAuthError as exc:
+        sys.stderr.write(f"nora: Open WebUI auth failure: {exc}\n")
+        return 1
+    except OpenWebUISyncError as exc:
+        sys.stderr.write(f"nora: Open WebUI sync failure: {exc}\n")
+        return 1
+
+    sys.stdout.write(json.dumps(results) + "\n")
     sys.stdout.flush()
     return 0
 
@@ -178,6 +315,14 @@ def main(argv: list[str] | None = None) -> int:
             sys.stderr.write("nora hitl: missing sub-command (expected `mint`)\n")
             sys.exit(2)
         return _dispatch_hitl_mint(args)
+
+    # `nora prompt [sync]` → issue #45 WU-3 Open WebUI sync.
+    if args.subcommand == "prompt":
+        if args.prompt_command != "sync":
+            # `nora prompt` with no sub-command — print prompt help.
+            sys.stderr.write("nora prompt: missing sub-command (expected `sync`)\n")
+            sys.exit(2)
+        return _dispatch_prompt_sync(args)
 
     # argparse should have rejected unknown sub-commands, but if we
     # get here defensively exit non-zero.
