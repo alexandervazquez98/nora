@@ -285,6 +285,12 @@ phase_dirs() {
         "install -d -m 0750 -o '${USER_NAME}' -g '${USER_NAME}' '${STATE_DIR}'"
     run "mkdir ${STATE_DIR}/interventions (1777)" \
         "install -d -m 1777 -o '${USER_NAME}' -g '${USER_NAME}' '${STATE_DIR}/interventions'"
+    # PR3 / issue #61 / WU-3.12: probe results dir (parallel to
+    # interventions). Same nora:nora ownership model; not world-writable
+    # because OpenChat does not write probe results — NORA owns this
+    # directory end-to-end.
+    run "mkdir ${STATE_DIR}/probes" \
+        "install -d -m 0750 -o '${USER_NAME}' -g '${USER_NAME}' '${STATE_DIR}/probes'"
 }
 
 phase_install() {
@@ -453,6 +459,30 @@ phase_systemd() {
     run "systemctl enable --now nora-mcp" "systemctl enable --now nora-mcp"
 }
 
+phase_unprivileged_icmp() {
+    # PR3 / issue #61 / WU-3.12: unprivileged ICMP sysctl.
+    # The Cambium PMP 450i sector stability probe uses IPPROTO_ICMP via
+    # socket.SOCK_DGRAM, which only requires the sender's gid to be in
+    # `net.ipv4.ping_group_range`. Mirror the existing "skip when already
+    # configured" pattern of phase_signing_key above so a re-run is a
+    # no-op on already-configured hosts.
+    if ! command -v sysctl >/dev/null 2>&1; then
+        warn "sysctl not on PATH; skipping net.ipv4.ping_group_range wire-up"
+        return 0
+    fi
+    local current_range
+    current_range="$(sysctl -n net.ipv4.ping_group_range 2>/dev/null || echo '0 0')"
+    case "${current_range}" in
+        0\ 0|"")
+            run "widen net.ipv4.ping_group_range" \
+                "sysctl -w net.ipv4.ping_group_range='0 2147483647'"
+            ;;
+        *)
+            log "ping_group_range already set to '${current_range}'; leaving unchanged"
+            ;;
+    esac
+}
+
 phase_summary() {
     # Emit a human-readable summary of the install shape. The signing key
     # appears ONLY in the ab...yz truncated form — never the raw value.
@@ -509,6 +539,8 @@ main() {
     else
         phase_systemd   || { fail "phase_systemd failed"; exit 1; }
     fi
+
+    phase_unprivileged_icmp || { fail "phase_unprivileged_icmp failed"; exit 1; }
 
     phase_summary
     return 0

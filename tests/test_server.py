@@ -71,6 +71,12 @@ def test_server_exposes_exactly_fifteen_tools() -> None:
         "register_device",
         "hitl_mint_token",
         "nora_get_tool_spec",
+        # Issue #61 / PR1 WU-1.5 — ICMP stability probe (Tier 0).
+        "icmp_run_sector_stability_probe",
+        "icmp_get_sector_stability_progress",
+        "icmp_cancel_sector_stability_probe",
+        # Issue #61 / PR3 WU-3.7 — list probe runs.
+        "icmp_list_probe_runs",
     }
     assert names == expected, (
         f"Expected exactly 15 tools; got {sorted(names)} "
@@ -477,6 +483,12 @@ def test_mcp_instance_exposes_all_thirteen_tools() -> None:  # noqa: F811 — al
         "register_device",
         "hitl_mint_token",
         "nora_get_tool_spec",
+        # Issue #61 / PR1 WU-1.5 — ICMP stability probe (Tier 0).
+        "icmp_run_sector_stability_probe",
+        "icmp_get_sector_stability_progress",
+        "icmp_cancel_sector_stability_probe",
+        # Issue #61 / PR3 WU-3.7 — list probe runs.
+        "icmp_list_probe_runs",
     }
     assert names == expected, (
         f"Expected exactly 15 tools after WU-4 + WU-C + meta-tool bridge; got: {sorted(names)}"

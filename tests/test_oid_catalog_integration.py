@@ -598,6 +598,9 @@ def test_unified_tool_catalog_references_required_oids_per_tool(tmp_path: Path) 
             # Issue #43 / `2026-09-15-3tier-tool-governance`:
             # boot-time tier-classification helper.
             "verify_tools_have_tier_classification",
+            # Issue #61 / PR1 WU-1.5 — probe registry injection helpers.
+            "set_probe_registry",
+            "get_probe_registry",
         }
     }
     # All thirteen tool functions are present.
@@ -615,6 +618,12 @@ def test_unified_tool_catalog_references_required_oids_per_tool(tmp_path: Path) 
         "save_intervention_record",
         "register_device",
         "hitl_mint_token",
+        # Issue #61 / PR1 WU-1.5 — ICMP stability probe (Tier 0).
+        "icmp_run_sector_stability_probe",
+        "icmp_get_sector_stability_progress",
+        "icmp_cancel_sector_stability_probe",
+        # Issue #61 / PR3 WU-3.7 — list probe runs.
+        "icmp_list_probe_runs",
     }, f"server.__all__ tool surface drifted; got {sorted(server_tool_names)!r}"
 
 

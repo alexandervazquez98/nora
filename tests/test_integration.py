@@ -227,9 +227,10 @@ def test_subprocess_responds_to_tools_list_with_fifteen_tools(
     mcp_http_client.initialized()
     parsed_reply = mcp_http_client.tools_list()
 
-    # The reply's `result.tools` array MUST list exactly the 15 thin tools
+    # The reply's `result.tools` array MUST list exactly the 18 thin tools
     # (13 pre-PR-#73 + ``hitl_mint_token`` from WU-4 / PR #44 +
-    # ``nora_get_tool_spec`` from PR #73 follow-up).
+    # ``nora_get_tool_spec`` from PR #73 follow-up +
+    # 3 ICMP stability probe tools from issue #61 / PR1).
     tools = parsed_reply["result"].get("tools", [])
     names = {t.get("name") for t in tools}
     expected = {
@@ -248,8 +249,14 @@ def test_subprocess_responds_to_tools_list_with_fifteen_tools(
         "register_device",
         "hitl_mint_token",
         "nora_get_tool_spec",
+        # Issue #61 / PR1 WU-1.5 — ICMP stability probe (Tier 0).
+        "icmp_run_sector_stability_probe",
+        "icmp_get_sector_stability_progress",
+        "icmp_cancel_sector_stability_probe",
+        # Issue #61 / PR3 WU-3.7 — list probe runs.
+        "icmp_list_probe_runs",
     }
-    assert names == expected, f"Expected exactly the 15 thin tools; got {names}"
+    assert names == expected, f"Expected exactly the 18 thin tools; got {names}"
 
 
 def test_subprocess_emits_structured_startup_log_on_stderr(tmp_path: Path) -> None:

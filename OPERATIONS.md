@@ -285,6 +285,30 @@ Latency matters less than durability: a write that survives a host
 crash is more important than one that propagates in <1 second. NFS and
 FUSE both give POSIX consistency; rsync gives eventual consistency.
 
+## NORA ↔ OpenChat probe-results contract (issue #61 / PR3)
+
+The probe-results flow mirrors the intervention-memory flow:
+
+```
+OpenChat reader          ←       shared directory         ←       NORA writer
+(display results / read                  NORA_PROBE_RESULTS_DIR              (PR2 WU-2.4 hook +
+ pdf attachments)                          (PRB-*.json + *.pdf)                PR3 WU-3.2 render)
+```
+
+When a probe completes (PR2's `_attach_post_completion_result` hook),
+NORA atomically writes `<nora_probe_results_dir>/PRB-<sector>-<ap_ip>-<unix>-<6hex>.json`
+and a corresponding `.pdf`. OpenChat polls / syncs the directory on
+its own schedule. Latency < durability: a write that survives a host
+crash is more important than one that propagates in <1 second.
+
+Retention: the PR2 writer does NOT auto-delete old `PRB-*.json`
+files. Operators run a `find $NORA_PROBE_RESULTS_DIR -name 'PRB-*.json' -mtime +30 -delete`
+cron job (or equivalent) for retention.
+
+Three sharing options: NFS, S3-fuse, periodic rsync — same as
+interventions. See "Integration contract: NORA ↔ OpenChat" above
+for the deployment guide.
+
 ## Troubleshooting
 
 | Symptom (stderr)                                                                    | Likely cause                                                                | Fix                                                                                                  |
@@ -298,6 +322,8 @@ FUSE both give POSIX consistency; rsync gives eventual consistency.
 | `correlate_sector_interference` returns zero conflicts for a tower you know has carriers | OpenChat POST_MIGRATION records are missing `carrier_frequency_mhz`     | Re-run OpenChat's `deploy_v7_intervention_memory.py` against the production `webui.db` so the new shape overwrites old records. |
 | systemd unit fails with `status=203/EXEC`                                             | The venv path in `ExecStart=` is wrong                                     | `ls -l /opt/nora/.venv/bin/nora-mcp`; if missing, re-run `uv sync`.                                 |
 | `DeprecationWarning: python -m nora is deprecated`                                    | Something invoked the legacy alias                                         | Use `nora-mcp` instead. The alias is kept only for backward compatibility.                            |
+| `probes.persist.ok: zero samples after 60s` | `net.ipv4.ping_group_range` does not cover the `nora` gid. Verify with `sysctl net.ipv4.ping_group_range`. See INSTALL.md "Unprivileged ICMP". |
+| `icmp_run_sector_stability_probe → samples_count: 0` | Same root cause as above. The daemon loop exits with all samples received=False because the kernel rejected every sendto on the unprivileged ICMP datagram socket. |
 
 ## Tier-1 operator-clearance gate (issue #43)
 
@@ -438,7 +464,7 @@ tier and the clearance / HITL protocol for each.
 
 | Tier | Category | Policy | Tools |
 |------|----------|--------|-------|
-| 0 | Passive Telemetry (Read-Only) | Direct execution | 8 tools (AP summary, SM table, radio metrics, frame util, SM diagnostics, intervention history search, device lifecycle, sector correlation) |
+| 0 | Passive Telemetry (Read-Only) | Direct execution | 8 tools (AP summary, SM table, radio metrics, frame util, SM diagnostics, intervention history search, device lifecycle, sector correlation) + 4 ICMP stability probe tools (`icmp_run_sector_stability_probe`, `icmp_get_sector_stability_progress`, `icmp_cancel_sector_stability_probe`, `icmp_list_probe_runs`) |
 | 1 | Potentially Disruptive / Active Telemetry | Pause & Clearance Gate (`operator_confirmed=True`) | 1 tool (`snmp_run_spectrum_analysis`) |
 | 2 | Service-Affecting Mutations (Write / Config) | Strict HITL Gate (`approval_token` + HMAC verification + make-before-break) | 2 tools (`snmp_migrate_radio_frequency`, `save_intervention_record`) |
 

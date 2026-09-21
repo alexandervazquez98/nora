@@ -1,7 +1,7 @@
 """NORA FastMCP server — thin split.
 
 Boots a FastMCP instance named "nora" over stdio and exposes exactly
-thirteen `@mcp.tool` registrations and two `@mcp.prompt` registrations:
+eighteen `@mcp.tool` registrations and two `@mcp.prompt` registrations:
 
 * `snmp_get_pmp450i_radio_metrics`         — PMP 450i SNMP driver.
 * `snmp_get_ap_summary`                    — PMP 450i AP summary.
@@ -10,12 +10,17 @@ thirteen `@mcp.tool` registrations and two `@mcp.prompt` registrations:
 * `snmp_get_sm_detailed_diagnostics`       — PMP 450i SM diagnostics.
 * `snmp_run_spectrum_analysis`             — PMP 450i spectrum sweep.
 * `snmp_migrate_radio_frequency`           — PMP 450i HITL-gated migration.
+* `snmp_reboot_radio`                      — PMP 450i HITL-gated reboot (WU-C).
 * `register_device`                        — ad-hoc IP registration (issue #42).
 * `search_intervention_history`           — read-only intervention memory.
 * `get_device_lifecycle_summary`          — read-only intervention memory.
 * `correlate_sector_interference`         — read-only intervention memory.
 * `save_intervention_record`              — writer (issue #12 / new sibling package).
 * `hitl_mint_token`                       — admin HITL token issuance (WU-4).
+* `icmp_run_sector_stability_probe`        — ICMP sector stability (issue #61, PR1 WU-1.5).
+* `icmp_get_sector_stability_progress`     — ICMP progress poll (issue #61, PR1 WU-1.5).
+* `icmp_cancel_sector_stability_probe`     — ICMP cancel (issue #61, PR1 WU-1.5).
+* `icmp_list_probe_runs`                   — ICMP on-disk listing (issue #61, PR3 WU-3.7).
 * `netops_orchestrator` (prompt)          — Lead NOC orchestrator system prompt.
 * `snmp_pmp450i` (prompt)                  — PMP 450i driver system prompt.
 
@@ -42,16 +47,22 @@ call.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import sys
 import time
-from typing import Any
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 
 from nora.config import Settings
 from nora.drivers import get_driver
+from nora.probes.state import RunStatus
+
+if TYPE_CHECKING:
+    from nora.probes.state import ProbeRunRegistry, RunState
 from nora.intervention_memory import tools as intervention_tools
 from nora.intervention_writer.writer import (
     save_intervention_record as _writer_save_intervention_record,
@@ -790,6 +801,268 @@ def snmp_reboot_radio(
 
 
 # ---------------------------------------------------------------------------
+# ICMP sector stability probe — issue #61 / PR1 WU-1.5.
+#
+# Tier 0; no operator clearance, no HITL token. The probe runs in the
+# background (daemon thread owns its own asyncio event loop) so the
+# MCP tool body does NOT block the FastMCP HTTP transport. The
+# LLM orchestrator polls `icmp_get_sector_stability_progress(run_id)`
+# to collect more samples and to know when the run completes.
+#
+# `_ALLOWED_UNCATALOGUED_TOOLS` already exempts these three tools
+# from the OID-catalog registration guard (they do not consume SNMP
+# OIDs). `_EXPECTED_TOOL_TIERS` declares their Tier-0 classification
+# at the bottom of this file.
+# ---------------------------------------------------------------------------
+
+
+# Module-level registry slot (mirrors `set_runtime_state` /
+# `set_driver` pattern).
+_current_probe_registry: "ProbeRunRegistry | None" = None
+
+
+def set_probe_registry(registry: "ProbeRunRegistry") -> None:
+    """Inject the boot-time :class:`ProbeRunRegistry`."""
+    global _current_probe_registry
+    _current_probe_registry = registry
+
+
+def get_probe_registry() -> "ProbeRunRegistry":
+    """Return the boot-time :class:`ProbeRunRegistry`; raise if not injected."""
+    if _current_probe_registry is None:
+        raise RuntimeError(
+            "NORA probe registry is not initialised; "
+            "call nora.server.set_probe_registry() in main()"
+        )
+    return _current_probe_registry
+
+
+def _collect_initial_samples(state: "RunState", *, collect_window_seconds: float) -> None:
+    """Block up to ``collect_window_seconds`` collecting the first samples.
+
+    The SYNC wrapper calls this right after spawning the daemon so the
+    FastMCP HTTP response carries at least one batch of samples (the
+    LLM orchestrator typically wants SOMETHING back even on a 1-s
+    call). Polls ``state`` under ``state.lock`` every 50 ms and
+    returns early when the run reaches a terminal status. The window
+    is a UPPER bound — the loop exits as soon as the status flips OR
+    the window elapses, whichever comes first.
+    """
+    deadline = time.monotonic() + collect_window_seconds
+    while time.monotonic() < deadline:
+        with state.lock:
+            status = state.status
+        if status in (
+            RunStatus.COMPLETED,
+            RunStatus.FAILED,
+            RunStatus.CANCELLED,
+            RunStatus.EXPIRED,
+        ):
+            return
+        time.sleep(0.05)
+
+
+@mcp.tool
+def icmp_run_sector_stability_probe(
+    device_id: str,
+    duration_seconds: int = 600,
+    interval_seconds: float = 1.0,
+    packet_size_bytes: int = 64,
+    target_luids: list[str] | None = None,
+    collect_window_seconds: float = 5.0,
+) -> dict[str, Any]:
+    """Start a background ICMP stability probe against a PMP 450i AP and all eligible SMs.
+
+    Returns immediately with ``{run_id, status: "running", samples: [first batch...], ...}``.
+    The MCP tool body blocks for up to ``collect_window_seconds``
+    (default 5 s) so the first batch of samples lands in the response;
+    the daemon continues collecting in the background. The LLM
+    orchestrator polls
+    :func:`icmp_get_sector_stability_progress` to learn when the run
+    reaches a terminal state.
+
+    Tier 0 — no operator clearance required (issue #61 design choice).
+
+    Raises:
+        ValueError: ``duration_seconds`` out of
+            ``[settings.min, settings.max]``, ``interval <= 0``,
+            ``payload <= 0``, or ``collect_window_seconds < 0``.
+            Raised BEFORE the daemon spawn so a misconfigured call
+            never burns bandwidth.
+    """
+    from nora.probes.probe import generate_run_id
+    from nora.probes.state import start_probe_run
+
+    settings = get_runtime_state()
+    driver = get_driver()
+    registry = get_probe_registry()
+
+    # Bounds validation mirrors `run_probe()` so we fail fast in SYNC
+    # code (before the daemon thread consumes any wire frames).
+    if (
+        duration_seconds < settings.nora_icmp_min_duration_seconds
+        or duration_seconds > settings.nora_icmp_max_duration_seconds
+    ):
+        raise ValueError(
+            f"duration_seconds={duration_seconds} outside "
+            f"[{settings.nora_icmp_min_duration_seconds}, "
+            f"{settings.nora_icmp_max_duration_seconds}]"
+        )
+    if interval_seconds <= 0:
+        raise ValueError(f"interval_seconds={interval_seconds} must be > 0")
+    if packet_size_bytes <= 0:
+        raise ValueError(f"packet_size_bytes={packet_size_bytes} must be > 0")
+    if collect_window_seconds < 0:
+        raise ValueError(f"collect_window_seconds={collect_window_seconds} must be >= 0")
+
+    run_id = generate_run_id()
+    state = start_probe_run(
+        registry=registry,
+        driver=driver,
+        device_id=device_id,
+        settings=settings,
+        run_id=run_id,
+        duration_seconds=duration_seconds,
+        interval_seconds=interval_seconds,
+        packet_size_bytes=packet_size_bytes,
+        per_packet_timeout_seconds=settings.nora_icmp_per_packet_timeout_seconds,
+        ap_host=device_id,  # best-effort; the coordinator overwrites this on probe entry
+        target_luids=target_luids,
+    )
+
+    # Block for `collect_window_seconds` to collect first batch. If the
+    # daemon finishes within the window, the helper returns early.
+    if collect_window_seconds > 0:
+        _collect_initial_samples(state, collect_window_seconds=collect_window_seconds)
+
+    return state.snapshot()
+
+
+@mcp.tool
+def icmp_get_sector_stability_progress(run_id: str) -> dict[str, Any]:
+    """Return the current snapshot for ``run_id``. Tier 0.
+
+    Polled by the LLM orchestrator after
+    :func:`icmp_run_sector_stability_probe`. The snapshot carries the
+    live sample count, a capped tail of the buffer (default 100
+    samples), the current status, and any error message captured by
+    the daemon.
+    """
+    registry = get_probe_registry()
+    state = registry.get(run_id)
+    if state is None:
+        raise LookupError(f"unknown run_id={run_id!r} (expired or never existed)")
+    return state.snapshot()
+
+
+@mcp.tool
+def icmp_cancel_sector_stability_probe(run_id: str) -> dict[str, Any]:
+    """Request cancellation of an in-flight probe run. Tier 0.
+
+    Sets the run status to ``CANCELLED``; the daemon's drain loop
+    notices the status flip on its next sample flush and exits
+    cleanly (the per-target pingers close in the ``finally:`` clause
+    of :func:`run_probe`).
+    """
+    registry = get_probe_registry()
+    if not registry.cancel(run_id):
+        raise LookupError(f"unknown run_id={run_id!r} (expired or never existed)")
+    return {"run_id": run_id, "status": "cancelled"}
+
+
+# ---------------------------------------------------------------------------
+# ICMP sector stability probe — issue #61 / PR3 WU-3.7 listing tool.
+#
+# Reads ``<settings.nora_probe_results_dir>/PRB-*.json`` and returns the
+# most recent ``limit`` records sorted by ``started_at_unix`` descending.
+# Tier 0 — same governance as the run / progress / cancel triplet.
+#
+# Each record is validated against ``ProbeRunRecord`` (defined in PR2)
+# so a corrupt / truncated JSON file is silently skipped and counted in
+# ``errors_skipped`` (never raised to MCP — the listing tool is a
+# read-only convenience for operators browsing past runs).
+#
+# The Sanitizer (module-level ``_sanitizer``) is applied to every
+# returned record so a private IPv4 literal in the device_id / ap_ip
+# fields is masked before the wire. The bypass list inside
+# ``sanitize_run_metadata`` keeps ``run_id`` / ``sector`` / ``pdf_path``
+# verbatim.
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool
+def icmp_list_probe_runs(limit: int = 20) -> dict[str, Any]:
+    """List recent probe-run records from the on-disk registry (issue #61 / PR3).
+
+    Reads ``<settings.nora_probe_results_dir>/PRB-*.json``, validates
+    each against the :class:`ProbeRunRecord` model, applies the
+    Sanitizer to the metadata, and returns the most recent ``limit``
+    records sorted by ``started_at_unix`` descending.
+
+    Returns a JSON object:
+        ``{"runs": [list of dicts], "total_files_scanned": int,
+        "errors_skipped": int}``
+
+    Each run dict has: ``run_id``, ``sector``, ``device_id``
+    (sanitized), ``started_at_unix``, ``finished_at_unix``,
+    ``verdict.sector_verdict``, ``verdict.rationale``,
+    ``samples_count``, ``pdf_path``.
+
+    Files that fail validation (corrupt JSON, missing fields) are
+    skipped and counted in ``errors_skipped`` — never raises to MCP.
+
+    Bounds:
+        ``limit`` is clamped to ``[1, 200]`` to keep the response
+        payload bounded. ``limit=0`` returns an empty list (the
+        call still succeeds so the orchestrator can probe before
+        committing to a real fetch).
+
+    Tier 0 — no operator clearance required.
+    """
+    from pydantic import ValidationError
+
+    from nora.probes.models import ProbeRunRecord
+    from nora.probes.sanitize import sanitize_run_metadata
+
+    settings = get_runtime_state()
+
+    # Clamp `limit` to [1, 200] (defensive — the orchestrator may
+    # pass any int; we do NOT raise so the listing tool stays a
+    # graceful read-only surface).
+    effective_limit = max(0, min(int(limit), 200))
+
+    try:
+        base = Path(settings.nora_probe_results_dir)
+    except AttributeError:
+        # Missing setting — return empty listing rather than raising.
+        return {"runs": [], "total_files_scanned": 0, "errors_skipped": 0}
+    if not base.is_dir():
+        return {"runs": [], "total_files_scanned": 0, "errors_skipped": 0}
+
+    records: list[dict[str, Any]] = []
+    errors = 0
+    for json_file in sorted(base.glob("PRB-*.json")):
+        try:
+            raw = json.loads(json_file.read_text(encoding="utf-8"))
+            rec = ProbeRunRecord.model_validate(raw)
+            payload = rec.model_dump(mode="json")
+            sanitized = sanitize_run_metadata(payload, sanitizer=_sanitizer)
+            records.append(sanitized)
+        except (json.JSONDecodeError, ValidationError, OSError):
+            errors += 1
+            continue
+
+    # Sort newest first (stable sort — preserves on-disk order on tie).
+    records.sort(key=lambda r: r.get("started_at_unix", 0.0), reverse=True)
+    truncated = records[:effective_limit]
+    return {
+        "runs": truncated,
+        "total_files_scanned": len(records) + errors,
+        "errors_skipped": errors,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Prompt registrations — `@mcp.prompt` thin wrappers over `PromptRegistry`.
 # ---------------------------------------------------------------------------
 
@@ -815,6 +1088,9 @@ _EXPOSED_PROMPTS: tuple[str, ...] = (
     "snmp_reboot_radio",
     "snmp_run_spectrum_analysis",
     "nora_get_tool_spec",  # NEW: meta-tool bridge
+    "icmp_run_sector_stability_probe",  # Issue #61 / PR1 — ICMP stability probe.
+    "icmp_get_sector_stability_progress",  # Issue #61 / PR1 — ICMP progress poll.
+    "icmp_cancel_sector_stability_probe",  # Issue #61 / PR1 — ICMP cancel.
 )
 
 
@@ -873,8 +1149,26 @@ def _get_device_lifecycle_summary_spec() -> str:
 
 @mcp.prompt(name="icmp_list_probe_runs")
 def _icmp_list_probe_runs_spec() -> str:
-    """Tool spec for icmp_list_probe_runs (Tier 1)."""
+    """Tool spec for icmp_list_probe_runs (Tier 0)."""
     return get_prompt_registry().get("icmp_list_probe_runs").body
+
+
+@mcp.prompt(name="icmp_run_sector_stability_probe")
+def _icmp_run_sector_stability_probe_spec() -> str:
+    """Tool spec for icmp_run_sector_stability_probe (Tier 0)."""
+    return get_prompt_registry().get("icmp_run_sector_stability_probe").body
+
+
+@mcp.prompt(name="icmp_get_sector_stability_progress")
+def _icmp_get_sector_stability_progress_spec() -> str:
+    """Tool spec for icmp_get_sector_stability_progress (Tier 0)."""
+    return get_prompt_registry().get("icmp_get_sector_stability_progress").body
+
+
+@mcp.prompt(name="icmp_cancel_sector_stability_probe")
+def _icmp_cancel_sector_stability_probe_spec() -> str:
+    """Tool spec for icmp_cancel_sector_stability_probe (Tier 0)."""
+    return get_prompt_registry().get("icmp_cancel_sector_stability_probe").body
 
 
 @mcp.prompt(name="save_intervention_record")
@@ -1085,6 +1379,19 @@ _ALLOWED_UNCATALOGUED_TOOLS: frozenset[str] = frozenset(
         # The four remaining entries are intervention-memory operators
         # that consume the on-disk filesystem, not SNMP — they will
         # never carry an OID catalog entry.
+        # Issue #61 / PR1 WU-1.5: the three ICMP sector stability
+        # tools do NOT consume SNMP OIDs (they emit ICMP echo
+        # requests via the unprivileged datagram socket). Adding them
+        # to the PMP 450i OID catalog would be a category error, so
+        # the allow-list exempts them. The same triplet lands in
+        # `_EXPECTED_TOOL_TIERS` with tier 0.
+        "icmp_run_sector_stability_probe",
+        "icmp_get_sector_stability_progress",
+        "icmp_cancel_sector_stability_probe",
+        # Issue #61 / PR3 WU-3.7: the listing tool reads the on-disk
+        # PRB-*.json files (no OID catalog coverage). Same
+        # uncatalogued exemption as the run/progress/cancel triplet.
+        "icmp_list_probe_runs",
     }
 )
 
@@ -1204,6 +1511,20 @@ _EXPECTED_TOOL_TIERS: dict[str, int] = {
     # in a follow-up change. The guard's "expected_tier is None" branch
     # below skips unknown tools so a future tool expansion does not
     # fail boot.
+    # Issue #61 / PR1 WU-1.5: ICMP sector stability probe tools.
+    # Tier 0 — the operator chooses the duration (1–30 min) but no
+    # write frames are emitted and no radio configuration is touched.
+    # The bandwidth footprint (~5.6 kbps per sector at 11 destinations
+    # × 1 pkt/s × 64 B) is comparable to a long-running reachability
+    # check, well within Tier 0 "passive telemetry" framing.
+    "icmp_run_sector_stability_probe": 0,
+    "icmp_get_sector_stability_progress": 0,
+    "icmp_cancel_sector_stability_probe": 0,
+    # Issue #61 / PR3 WU-3.7: the listing tool is Tier 0 (read-only;
+    # walks the on-disk registry; no wire activity; no OIDs). Same
+    # tier as the run/progress/cancel triplet so the boot-time guard
+    # stays green.
+    "icmp_list_probe_runs": 0,
 }
 
 
@@ -1256,6 +1577,8 @@ __all__ = [
     "get_runtime_state",
     "set_prompt_registry",
     "get_prompt_registry",
+    "set_probe_registry",
+    "get_probe_registry",
     "snmp_get_pmp450i_radio_metrics",
     "snmp_get_ap_summary",
     "snmp_get_frame_utilization",
@@ -1272,6 +1595,13 @@ __all__ = [
     # Tier classification deferred — see the NOTE above
     # `_EXPECTED_TOOL_TIERS` for the follow-up contract.
     "hitl_mint_token",
+    # Issue #61 / PR1 WU-1.5: ICMP sector stability probe tools.
+    # Tier 0 — see `_EXPECTED_TOOL_TIERS` and `_ALLOWED_UNCATALOGUED_TOOLS`.
+    "icmp_run_sector_stability_probe",
+    "icmp_get_sector_stability_progress",
+    "icmp_cancel_sector_stability_probe",
+    # Issue #61 / PR3 WU-3.7: the on-disk listing tool.
+    "icmp_list_probe_runs",
     "netops_orchestrator",
     "snmp_pmp450i",
     "register_tool_log_middleware",

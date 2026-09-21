@@ -33,6 +33,8 @@ dependencies = [
     # retry / timeout. `httpx` is also used by tests via
     # `httpx.MockTransport` so production installs need the runtime dep.
     "httpx>=0.27",
+    # Issue #61 / PR3 — PDF stability probe report generation.
+    "reportlab>=4.0",
 ]
 
 [project.scripts]

@@ -77,7 +77,7 @@ Every NORA MCP tool is classified into one of three Service-Impact Tiers per iss
 ### Tier 0 — Passive Telemetry (Read-Only)
 **Governance policy:** **Direct Execution** — the orchestrator may invoke these tools immediately without operator interaction.
 
-Tools: `correlate_sector_interference`, `get_device_lifecycle_summary`, `icmp_list_probe_runs`, `nora_get_tool_spec`, `search_intervention_history`, `snmp_get_ap_summary`, `snmp_get_frame_utilization`, `snmp_get_pmp450i_radio_metrics`, `snmp_get_sm_detailed_diagnostics`, `snmp_get_sm_table`.
+Tools: `correlate_sector_interference`, `get_device_lifecycle_summary`, `icmp_cancel_sector_stability_probe`, `icmp_get_sector_stability_progress`, `icmp_list_probe_runs`, `icmp_run_sector_stability_probe`, `nora_get_tool_spec`, `search_intervention_history`, `snmp_get_ap_summary`, `snmp_get_frame_utilization`, `snmp_get_pmp450i_radio_metrics`, `snmp_get_sm_detailed_diagnostics`, `snmp_get_sm_table`.
 
 These tools are non-disruptive; they never emit SNMP SET frames. The existing catalog-sanitizer-error surface is the only gate.
 
