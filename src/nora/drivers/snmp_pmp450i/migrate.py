@@ -164,6 +164,11 @@ class MigrationResult(BaseModel):
     # reboot is required (per ``radioFreqCarrier``: "As of release
     # 16.1, this OID no longer requires reboot to take affect").
     band_crossing: bool = False
+    # Flag indicating whether the AP requires a reboot for the new
+    # carrier to become active. Evaluated from the firmware's
+    # authoritative rebootIfRequired OID (1.3.6.1.4.1.161.19.3.3.3.4.0)
+    # and/or the band_crossing detector.
+    reboot_required: bool = False
     # WU-4 (issue #62) — count of SMs whose community came from the
     # operator-supplied ``sm_communities`` map instead of the
     # inventory. Aggregated from
@@ -970,7 +975,29 @@ def fetch_migrate(
             reason = None
             dry_run = True
 
-        # 13. Emit exactly one ``save_intervention_record`` per completion.
+        # 13. Evaluate whether a reboot is required to activate the new carrier.
+        # Consults the AP firmware's authoritative vote via `rebootIfRequired`
+        # (1 = rebootRequired per Cambium MIB). When the OID read is unavailable
+        # or in dry-run mode, falls back to the table-driven band_crossing flag.
+        band_crossing = _band_crossing_from_prior(
+            prior_carrier,
+            float(target_frequency_mhz),
+        )
+        reboot_required = False
+        if not dry_run and not rolled_back:
+            reboot_if_req_oid = catalog.oids.get("rebootIfRequired")
+            if reboot_if_req_oid:
+                try:
+                    raw_vote = client.get_oid(reboot_if_req_oid)
+                    try:
+                        reboot_required = int(raw_vote) == 1
+                    except (TypeError, ValueError):
+                        reboot_required = False
+                except Exception:
+                    reboot_required = False
+        reboot_required = reboot_required or band_crossing
+
+        # 14. Emit exactly one ``save_intervention_record`` per completion.
         # On the dry-run path the status is ``"DRY_RUN"`` and the
         # ``record_name`` carries a ``[DRY-RUN]`` prefix so the audit
         # trail is unambiguous.
@@ -979,7 +1006,10 @@ def fetch_migrate(
         findings_and_dictamen = (
             f"dry_run={dry_run}; would_set={would_set!r}; no SET frames emitted"
             if dry_run
-            else f"rolled_back={rolled_back}; reason={reason or 'n/a'}"
+            else (
+                f"rolled_back={rolled_back}; reason={reason or 'n/a'}; "
+                f"reboot_required={reboot_required}"
+            )
         )
         try:
             if settings is None:
@@ -1009,6 +1039,8 @@ def fetch_migrate(
                     "reason": reason,
                     "dry_run": dry_run,
                     "would_set": [list(item) for item in would_set],
+                    "band_crossing": band_crossing,
+                    "reboot_required": reboot_required,
                     # WU-4 (issue #62) — count of SMs whose
                     # community came from the operator-supplied
                     # ``sm_communities`` map instead of the
@@ -1030,17 +1062,8 @@ def fetch_migrate(
             device_id=str(getattr(device, "host", device_id)),
             dry_run=dry_run,
             would_set=would_set,
-            # WU-C band-crossing flag — fires on a confirmed cross-band
-            # move (5.x ↔ 4.9). The prior_carrier read returns kHz;
-            # convert to MHz for the table-driven detector. On a
-            # non-numeric read (e.g. legacy firmware / fake client)
-            # we conservatively return False — the runtime layer
-            # would consult ``radioFrequencyBand`` OID for the
-            # authoritative vote in production.
-            band_crossing=_band_crossing_from_prior(
-                prior_carrier,
-                float(target_frequency_mhz),
-            ),
+            band_crossing=band_crossing,
+            reboot_required=reboot_required,
             # WU-4 (issue #62) — aggregated count of SMs whose
             # community came from the operator-supplied
             # ``sm_communities`` map instead of the inventory. ``0``
