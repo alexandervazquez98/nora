@@ -109,6 +109,7 @@ def _build_catalog(firmware: str = "15.2.1") -> OidCatalogRegistry:
         "smLuid": "1.3.6.1.4.1.161.19.3.1.4.1.1.0",
         "migrateCarrierFrequency": "1.3.6.1.4.1.161.19.3.1.10.1.1.1.1",
         "migratePriorCarrierFrequency": "1.3.6.1.4.1.161.19.3.1.10.1.1.1.1",
+        "rebootIfRequired": "1.3.6.1.4.1.161.19.3.3.3.4.0",
     }
     catalog = OidCatalog(
         vendor="cambium",
@@ -146,22 +147,15 @@ class _RecordingFactory:
         *,
         sysdescr_per_host: dict[str, str] | None = None,
         prior_carrier_khz: int | None = None,
+        reboot_if_required_vote: int | None = None,
     ) -> None:
         self._sysdescr_per_host = sysdescr_per_host or {}
         self.calls: list[Device] = []
         self.hosts_probed: list[str] = []
         self.clients: list[_WritableSnmpClientForHost] = []
         self.prior_carrier_get_calls: list[str] = []
-        # Issue #80 (2026-09-22): when set, every
-        # ``_WritableSnmpClientForHost`` minted by ``__call__``
-        # inherits this kHz value for the prior-carrier GET response,
-        # so wire-path regression tests can drive the rollback
-        # watchdog through the ``5785000`` (or any) carrier value
-        # without resorting to post-hoc mutation of existing
-        # instances. Default ``None`` preserves the legacy behaviour
-        # (the underlying client uses its own ``5800000`` default)
-        # so all 15 pre-existing tests stay byte-identical.
         self._prior_carrier_khz_override = prior_carrier_khz
+        self._reboot_if_required_vote_override = reboot_if_required_vote
 
     def __call__(self, device: Any) -> Any:
         """Behaves like ``Pmp450iSnmpDriver._client_factory(device)``.
@@ -178,13 +172,6 @@ class _RecordingFactory:
         self.calls.append(d)
         host = str(getattr(d, "host", "?"))
         self.hosts_probed.append(host)
-        # Issue #80: propagate the optional ``prior_carrier_khz``
-        # override to every fresh client so the rollback-watchdog
-        # regression test can drive a non-default kHz value through
-        # the factory seam itself (not via post-hoc mutation of
-        # already-minted instances, which the legacy
-        # ``for client in factory.clients`` loop fails to do because
-        # the loop runs BEFORE ``fetch_migrate`` populates the list).
         client_kwargs: dict[str, Any] = dict(
             host=host,
             sysdescr=self._sysdescr_per_host.get(host, ""),
@@ -192,6 +179,8 @@ class _RecordingFactory:
         )
         if self._prior_carrier_khz_override is not None:
             client_kwargs["prior_carrier_khz"] = self._prior_carrier_khz_override
+        if self._reboot_if_required_vote_override is not None:
+            client_kwargs["reboot_if_required_vote"] = self._reboot_if_required_vote_override
         client = _WritableSnmpClientForHost(**client_kwargs)
         self.clients.append(client)
         return client
@@ -221,11 +210,13 @@ class _WritableSnmpClientForHost:
         sysdescr: str,
         prior_carrier_recorder: list[str] | None = None,
         prior_carrier_khz: int = 5800000,
+        reboot_if_required_vote: int = 0,
     ) -> None:
         self._host = host
         self._sysdescr = sysdescr
         self._prior_carrier_khz = prior_carrier_khz
         self._prior_carrier_recorder = prior_carrier_recorder
+        self._reboot_if_required_vote = reboot_if_required_vote
         self.close_calls: int = 0
         # Recorded as a list of (oid, value) tuples in call order.
         self.set_calls: list[tuple[str, str | int]] = []
@@ -239,6 +230,9 @@ class _WritableSnmpClientForHost:
             if self._prior_carrier_recorder is not None:
                 self._prior_carrier_recorder.append(oid)
             return self._prior_carrier_khz
+        # rebootIfRequired (whispBoxControls 4)
+        if "3.3.3.4.0" in oid or oid.endswith("3.3.3.4.0"):
+            return self._reboot_if_required_vote
         return self._sysdescr
 
     def walk(self, base_oid: str) -> list[tuple[str, str | int]]:
@@ -1158,6 +1152,102 @@ def test_fetch_migrate_dry_run_falls_back_when_client_lacks_set(
     assert result["rolled_back"] is False
 
 
+def test_fetch_migrate_reboot_required_when_firmware_votes_1(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #84: MigrationResult carries reboot_required=True when rebootIfRequired is 1."""
+    import json
+
+    from nora.drivers.snmp_pmp450i import migrate as migrate_mod
+    from nora.hitl.tokens import mint_token
+
+    inv = _build_inventory_with_sms(tmp_path, sm_luids=())
+    registry = _build_catalog(firmware="15.2.1")
+    factory = _RecordingFactory(reboot_if_required_vote=1)
+    settings = _settings(preflight_enabled=True)
+    driver = _build_driver(inventory=inv, registry=registry, factory=factory, settings=settings)
+
+    monkeypatch.setattr(
+        "nora.drivers.snmp_pmp450i.subscribers.search_intervention_history",
+        lambda *args, **kwargs: [],
+    )
+    monkeypatch.setattr(
+        migrate_mod,
+        "fetch_sm_table",
+        lambda **kw: _fake_sm_summary(online_luids=(), degraded_luids=()),
+    )
+    monkeypatch.setattr(migrate_mod, "_start_rollback_watchdog", lambda **kw: None)
+    monkeypatch.setattr(migrate_mod, "_cancel_rollback_watchdog", lambda *a, **kw: None)
+    monkeypatch.setattr(migrate_mod, "_wait_for_management_reachability", lambda **kw: True)
+    monkeypatch.setattr(migrate_mod, "save_intervention_record", lambda *a, **kw: {"status": "OK"})
+
+    token_obj = mint_token(
+        "tester",
+        ttl_seconds=900,
+        signing_key=SecretStr("test-snmp-migrate-wu4-hmac-key"),
+    )
+    valid_token = json.dumps(token_obj.model_dump(mode="json"))
+
+    result = migrate_mod.fetch_migrate(
+        driver=driver,
+        device_id="ap-7400-01",
+        approval_token=valid_token,
+        target_frequency_mhz=5800.0,
+        settings=settings,
+    )
+
+    assert result["dry_run"] is False
+    assert result["reboot_required"] is True
+
+
+def test_fetch_migrate_reboot_required_false_when_firmware_votes_0(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #84: MigrationResult carries reboot_required=False when rebootIfRequired is 0."""
+    import json
+
+    from nora.drivers.snmp_pmp450i import migrate as migrate_mod
+    from nora.hitl.tokens import mint_token
+
+    inv = _build_inventory_with_sms(tmp_path, sm_luids=())
+    registry = _build_catalog(firmware="15.2.1")
+    factory = _RecordingFactory(reboot_if_required_vote=0)
+    settings = _settings(preflight_enabled=True)
+    driver = _build_driver(inventory=inv, registry=registry, factory=factory, settings=settings)
+
+    monkeypatch.setattr(
+        "nora.drivers.snmp_pmp450i.subscribers.search_intervention_history",
+        lambda *args, **kwargs: [],
+    )
+    monkeypatch.setattr(
+        migrate_mod,
+        "fetch_sm_table",
+        lambda **kw: _fake_sm_summary(online_luids=(), degraded_luids=()),
+    )
+    monkeypatch.setattr(migrate_mod, "_start_rollback_watchdog", lambda **kw: None)
+    monkeypatch.setattr(migrate_mod, "_cancel_rollback_watchdog", lambda *a, **kw: None)
+    monkeypatch.setattr(migrate_mod, "_wait_for_management_reachability", lambda **kw: True)
+    monkeypatch.setattr(migrate_mod, "save_intervention_record", lambda *a, **kw: {"status": "OK"})
+
+    token_obj = mint_token(
+        "tester",
+        ttl_seconds=900,
+        signing_key=SecretStr("test-snmp-migrate-wu4-hmac-key"),
+    )
+    valid_token = json.dumps(token_obj.model_dump(mode="json"))
+
+    result = migrate_mod.fetch_migrate(
+        driver=driver,
+        device_id="ap-7400-01",
+        approval_token=valid_token,
+        target_frequency_mhz=5800.0,
+        settings=settings,
+    )
+
+    assert result["dry_run"] is False
+    assert result["reboot_required"] is False
+
+
 __all__ = [
     # Pure-helper tests — precedence rules.
     "test_resolve_sm_community_inventory_when_overrides_none",
@@ -1181,4 +1271,7 @@ __all__ = [
     "test_fetch_migrate_emits_set_with_khz_unit_on_real_wire",
     "test_fetch_migrate_rollback_watchdog_uses_writable_client_and_set",
     "test_fetch_migrate_dry_run_falls_back_when_client_lacks_set",
+    # Issue #84 reboot_required regression tests.
+    "test_fetch_migrate_reboot_required_when_firmware_votes_1",
+    "test_fetch_migrate_reboot_required_false_when_firmware_votes_0",
 ]

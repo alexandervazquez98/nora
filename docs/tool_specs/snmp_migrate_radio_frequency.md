@@ -41,7 +41,9 @@ Make-before-break order (ONLINE_ACTIVE → ACTIVE_DEGRADED → AP carrier) with 
 
 ## Outputs
 
-Typed dict matching `MigrationResult`: `rolled_back`, `reason`, `pre_existing_offline_excluded`, `online_active_migrated`, `active_degraded_migrated`, `target_frequency_mhz`, `device_id`, `sm_community_overrides_used`, `band_crossing`.
+Typed dict matching `MigrationResult`: `rolled_back`, `reason`, `pre_existing_offline_excluded`, `online_active_migrated`, `active_degraded_migrated`, `target_frequency_mhz`, `device_id`, `sm_community_overrides_used`, `band_crossing`, `reboot_required`.
+
+`reboot_required` (bool) indicates whether the AP requires a reboot for the new carrier frequency to take effect, evaluated from the hardware's authoritative `rebootIfRequired` OID and/or the `band_crossing` detector. When `True`, the orchestrator must request operator authorization and invoke `snmp_reboot_radio`.
 
 `sm_community_overrides_used` (int) aggregates how many SMs were migrated with non-inventory credentials; useful for audit and for the orchestrator to surface a per-migration summary. The resolved community **string** itself never travels to the intervention record — only the per-SM `community_source` label (`OVERRIDE_IP` / `OVERRIDE_LUID` / `INVENTORY`) does.
 
