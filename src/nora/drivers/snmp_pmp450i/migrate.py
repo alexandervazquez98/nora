@@ -25,13 +25,15 @@ sub-cluster 3:
 4. On successful reachability check within the timeout the tool
    cancels the watchdog and emits the intervention record with
    ``rolled_back: false``.
-5. WU-3 (PR #44 follow-ups): when the SNMP client lacks
-   ``apply_oid`` — e.g. the production ``V2CClient`` whose
-   read-only ``SnmpClient`` Protocol is deliberate — the tool
+5. Issue #80 (PR #80 follow-up): when the SNMP client lacks the
+   ``set`` verb — e.g. a thin read-only mock used by upstream
+   tests that do NOT want to exercise SET frames — the tool
    short-circuits before any wire frame and returns a typed
    dry-run result (``dry_run=True, would_set=[...]``) so operators
    see what WOULD have happened, instead of raising
-   ``AttributeError``. Write mutations stay out of scope.
+   ``AttributeError``. Write mutations stay out of scope; the
+   production ``V2CClient`` exposes ``set`` through the
+   ``WritableV2CClient`` adapter wired via ``_writable_client_factory``.
 
 The helper also writes one intervention record per completion
 (success OR rollback) through
@@ -132,12 +134,14 @@ class MigrationResult(BaseModel):
       supplied or none matched (operator decision 2026-09-19;
       resolution order: IP first, then LUID, then inventory).
 
-    The ``dry_run`` / ``would_set`` contract seam (WU-3, PR #44
-    follow-ups): when the SNMP client lacks ``apply_oid`` — e.g. the
-    production ``V2CClient`` whose read-only ``SnmpClient`` Protocol
-    is deliberate — the tool short-circuits before any wire frame
-    and returns this typed dry-run result so operators see what
-    WOULD have happened, instead of raising ``AttributeError``.
+    The ``dry_run`` / ``would_set`` contract seam (issue #80, PR #80
+    follow-up): when the SNMP client lacks the ``set`` verb — e.g. a
+    thin read-only mock used by upstream tests — the tool
+    short-circuits before any wire frame and returns this typed
+    dry-run result so operators see what WOULD have happened,
+    instead of raising ``AttributeError``. The production
+    ``V2CClient`` exposes ``set`` through the ``WritableV2CClient``
+    adapter wired via ``_writable_client_factory``.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -823,7 +827,12 @@ def fetch_migrate(
 
     # 4. Build a fresh client and resolve the pre-migration carrier
     # frequency. The watchdog reverts to this value on loss-of-mgmt.
-    client = driver._client_factory(device)  # noqa: SLF001 — internal API
+    # Issue #80: open the client via ``_writable_client_factory`` so
+    # the SET frames emitted by both the main path AND the rollback
+    # watchdog actually reach the wire. The read-only ``_client_factory``
+    # would always fall through to the dry-run seam below because the
+    # produced ``V2CClient`` does NOT implement ``WritableSnmpClient``.
+    client = driver._writable_client_factory(device)  # noqa: SLF001 — internal API
     try:
         # 5. Walk the SM table; fold into typed rows. The cross-check
         # is delegated to ``fetch_sm_table`` so the order rule
@@ -864,16 +873,26 @@ def fetch_migrate(
             )
             active_count += 1
 
-        # 9. AP carrier change — gated on client having apply_oid
-        # (dry-run fallback otherwise). See WU-3 in
-        # odd/tasks/pr44-followups.md. The production ``V2CClient``
-        # read-only ``SnmpClient`` Protocol contract is deliberate;
-        # write mutations stay out of scope, so when the client lacks
-        # ``apply_oid`` we short-circuit and return a typed dry-run
-        # result carrying the would-be SET pair.
-        if hasattr(client, "apply_oid"):
+        # 9. AP carrier change — gated on client having ``set``
+        # (dry-run fallback otherwise). See issue #80 in
+        # https://github.com/alexandervazquez98/nora/issues/80.
+        # The ``WritableSnmpClient`` Protocol exposes ``set(oid, value)``;
+        # the production ``V2CClient`` itself is read-only and exposes
+        # ``set`` only through the ``WritableV2CClient`` adapter wired
+        # via ``_writable_client_factory`` above. Write mutations stay
+        # out of scope for the read-only base ``SnmpClient`` Protocol,
+        # so when a client lacks ``set`` we short-circuit and return a
+        # typed dry-run result carrying the would-be SET pair.
+        if hasattr(client, "set"):
             # 9a. Real-SET path: emit the AP carrier-change SET.
-            client.apply_oid(migration_oids["migrateCarrierFrequency"], target_frequency_mhz)
+            # Cambium WHISP-APS-MIB ``radioFreqCarrier`` /
+            # ``migrateCarrierFrequency`` is an Integer in kHz; convert
+            # the operator-supplied MHz value to kHz so the wire frame
+            # carries the MIB's native unit (5_800_000 for 5800 MHz).
+            client.set(
+                migration_oids["migrateCarrierFrequency"],
+                int(round(target_frequency_mhz * 1000)),
+            )
 
             # 10. Arm the rollback watchdog.
             rollback_state: dict[str, Any] = {"rolled_back": False, "reason": None}
@@ -883,10 +902,18 @@ def fetch_migrate(
                 rollback_state["rolled_back"] = True
                 rollback_state["reason"] = "loss_of_management"
                 # Revert the SET frame to the prior carrier.
+                # Issue #80: open the rollback client via the WRITABLE
+                # factory too — the read-only factory would always
+                # fall through to the dry-run seam because the
+                # produced ``V2CClient`` does NOT expose ``set``.
                 try:
-                    revert_client = driver._client_factory(device)
+                    revert_client = driver._writable_client_factory(device)
                     try:
-                        revert_client.apply_oid(
+                        # ``prior_carrier`` is already in kHz — the
+                        # GET on ``migratePriorCarrierFrequency``
+                        # returns the MIB-native unit (per the
+                        # ``_band_crossing_from_prior`` docstring).
+                        revert_client.set(
                             migration_oids["migratePriorCarrierFrequency"],
                             prior_carrier,
                         )
@@ -921,16 +948,20 @@ def fetch_migrate(
             dry_run = False
             would_set: list[tuple[str, str | int | float]] = []
         else:
-            # 9b. Dry-run fallback (WU-3): the production ``V2CClient``
-            # Protocol contract is read-only. The tool returns a typed
-            # dry-run result carrying the would-be SET pair so operators
-            # see what WOULD have happened, instead of crashing with
-            # ``AttributeError``. No SET frames were emitted; no
-            # rollback window is needed; no reachability of a fresh
-            # carrier to check.
+            # 9b. Dry-run fallback (issue #80): the client lacks the
+            # ``set`` verb (e.g. a thin read-only mock). The tool
+            # returns a typed dry-run result carrying the would-be SET
+            # pair so operators see what WOULD have happened, instead
+            # of crashing with ``AttributeError``. No SET frames were
+            # emitted; no rollback window is needed; no reachability
+            # of a fresh carrier to check. The base ``SnmpClient``
+            # Protocol contract is deliberately read-only — production
+            # ``V2CClient`` exposes ``set`` only through the
+            # ``WritableV2CClient`` adapter wired via
+            # ``_writable_client_factory``.
             would_set = [(migration_oids["migrateCarrierFrequency"], target_frequency_mhz)]
             logger.info(
-                "migrate: client lacks apply_oid; emulating SET %s=%s on device=%s",
+                "migrate: client lacks set; emulating SET %s=%s on device=%s",
                 migration_oids["migrateCarrierFrequency"],
                 target_frequency_mhz,
                 device_id,

@@ -496,6 +496,26 @@ schema; the cross-validator at scan time enforces
 `{tier 2 ⇒ requires_hitl_token=True}`, and
 `{tier ∈ {0, 1, 2}}`.
 
+## Carrier-frequency unit convention (issue #80)
+
+Tier-2 mutations on `radioFreqCarrier` (the OID behind both
+`migrateCarrierFrequency` and `migratePriorCarrierFrequency` per the
+Cambium WHISP-APS-MIB `whispApsRFConfigRadioEntry`) speak **MHz at
+the public helper boundary and kHz on the wire**. Operators pass
+`target_frequency_mhz` (e.g. `5800.0` for 5.8 GHz); the helper
+converts to kHz (`int(round(target_frequency_mhz * 1000))`, e.g.
+`5_800_000`) before emitting the SET frame. The pre-migration GET
+(`migratePriorCarrierFrequency`) returns kHz natively; the value
+passes through to the rollback watchdog unchanged. No unit
+conversion applies to `snmp_reboot_radio` — `_REBOOT_VALUE_FULL = 2`
+is the Cambium MIB enum value `fullReboot(2)`, not a frequency.
+
+The conversion lives at the call site (one line, localized) rather
+than inside the `WritableSnmpClient.set()` wrapper because the
+`set` verb is generic and must not know about per-OID unit
+conventions. A future change introducing other kHz-encoded OIDs
+should follow the same pattern.
+
 ## PromptOps Workflow (issue #45)
 
 System prompts (`src/nora/prompts/*.md`) are versioned and synchronised
