@@ -29,6 +29,7 @@ import json
 import os
 import sys
 import warnings
+from pathlib import Path
 
 # Python's default warning filter ignores `DeprecationWarning` outside
 # `__main__`. We relax it so the deprecation notice is visible to
@@ -50,8 +51,10 @@ def _build_dispatch_parser() -> argparse.ArgumentParser:
             "NORA — Network Operations & Remediation Assistant. "
             "Use `nora mcp` to boot the FastMCP server, "
             "`nora hitl mint ...` to mint a HITL approval token, "
-            "or `nora prompt sync ...` to push versioned system prompts "
-            "to an Open WebUI instance."
+            "`nora prompt sync ...` to push versioned system prompts "
+            "to an Open WebUI instance, "
+            "or `nora upgrade ...` to safely upgrade an existing NORA "
+            "install with automatic rollback."
         ),
     )
     subparsers = parser.add_subparsers(dest="subcommand", metavar="SUBCOMMAND")
@@ -139,6 +142,73 @@ def _build_dispatch_parser() -> argparse.ArgumentParser:
         "--release-tag",
         default=None,
         help="Optional release tag (e.g. v0.3.5) stamped into metadata.",
+    )
+
+    # `nora upgrade` — issue #60 / PR-2 — automate the update
+    # procedure documented in OPERATIONS.md. Headless-only (D9);
+    # mirrors the `nora prompt sync` arg pattern (D8): sub-command +
+    # argparse + explicit exit codes (0/1/2).
+    upgrade_parser = subparsers.add_parser(
+        "upgrade",
+        help=(
+            "Upgrade an existing NORA install with pre-flight backup "
+            "and automatic rollback on phase failure."
+        ),
+    )
+    upgrade_parser.add_argument(
+        "--ref",
+        default="origin/main",
+        help=("Target git ref (tag, branch, or full commit SHA). Default: origin/main."),
+    )
+    upgrade_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show every phase without mutating the filesystem.",
+    )
+    upgrade_parser.add_argument(
+        "--check-only",
+        action="store_true",
+        help="Pre-flight check only; do not upgrade.",
+    )
+    upgrade_parser.add_argument(
+        "--no-backup",
+        action="store_true",
+        help="Skip the pre-upgrade backup (operator manages snapshots externally).",
+    )
+    upgrade_parser.add_argument(
+        "--no-restart",
+        action="store_true",
+        help="Don't restart nora-mcp after upgrade (useful for offline validation).",
+    )
+    upgrade_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable JSON to stdout.",
+    )
+    upgrade_parser.add_argument(
+        "--prefix",
+        default="/opt/nora",
+        help="Install prefix (matches install.sh; default: /opt/nora).",
+    )
+    upgrade_parser.add_argument(
+        "--config-dir",
+        default="/etc/nora",
+        help="Runtime config dir (matches install.sh; default: /etc/nora).",
+    )
+    upgrade_parser.add_argument(
+        "--state-dir",
+        default="/var/lib/nora",
+        help="Mutable state dir (matches install.sh; default: /var/lib/nora).",
+    )
+    upgrade_parser.add_argument(
+        "--log-dir",
+        default="/var/log/nora",
+        help="Log dir (matches install.sh; default: /var/log/nora).",
+    )
+    upgrade_parser.add_argument(
+        "--user",
+        default="nora",
+        help="Service-account username (matches install.sh; default: nora).",
     )
 
     return parser
@@ -260,6 +330,140 @@ def _dispatch_prompt_sync(args: argparse.Namespace) -> int:
     return 0
 
 
+def _serialise_for_json(obj: object) -> object:
+    """Recursively convert dataclass instances + Paths into JSON-safe scalars.
+
+    Walks dataclasses, lists, tuples, dicts, and ``Path`` so the
+    ``--json`` output is stable across operator upgrades without
+    dragging in a third-party serialiser. Returns the input as-is for
+    scalar types (``str``, ``int``, ``float``, ``bool``, ``None``).
+    """
+    from dataclasses import asdict, is_dataclass
+
+    if is_dataclass(obj) and not isinstance(obj, type):
+        return {k: _serialise_for_json(v) for k, v in asdict(obj).items()}
+    if isinstance(obj, dict):
+        return {str(k): _serialise_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_serialise_for_json(v) for v in obj]
+    if isinstance(obj, Path):
+        return str(obj)
+    return obj
+
+
+def _dispatch_upgrade(args: argparse.Namespace) -> int:
+    """Handle `nora upgrade` — automate the OPERATIONS.md update procedure.
+
+    Behaviour (mirrors the `nora prompt sync` dispatcher pattern):
+
+    1. Pre-flight via ``nora.upgrade.preflight``. If ``result.noop``,
+       print a one-line stderr message and exit 0 (no upgrade needed).
+    2. ``--check-only`` → print the preflight result + exit 0 without
+       touching the filesystem.
+    3. ``--no-backup`` skips ``create_backup``; otherwise create the
+       backup and print ``backup: <path>`` to stderr.
+    4. Run the upgrade phases via ``run_upgrade``. On ``UpgradeFailed``
+       print the failing phase + backup path to stderr and exit 1.
+    5. ``--json`` emits ``json.dumps(asdict(result))`` (with nested
+       dataclasses + Paths serialised recursively) on stdout.
+    6. Otherwise print a human-readable summary on stderr.
+    7. Exit 0 on success.
+
+    Returns the exit code. argparse validates the required flags
+    before this runs; the only failure modes are runtime (preflight,
+    backup, upgrade, smoke).
+    """
+    # Lazy imports — keep the dispatcher's import cost paid only when
+    # `nora upgrade` is invoked.
+    from nora import upgrade as upgrade_mod
+
+    try:
+        preflight_result = upgrade_mod.preflight(
+            prefix=Path(args.prefix),
+            ref=args.ref,
+        )
+    except upgrade_mod.PreFlightError as exc:
+        sys.stderr.write(f"nora: preflight failed: {exc}\n")
+        return 1
+
+    if preflight_result.noop:
+        sys.stderr.write(f"already at {preflight_result.target_sha}, nothing to do\n")
+        return 0
+
+    if args.check_only:
+        sys.stderr.write(
+            f"check-only: ref={args.ref} "
+            f"current_sha={preflight_result.current_sha} "
+            f"target_sha={preflight_result.target_sha}\n"
+        )
+        if args.json:
+            sys.stdout.write(json.dumps(_serialise_for_json(preflight_result)) + "\n")
+            sys.stdout.flush()
+        return 0
+
+    backup_path: Path | None = None
+    if not args.no_backup:
+        timestamp = upgrade_mod._utc_timestamp()  # noqa: SLF001 — internal helper
+        backup_path = upgrade_mod.create_backup(
+            prefix=Path(args.prefix),
+            config_dir=Path(args.config_dir),
+            state_dir=Path(args.state_dir),
+            timestamp=timestamp,
+            dry_run=args.dry_run,
+        )
+        sys.stderr.write(f"backup: {backup_path}\n")
+
+    try:
+        result = upgrade_mod.run_upgrade(
+            prefix=Path(args.prefix),
+            target_sha=preflight_result.target_sha or "",
+            backup_path=backup_path,
+            config_dir=Path(args.config_dir),
+            state_dir=Path(args.state_dir),
+            log_dir=Path(args.log_dir),
+            user=args.user,
+            dry_run=args.dry_run,
+            restart=not args.no_restart,
+        )
+    except upgrade_mod.UpgradeFailed as exc:
+        backup_note = f" backup={exc.backup_path}" if exc.backup_path else ""
+        sys.stderr.write(f"nora: upgrade failed at phase={exc.phase}{backup_note}: {exc}\n")
+        return 1
+    except upgrade_mod.BackupError as exc:
+        sys.stderr.write(f"nora: backup failed: {exc}\n")
+        return 1
+    except upgrade_mod.PreFlightError as exc:
+        sys.stderr.write(f"nora: preflight failed: {exc}\n")
+        return 1
+
+    if args.json:
+        sys.stdout.write(json.dumps(_serialise_for_json(result)) + "\n")
+        sys.stdout.flush()
+        return 0
+
+    # Human-readable summary on stderr (so stdout stays clean for
+    # piping). Smoke summary counts are surfaced for at-a-glance
+    # operator review; the full report goes through `--json`.
+    smoke_report = result.smoke_report or {}
+    summary = smoke_report.get("summary") if isinstance(smoke_report, dict) else None
+    if isinstance(summary, dict):
+        ok = summary.get("ok", "?")
+        warn = summary.get("warn", "?")
+        fail = summary.get("fail", "?")
+        smoke_line = f"smoke=ok:{ok} warn:{warn} fail:{fail}"
+    else:
+        smoke_line = "smoke=(not run — dry-run)" if args.dry_run else "smoke=(no report)"
+
+    sys.stderr.write(
+        f"upgrade complete: prefix={args.prefix} "
+        f"current_sha={preflight_result.current_sha} "
+        f"target_sha={result.final_sha} "
+        f"phases={','.join(result.phases_completed)} "
+        f"{smoke_line}\n"
+    )
+    return 0
+
+
 def _deprecation_alias_boots_mcp() -> int:
     """`nora` (no args) — emit deprecation warning then delegate to cli.main.
 
@@ -323,6 +527,11 @@ def main(argv: list[str] | None = None) -> int:
             sys.stderr.write("nora prompt: missing sub-command (expected `sync`)\n")
             sys.exit(2)
         return _dispatch_prompt_sync(args)
+
+    # `nora upgrade` → issue #60 / PR-2 — automate the OPERATIONS.md
+    # update procedure with pre-flight backup + automatic rollback.
+    if args.subcommand == "upgrade":
+        return _dispatch_upgrade(args)
 
     # argparse should have rejected unknown sub-commands, but if we
     # get here defensively exit non-zero.

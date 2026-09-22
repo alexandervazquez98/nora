@@ -169,6 +169,48 @@ bounded by how quickly you can rotate.
 
 ## Update procedure
 
+**Recommended path** (headless, idempotent, with automatic rollback):
+
+```bash
+sudo nora upgrade
+```
+
+Pin a specific version:
+
+```bash
+sudo nora upgrade --ref v0.3.8          # by tag
+sudo nora upgrade --ref 198e803          # by commit SHA
+sudo nora upgrade --ref origin/main      # by branch
+```
+
+Useful flags:
+
+| Flag | Effect |
+|---|---|
+| `--ref REF` | Target git ref (default `origin/main`). Accepts tags, branches, and full commit SHAs. |
+| `--dry-run` | Print every phase without mutating the filesystem or restarting services. |
+| `--check-only` | Pre-flight only — verify the ref resolves and exit. |
+| `--no-backup` | Skip the pre-upgrade backup. Operator manages snapshots externally. |
+| `--no-restart` | Don't restart `nora-mcp` after upgrade. Useful for offline validation. |
+| `--json` | Emit machine-readable JSON to stdout (suitable for CI / Ansible). |
+| `--prefix PATH` | Install prefix (default `/opt/nora`). |
+| `--config-dir PATH` | Runtime config dir (default `/etc/nora`). |
+| `--state-dir PATH` | Mutable state dir (default `/var/lib/nora`). |
+
+Phases (run in order; rollback fires on any failure):
+
+1. **Pre-flight** — `git rev-parse --verify origin/<ref>^{commit}` resolves the target SHA; no-op if already at target.
+2. **Backup** — `/etc/nora/{nora.env,nora-mcp.env,signing_key}` + `<prefix>/data/{devices.yaml,oid-catalogs/}` copied to `/var/lib/nora/upgrades/<UTC-timestamp>/` (root 0700). A `MANIFEST.txt` records the pre-upgrade SHA + ref + timestamp.
+3. **`git fetch origin`** + `git checkout <target-sha>` (detached HEAD) inside `<prefix>`.
+4. **`uv sync`** to refresh dependencies.
+5. **Re-sign catalogs** under `<prefix>/data/oid-catalogs/` so the HMAC envelope matches the new tree.
+6. **`systemctl restart nora-mcp`** (skippable via `--no-restart`).
+7. **Smoke test** — `scripts/verify-install.sh --json --strict` against the upgraded install. Any FAIL or WARN aborts and triggers rollback.
+
+Rollback restores the backup, restarts `nora-mcp`, and exits non-zero with a stderr line naming the failing phase + backup path.
+
+**Manual fallback** (kept for air-gapped hosts, custom packagers, and recovery from a wedged `nora upgrade`):
+
 ```bash
 cd /opt/nora
 sudo systemctl stop nora-mcp
@@ -332,6 +374,7 @@ for the deployment guide.
 
 | Symptom (stderr)                                                                    | Likely cause                                                                | Fix                                                                                                  |
 |--------------------------------------------------------------------------------------|-----------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------|
+| `nora upgrade` failed mid-flight (exit 1 with `phase=<name>` on stderr)              | NORA restored the backup automatically. Inspect the failing phase's stderr in `/var/log/nora/` and check `/var/lib/nora/upgrades/<timestamp>/MANIFEST.txt` for the SHA/ref that was active before the upgrade. | Re-run `sudo nora upgrade --ref <known-good-sha>` to land on the previous version. |
 | `CatalogVerificationError: missing signing key (NORA_OID_CATALOG_SIGNING_KEY is empty)` | `.env` not loaded, or key variable is empty                                | Confirm `/etc/nora/nora.env` contains the line; reload systemd: `systemctl daemon-reload && systemctl restart nora-mcp` |
 | `CatalogVerificationError: ... HMAC-SHA256 signature mismatch`                        | Key changed; catalog not re-signed, OR catalog was tampered                | Re-sign: `sudo -u nora -E .venv/bin/python scripts/sign_catalog.py`. If `git diff data/oid-catalogs/` shows unexpected changes, the file was modified — restore from a known-good source. |
 | `CatalogVerificationError: ... missing required OID(s): modulationMode, ...`         | Catalog file is the wrong shape (e.g. empty, or from a different vendor) | Re-run `sign_catalog.py`; if the script does not regenerate the file, the upstream OID_CATALOG_V1 in the script was edited — pull a fresh `scripts/sign_catalog.py` from the repo. |
