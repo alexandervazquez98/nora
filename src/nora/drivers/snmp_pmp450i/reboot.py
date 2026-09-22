@@ -33,13 +33,15 @@ WU-C contract per `odd/tasks/multi-community-migration-and-band-reboot.md`:
    ``POST_REBOOT`` intervention record carries the reboot metadata
    (timestamp, firmware vote, dry-run flag) so the audit trail is
    unambiguous.
-5. WU-3 (PR #44 follow-ups): when the SNMP client lacks
-   ``apply_oid`` — e.g. the production ``V2CClient`` whose
-   read-only ``SnmpClient`` Protocol is deliberate — the tool
+5. Issue #80 (PR #80 follow-up): when the SNMP client lacks the
+   ``set`` verb — e.g. a thin read-only mock used by upstream
+   tests that do NOT want to exercise SET frames — the tool
    short-circuits before any wire frame and returns a typed
    dry-run result (``dry_run=True, would_set=[...]``) so operators
    see what WOULD have happened, instead of raising
-   ``AttributeError``. Write mutations stay out of scope.
+   ``AttributeError``. Write mutations stay out of scope; the
+   production ``V2CClient`` exposes ``set`` through the
+   ``WritableV2CClient`` adapter wired via ``_writable_client_factory``.
 
 The helper also writes one intervention record per completion
 (success, dry-run, or skipped) through
@@ -237,7 +239,13 @@ def fetch_reboot(
     # 3. Read the firmware's reboot vote. Default fire on read
     # failure (fail-closed) — the operator can re-invoke with
     # ``force=True`` if the read is unreliable.
-    client = driver._client_factory(device)  # noqa: SLF001 — internal API
+    # Issue #80: open the client via ``_writable_client_factory``
+    # so the SET frames below actually reach the wire. The
+    # read-only ``_client_factory`` would always fall through to the
+    # dry-run seam because the produced ``V2CClient`` does NOT
+    # implement ``WritableSnmpClient``. The
+    # ``rebootIfRequired`` GET is read-only and works on any client.
+    client = driver._writable_client_factory(device)  # noqa: SLF001 — internal API
     firmware_vote: int | None = None
     vote_unreadable = False
     try:
@@ -268,17 +276,26 @@ def fetch_reboot(
         )
     else:
         # 5. Decide between real-SET and dry-run based on the
-        # client's capabilities.
-        has_apply_oid = hasattr(client, "apply_oid")
-        if has_apply_oid:
+        # client's capabilities. Issue #80: the gate now checks
+        # for the ``set`` verb (the ``WritableSnmpClient`` Protocol
+        # contract) instead of the non-existent ``apply_oid``. The
+        # production ``V2CClient`` exposes ``set`` only through the
+        # ``WritableV2CClient`` adapter wired via
+        # ``_writable_client_factory`` above.
+        has_set = hasattr(client, "set")
+        if has_set:
             set_calls: list[str] = []
             try:
                 # Per the 25.x MIB: fullReboot(2) on 450i hardware
                 # (the only Cambium model in scope today). A future
                 # change can read the platform from ``platformType``
                 # (whispBoxStatus 12) to dispatch normal vs full.
+                # ``_REBOOT_VALUE_FULL`` is the Cambium MIB enum
+                # value ``fullReboot(2)``; it is NOT a frequency, so
+                # no kHz conversion applies (unlike
+                # ``migration_oids['migrateCarrierFrequency']``).
                 set_calls.append(f"{reboot_oid_dotted}={_REBOOT_VALUE_FULL}")
-                client.apply_oid(reboot_oid_dotted, _REBOOT_VALUE_FULL)
+                client.set(reboot_oid_dotted, _REBOOT_VALUE_FULL)
             finally:
                 try:
                     client.close()
@@ -298,7 +315,12 @@ def fetch_reboot(
                 set_calls=set_calls,
             )
         else:
-            # Dry-run fallback — same pattern as ``MigrationResult``.
+            # Dry-run fallback (issue #80) — same pattern as
+            # ``MigrationResult``. The client lacks the ``set`` verb
+            # (e.g. a thin read-only mock); no SET frame is emitted
+            # but a typed ``dry_run=True`` result surfaces the
+            # would-be SET pair so operators see what WOULD have
+            # happened, instead of crashing with ``AttributeError``.
             would_set: list[tuple[str, str | int | float]] = [
                 (reboot_oid_dotted, _REBOOT_VALUE_FULL)
             ]
@@ -307,7 +329,7 @@ def fetch_reboot(
             except Exception:  # pragma: no cover
                 pass
             logger.info(
-                "reboot: client lacks apply_oid; emulating SET %s=%s on device=%s",
+                "reboot: client lacks set; emulating SET %s=%s on device=%s",
                 reboot_oid_dotted,
                 _REBOOT_VALUE_FULL,
                 device_id,

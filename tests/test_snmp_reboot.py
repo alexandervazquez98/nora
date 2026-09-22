@@ -96,7 +96,16 @@ def _build_catalog(
 
 
 class _FakeSnmpClient:
-    """Fake client — returns canned values keyed by dotted OID."""
+    """Fake client — returns canned values keyed by dotted OID.
+
+    Issue #80 (PR #80 follow-up): the production helper now
+    reaches the writable factory seam AND the ``set`` verb
+    (the ``WritableSnmpClient`` Protocol contract). The fake
+    exposes BOTH ``apply_oid`` (kept for legacy assertions) AND
+    ``set`` (the verb the production code actually calls). Both
+    methods append to the same ``_set_calls`` list so existing
+    assertions stay green.
+    """
 
     def __init__(
         self,
@@ -118,6 +127,22 @@ class _FakeSnmpClient:
         return []
 
     def apply_oid(self, oid: str, value: str | int) -> None:
+        """Legacy seam — kept so old assertions still record frames.
+
+        Production code now reaches ``set`` instead; both methods
+        append to ``_set_calls``.
+        """
+        self._set_calls.append(f"{oid}={value}")
+
+    def set(self, oid: str, value: str | int) -> None:
+        """Issue #80: ``WritableSnmpClient`` Protocol verb.
+
+        The production gate is ``hasattr(client, "set")``; this
+        method makes the fake satisfy the new contract so the
+        real-SET path runs against the fake (not the production
+        ``WritableV2CClient``, which would time out on the real
+        network).
+        """
         self._set_calls.append(f"{oid}={value}")
 
     def close(self) -> None:
@@ -157,6 +182,15 @@ def _build_driver(
         inventory=inventory,
         catalog_registry=registry,
         client_factory=lambda d: canned,
+        # Issue #80: wire the same canned fake through the
+        # writable-factory seam so the production helper's
+        # ``driver._writable_client_factory(device)`` call (which
+        # replaced ``_client_factory`` for the reboot SET path)
+        # reaches the fake instead of the default
+        # ``WritableV2CClient``. Without this, the legacy tests
+        # would attempt a real-wire SET against ``192.0.2.10``
+        # and time out after 5.0s.
+        writable_client_factory=lambda d: canned,
     )
     if settings is not None:
         driver._runtime_settings = settings

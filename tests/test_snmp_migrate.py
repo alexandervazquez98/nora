@@ -237,7 +237,12 @@ class _FakeSnmpClient:
         self.get_calls: list[str] = []
         self.walk_calls: list[str] = []
         # SET frame capture — production SnmpClient is read-only, so
-        # the fake's ``apply_oid`` is the seam for the AP channel change.
+        # the fake's ``apply_oid`` was the seam for the AP channel
+        # change. Issue #80 (PR #80 follow-up): the production gate
+        # moved from ``apply_oid`` to the ``WritableSnmpClient``
+        # ``set`` verb. The fake now exposes both for back-compat:
+        # ``apply_oid`` keeps legacy assertions working, ``set`` is
+        # the verb the production helper actually calls.
         self._set_calls: list[str] = set_calls if set_calls is not None else []
 
     def get_oid(self, oid: str) -> str | int:
@@ -251,7 +256,25 @@ class _FakeSnmpClient:
         return list(self._walk_results.get(base_oid, []))
 
     def apply_oid(self, oid: str, value: str | int) -> None:
-        """Apply a write frame — only used by the AP channel-change path."""
+        """Apply a write frame — kept for legacy tests that pin the old seam.
+
+        Issue #80: production code now reaches the ``set`` verb
+        instead. New assertions should prefer ``set_calls``; this
+        method remains so legacy assertions that check
+        ``canned._set_calls`` for backwards-compat reasons keep
+        working.
+        """
+        self._set_calls.append(f"{oid}={value}")
+
+    def set(self, oid: str, value: str | int) -> None:
+        """Issue #80: ``WritableSnmpClient`` Protocol verb.
+
+        The production gate is ``hasattr(client, "set")``; this
+        method makes the fake satisfy the new contract so the
+        real-SET path runs against the fake (not the production
+        ``WritableV2CClient``, which would time out on the real
+        network).
+        """
         self._set_calls.append(f"{oid}={value}")
 
     def close(self) -> None:
@@ -271,6 +294,15 @@ def _build_driver(
         inventory=inventory,
         catalog_registry=registry,
         client_factory=lambda d: canned,
+        # Issue #80: wire the same canned fake through the
+        # writable-factory seam so the production helper's
+        # ``driver._writable_client_factory(device)`` call (which
+        # replaced ``_client_factory`` for the migration SET path
+        # and the rollback watchdog) reaches the fake instead of
+        # the default ``WritableV2CClient``. Without this, the
+        # legacy tests would attempt real-wire SETs against
+        # ``192.0.2.x`` and time out after 5.0s.
+        writable_client_factory=lambda d: canned,
     )
     if settings is not None:
         driver._runtime_settings = settings
@@ -842,6 +874,12 @@ class _V2CShapeStub:
     Mirrors the production read-only ``SnmpClient`` Protocol — exactly
     the surface that ``V2CClient`` exposes. WU-3 dry-run fallback is
     gated on this stub LACKING ``apply_oid``.
+
+    Issue #80 (PR #80 follow-up): the gate moved from ``apply_oid``
+    to the ``WritableSnmpClient`` ``set`` verb. This stub
+    deliberately exposes NEITHER — that is the contract seam. The
+    production helper's ``hasattr(client, "set")`` check fires the
+    dry-run fallback path against this stub.
     """
 
     def __init__(
@@ -869,8 +907,9 @@ class _V2CShapeStub:
     def close(self) -> None:
         self.close_calls += 1
 
-    # NOTE: NO ``apply_oid`` — this is the contract seam. The dry-run
-    # fallback path is gated on its absence.
+    # NOTE: NO ``apply_oid`` AND NO ``set`` — this is the contract
+    # seam. The dry-run fallback path is gated on the absence of
+    # the ``set`` verb (the ``WritableSnmpClient`` Protocol surface).
 
 
 def _build_driver_with_stub(
@@ -880,13 +919,20 @@ def _build_driver_with_stub(
     stub: _V2CShapeStub,
     settings: Settings | None = None,
 ) -> Any:
-    """Wire a driver whose ``client_factory`` returns a V2C-shaped stub (no apply_oid)."""
+    """Wire a driver whose factories return a V2C-shaped stub (no ``set``).
+
+    Issue #80: BOTH ``client_factory`` and ``writable_client_factory``
+    must point at the same V2C-shaped stub so the production helper's
+    factory swap reaches the fake on both paths. The stub lacks the
+    ``set`` verb by design — the gate fires the dry-run fallback.
+    """
     from nora.drivers.snmp_pmp450i import Pmp450iSnmpDriver
 
     driver = Pmp450iSnmpDriver(
         inventory=inventory,
         catalog_registry=registry,
         client_factory=lambda d: stub,
+        writable_client_factory=lambda d: stub,
     )
     if settings is not None:
         driver._runtime_settings = settings
@@ -1101,25 +1147,35 @@ def test_fetch_migrate_emulation_does_not_call_apply_oid_unavailable(
 
 
 # ---------------------------------------------------------------------------
-# WU-3 Named test #4 — real_set_still_works_via_apply_oid (regression guard)
+# Issue #80 — real_set_still_works_via_set (regression guard).
+#
+# Renamed from the legacy ``test_fetch_migrate_real_set_still_works_via_apply_oid``
+# after the production helper moved from the synthetic ``apply_oid``
+# gate to the ``WritableSnmpClient`` ``set`` verb. The test still pins
+# the real-SET path; only the verb and the value unit changed.
 # ---------------------------------------------------------------------------
 
 
-def test_fetch_migrate_real_set_still_works_via_apply_oid(
+def test_fetch_migrate_real_set_still_works_via_set(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Regression guard: ``_FakeSnmpClient`` with ``apply_oid`` keeps the real-SET path.
+    """Regression guard: ``_FakeSnmpClient`` with ``set`` keeps the real-SET path.
 
-    Per ``odd/tasks/pr44-followups.md`` WU-3: the dry-run fallback
-    MUST NOT regress the existing real-SET path. A test fake that
-    defines ``apply_oid`` continues to flow through the unchanged
-    wire path; the result carries ``dry_run=False, would_set=[]``.
+    Per issue #80 (PR #80 follow-up): the dry-run fallback MUST NOT
+    regress the existing real-SET path. The production helper now
+    emits the carrier-frequency SET via ``client.set(oid, value)``
+    with the value converted to kHz (Cambium WHISP-APS-MIB native
+    unit on ``radioFreqCarrier``). A test fake that exposes ``set``
+    continues to flow through the unchanged wire path; the result
+    carries ``dry_run=False, would_set=[]`` and the recorded SET
+    frame carries the kHz value (``5800.0`` MHz → ``5_800_000`` kHz).
     """
     from nora.drivers.snmp_pmp450i import migrate as migrate_mod
 
     inv = _build_inventory(tmp_path)
     registry = _build_catalog(firmware="15.2.1")
     target_freq_mhz = 5800.0
+    target_freq_khz = int(round(target_freq_mhz * 1000))  # 5_800_000
     migration_freq_oid = "1.3.6.1.4.1.161.19.3.1.4.1.38.0"
 
     canned = _FakeSnmpClient(
@@ -1155,7 +1211,7 @@ def test_fetch_migrate_real_set_still_works_via_apply_oid(
 
     # Real SET path: NOT a dry-run; ``would_set`` is empty.
     assert result["dry_run"] is False, (
-        f"apply_oid-bearing client MUST NOT enter dry-run; got {result!r}"
+        f"set-bearing client MUST NOT enter dry-run; got {result!r}"
     )
     assert result["would_set"] == [], (
         f"Real-SET path MUST NOT populate would_set; got {result['would_set']!r}"
@@ -1164,8 +1220,12 @@ def test_fetch_migrate_real_set_still_works_via_apply_oid(
     assert len(canned._set_calls) == 1, (
         f"Real-SET path MUST emit exactly 1 SET frame; got {canned._set_calls!r}"
     )
-    assert canned._set_calls[0] == f"{migration_freq_oid}={target_freq_mhz}", (
-        f"Real-SET path MUST emit the carrier-frequency SET; got {canned._set_calls[0]!r}"
+    # Issue #80: SET value is in kHz (Cambium WHISP-APS-MIB native
+    # unit on ``radioFreqCarrier``), NOT MHz. Production converts
+    # via ``int(round(target_frequency_mhz * 1000))``.
+    assert canned._set_calls[0] == f"{migration_freq_oid}={target_freq_khz}", (
+        f"Real-SET path MUST emit the carrier-frequency SET in kHz; "
+        f"got {canned._set_calls[0]!r}"
     )
 
 
@@ -1283,6 +1343,12 @@ class _RoutedFakeSnmpClient:
     Each client must answer its own sysDescr GET — either with a
     canned body on the success path or by raising a typed exception
     on the failure path.
+
+    Issue #80: this fake now also exposes the ``set`` verb (a
+    no-op, like the legacy ``apply_oid``) so the migration's
+    writable-factory path doesn't fall through to the real
+    ``WritableV2CClient`` when these tests don't override the
+    writable factory seam.
     """
 
     def __init__(
@@ -1312,6 +1378,16 @@ class _RoutedFakeSnmpClient:
         return []
 
     def apply_oid(self, oid: str, value: str | int) -> None:
+        return None
+
+    def set(self, oid: str, value: str | int) -> None:
+        # Issue #80: no-op stub for the ``WritableSnmpClient``
+        # Protocol verb. The migration path's gate fires the
+        # dry-run fallback if this verb is missing, which is NOT
+        # what the routing tests want — they exercise the full
+        # pre-flight + migration path and expect the migration to
+        # complete. Defining ``set`` as a no-op lets the gate pass
+        # without changing the routing tests' observable behavior.
         return None
 
     def close(self) -> None:
@@ -1672,7 +1748,7 @@ __all__ = [
     "test_fetch_migrate_emulation_dry_run_when_client_lacks_apply_oid",
     "test_fetch_migrate_emulation_skips_watchdog_on_dry_run",
     "test_fetch_migrate_emulation_does_not_call_apply_oid_unavailable",
-    "test_fetch_migrate_real_set_still_works_via_apply_oid",
+    "test_fetch_migrate_real_set_still_works_via_set",
     "test_migrate_subscriber_default_logs_and_returns_ok",
     "test_rollback_watchdog_start_and_cancel_round_trip",
     # WU-A (feat/multi-community-band-reboot) — pre-flight community

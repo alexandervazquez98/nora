@@ -58,6 +58,26 @@ _WRITABLE_SEAM_FILES: frozenset[str] = frozenset(
         # ``odd/tasks/issue-62-spectrum-and-multi-community.md`` doc
         # itself — see the WU-3 section.
         "src/nora/drivers/snmp_pmp450i/spectrum.py",
+        # Issue #80 (2026-09-22): the migration and reboot helpers
+        # are the second and third documented consumers of the
+        # writable seam. Same Driver-R2 rationale as
+        # ``spectrum.py``: explicit consumption of
+        # ``WritableSnmpClient`` via
+        # ``driver._writable_client_factory``, gated by the HITL
+        # token gate (``verify_approval_token``) which raises
+        # ``AutonomousMutationRejected`` BEFORE any SET frame is
+        # emitted. Production refs:
+        # - ``migrate.py``: AP carrier-change SET on
+        #   ``migrateCarrierFrequency`` (kHz value per Cambium
+        #   WHISP-APS-MIB ``radioFreqCarrier``) and rollback-watchdog
+        #   revert SET on ``migratePriorCarrierFrequency``.
+        # - ``reboot.py``: ``fullReboot(2)`` enum SET on
+        #   ``whispBoxControls 2`` (no kHz conversion — enum value,
+        #   not a frequency).
+        # The ADR update is the feature doc
+        # ``odd/tasks/issue-80-migrate-writable-wiring.md``.
+        "src/nora/drivers/snmp_pmp450i/migrate.py",
+        "src/nora/drivers/snmp_pmp450i/reboot.py",
     }
 )
 

@@ -82,7 +82,20 @@ def _build_inventory_with_sms(
 
 
 def _build_catalog(firmware: str = "15.2.1") -> OidCatalogRegistry:
-    """Minimal catalog registry covering the radio / SM / migration OIDs."""
+    """Minimal catalog registry covering the radio / SM / migration OIDs.
+
+    Issue #80 (2026-09-22): the ``migrateCarrierFrequency`` /
+    ``migratePriorCarrierFrequency`` OIDs now mirror the production
+    catalogs under ``data/oid-catalogs/cambium/pmp450i/*.source.json``
+    (``whispApsRFConfigRadioEntry.radioFreqCarrier``, the
+    ``radioIndex=1`` instance at
+    ``1.3.6.1.4.1.161.19.3.1.10.1.1.1.1``). The legacy placeholder
+    (``1.3.6.1.4.1.161.19.3.1.4.1.38.0``) was actually
+    ``radioUplinkRate`` — a read-only link OID, not a migration
+    target — and was removed so the wire-path regression tests assert
+    against the OID the helper will actually emit on the production
+    wire. No other entry in the catalog changes.
+    """
     oids: dict[str, str] = {
         "radioDownlinkRate": "1.3.6.1.4.1.161.19.3.1.4.1.36.0",
         "radioUplinkRate": "1.3.6.1.4.1.161.19.3.1.4.1.38.0",
@@ -94,8 +107,8 @@ def _build_catalog(firmware: str = "15.2.1") -> OidCatalogRegistry:
         "smCinr": "1.3.6.1.4.1.161.19.3.1.4.1.74.0",
         "smLinkStatus": "1.3.6.1.4.1.161.19.3.1.4.1.19.0",
         "smLuid": "1.3.6.1.4.1.161.19.3.1.4.1.1.0",
-        "migrateCarrierFrequency": "1.3.6.1.4.1.161.19.3.1.4.1.38.0",
-        "migratePriorCarrierFrequency": "1.3.6.1.4.1.161.19.3.1.4.1.38.0",
+        "migrateCarrierFrequency": "1.3.6.1.4.1.161.19.3.1.10.1.1.1.1",
+        "migratePriorCarrierFrequency": "1.3.6.1.4.1.161.19.3.1.10.1.1.1.1",
     }
     catalog = OidCatalog(
         vendor="cambium",
@@ -117,18 +130,47 @@ class _RecordingFactory:
     ``community`` per call to assert which credential actually reached
     the wire. We also count calls per host to sanity-check the
     per-SM probe loop.
+
+    Issue #80 (2026-09-22): the factory now returns a
+    ``WritableSnmpClient``-shaped stub (with ``set()`` instead of a
+    synthetic ``apply_oid``) so the migration path can actually
+    exercise the wire code in tests. The pre-flight path (sysDescr
+    GET) only uses ``get_oid`` so the additional ``set`` verb is a
+    no-op for that path. Each factory call mints a fresh client
+    instance and tracks it so the per-client ``set`` calls can be
+    inspected after ``fetch_migrate`` returns.
     """
 
-    def __init__(self, *, sysdescr_per_host: dict[str, str] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        sysdescr_per_host: dict[str, str] | None = None,
+        prior_carrier_khz: int | None = None,
+    ) -> None:
         self._sysdescr_per_host = sysdescr_per_host or {}
         self.calls: list[Device] = []
         self.hosts_probed: list[str] = []
+        self.clients: list[_WritableSnmpClientForHost] = []
+        self.prior_carrier_get_calls: list[str] = []
+        # Issue #80 (2026-09-22): when set, every
+        # ``_WritableSnmpClientForHost`` minted by ``__call__``
+        # inherits this kHz value for the prior-carrier GET response,
+        # so wire-path regression tests can drive the rollback
+        # watchdog through the ``5785000`` (or any) carrier value
+        # without resorting to post-hoc mutation of existing
+        # instances. Default ``None`` preserves the legacy behaviour
+        # (the underlying client uses its own ``5800000`` default)
+        # so all 15 pre-existing tests stay byte-identical.
+        self._prior_carrier_khz_override = prior_carrier_khz
 
     def __call__(self, device: Any) -> Any:
         """Behaves like ``Pmp450iSnmpDriver._client_factory(device)``.
 
-        Returns a tiny ``SnmpClient``-shaped stub that records the
-        per-host sysDescr GET; we close it eagerly.
+        Returns a tiny ``WritableSnmpClient``-shaped stub that records
+        the per-host sysDescr GET and the ``set`` frames emitted by
+        the migration path. Issue #80: the contract is the real
+        ``WritableSnmpClient`` (with ``set``); tests no longer define
+        a synthetic ``apply_oid`` shim.
         """
         from typing import cast
 
@@ -136,26 +178,75 @@ class _RecordingFactory:
         self.calls.append(d)
         host = str(getattr(d, "host", "?"))
         self.hosts_probed.append(host)
-        return _SnmpClientForHost(host=host, sysdescr=self._sysdescr_per_host.get(host, ""))
+        # Issue #80: propagate the optional ``prior_carrier_khz``
+        # override to every fresh client so the rollback-watchdog
+        # regression test can drive a non-default kHz value through
+        # the factory seam itself (not via post-hoc mutation of
+        # already-minted instances, which the legacy
+        # ``for client in factory.clients`` loop fails to do because
+        # the loop runs BEFORE ``fetch_migrate`` populates the list).
+        client_kwargs: dict[str, Any] = dict(
+            host=host,
+            sysdescr=self._sysdescr_per_host.get(host, ""),
+            prior_carrier_recorder=self.prior_carrier_get_calls,
+        )
+        if self._prior_carrier_khz_override is not None:
+            client_kwargs["prior_carrier_khz"] = self._prior_carrier_khz_override
+        client = _WritableSnmpClientForHost(**client_kwargs)
+        self.clients.append(client)
+        return client
 
 
-class _SnmpClientForHost:
-    """Minimal SnmpClient-shaped stub: ``get_oid`` returns the per-host sysDescr."""
+class _WritableSnmpClientForHost:
+    """Minimal ``WritableSnmpClient``-shaped stub for issue #80.
 
-    def __init__(self, *, host: str, sysdescr: str) -> None:
+    Implements the full ``WritableSnmpClient`` Protocol contract
+    (``get_oid``, ``walk``, ``close``, ``set``). Records every
+    ``set(oid, value)`` call so the wire path can be asserted in
+    tests, and returns a configurable sysDescr value from
+    ``get_oid``. The rollback watchdog reads
+    ``migratePriorCarrierFrequency`` BEFORE the SET; we expose that
+    value via ``get_oid`` when the OID matches, otherwise the
+    configured sysDescr (which keeps the pre-flight path intact).
+
+    Issue #80: this stub REPLACES the prior ``apply_oid``-shaped
+    ``_SnmpClientForHost``. Defining ``apply_oid`` here would
+    reproduce the bug-masking behaviour we are removing.
+    """
+
+    def __init__(
+        self,
+        *,
+        host: str,
+        sysdescr: str,
+        prior_carrier_recorder: list[str] | None = None,
+        prior_carrier_khz: int = 5800000,
+    ) -> None:
         self._host = host
         self._sysdescr = sysdescr
+        self._prior_carrier_khz = prior_carrier_khz
+        self._prior_carrier_recorder = prior_carrier_recorder
         self.close_calls: int = 0
+        # Recorded as a list of (oid, value) tuples in call order.
+        self.set_calls: list[tuple[str, str | int]] = []
 
     def get_oid(self, oid: str) -> str | int:
-        # The pre-flight only ever calls ``get_oid`` with sysDescr.
+        # The pre-flight path uses sysDescr; the migration path reads
+        # ``migratePriorCarrierFrequency`` (the same OID as
+        # ``radioFreqCarrier`` / ``migrateCarrierFrequency``) and
+        # expects an integer in kHz.
+        if "10.1.1.1.1" in oid or oid.endswith("10.1.1.1.1"):
+            if self._prior_carrier_recorder is not None:
+                self._prior_carrier_recorder.append(oid)
+            return self._prior_carrier_khz
         return self._sysdescr
 
     def walk(self, base_oid: str) -> list[tuple[str, str | int]]:
         return []
 
-    def apply_oid(self, oid: str, value: str | int) -> None:
-        return None
+    def set(self, oid: str, value: str | int) -> None:
+        # Record (oid, value) so tests assert the wire contract.
+        self.set_calls.append((oid, value))
 
     def close(self) -> None:
         self.close_calls += 1
@@ -174,6 +265,12 @@ def _build_driver(
         inventory=inventory,
         catalog_registry=registry,
         client_factory=factory,
+        # Issue #80: the migration path now consumes
+        # ``_writable_client_factory`` for both the main SET and the
+        # rollback watchdog. Inject the SAME recording factory so a
+        # single test can observe which factory was reached for which
+        # step and which ``set`` frames were emitted.
+        writable_client_factory=factory,
     )
     driver._runtime_settings = settings
     return driver
@@ -724,8 +821,11 @@ def test_fetch_migrate_threads_sm_communities_to_migration_result(
     assert result["online_active_migrated"] == 2
     assert result["active_degraded_migrated"] == 0
     assert result["pre_existing_offline_excluded"] == 0
-    # Recording client defines ``apply_oid`` so the real-SET path
-    # runs; ``dry_run=False`` and ``would_set`` is empty.
+    # Issue #80: recording client implements the WritableSnmpClient
+    # Protocol (with ``set``); the real-SET path runs and emits the
+    # AP carrier-change SET on the wire. ``dry_run=False`` and
+    # ``would_set`` is empty because every SET went through the
+    # recording stub instead of being deferred.
     assert result["dry_run"] is False
     assert result["would_set"] == []
 
@@ -738,6 +838,324 @@ def test_fetch_migrate_threads_sm_communities_to_migration_result(
     assert "override-A" not in record_text, (
         "Community string MUST NOT appear in the audit record; only the source label travels in"
     )
+
+
+# ---------------------------------------------------------------------------
+# Issue #80 — wire-path regression tests.
+#
+# These tests pin the Tier-1 contract: when an operator authorizes a
+# migration with a valid HITL token, the helper MUST emit an SNMP
+# SET frame against the AP carrier frequency OID with the value
+# converted to kHz (per Cambium WHISP-APS-MIB for
+# ``whispApsRFConfigRadioEntry.radioFreqCarrier``). The pre-fix
+# code fell back to a typed ``dry_run=True`` because the gate
+# referenced a method that never existed on the production client.
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_migrate_emits_set_with_khz_unit_on_real_wire(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #80: ``fetch_migrate`` MUST emit a real SET frame.
+
+    Pins three contracts:
+
+    1. The driver opens the client via ``_writable_client_factory``
+       (NOT the read-only ``_client_factory``) for the main path.
+    2. The gate ``hasattr(client, "set")`` is True for a
+       WritableSnmpClient-shaped client; the dry-run fallback does
+       NOT fire.
+    3. The wire SET carries the carrier frequency in kHz
+       (``int(round(target_frequency_mhz * 1000))``) for the
+       ``migrateCarrierFrequency`` OID.
+
+    Pre-fix this test fails on the first assertion because the
+    buggy code routed through ``_client_factory`` (read-only),
+    which returns a stub WITHOUT ``set``, falling back to dry-run.
+    """
+    from nora.drivers.snmp_pmp450i import migrate as migrate_mod
+
+    inv = _build_inventory_with_sms(tmp_path, sm_luids=())
+    registry = _build_catalog(firmware="15.2.1")
+    factory = _RecordingFactory(
+        sysdescr_per_host={"192.0.2.10": "Cambium PMP 450i AP 15.2.1"}
+    )
+    settings = _settings(preflight_enabled=True)
+    driver = _build_driver(inventory=inv, registry=registry, factory=factory, settings=settings)
+
+    monkeypatch.setattr(
+        "nora.drivers.snmp_pmp450i.subscribers.search_intervention_history",
+        lambda *args, **kwargs: [],
+    )
+    monkeypatch.setattr(
+        migrate_mod,
+        "fetch_sm_table",
+        lambda **kw: _fake_sm_summary(online_luids=(), degraded_luids=()),
+    )
+    monkeypatch.setattr(migrate_mod, "_start_rollback_watchdog", lambda **kw: None)
+    monkeypatch.setattr(migrate_mod, "_cancel_rollback_watchdog", lambda *a, **kw: None)
+    monkeypatch.setattr(migrate_mod, "_wait_for_management_reachability", lambda **kw: True)
+    monkeypatch.setattr(migrate_mod, "save_intervention_record", lambda *a, **kw: {"status": "OK"})
+
+    import json
+
+    from nora.hitl.tokens import mint_token
+
+    token_obj = mint_token(
+        "tester",
+        ttl_seconds=900,
+        signing_key=SecretStr("test-snmp-migrate-wu4-hmac-key"),
+    )
+    valid_token = json.dumps(token_obj.model_dump(mode="json"))
+
+    target_mhz = 5800.0
+    expected_khz = int(round(target_mhz * 1000))  # 5_800_000
+    migrate_oid = "1.3.6.1.4.1.161.19.3.1.10.1.1.1.1"
+
+    result = migrate_mod.fetch_migrate(
+        driver=driver,
+        device_id="ap-7400-01",
+        approval_token=valid_token,
+        target_frequency_mhz=target_mhz,
+        settings=settings,
+    )
+
+    # Contract 1: dry-run did NOT fire.
+    assert result["dry_run"] is False, (
+        f"Expected the real-SET path; got dry_run=True. would_set={result['would_set']!r}"
+    )
+    assert result["would_set"] == []
+
+    # Contract 2 + 3: at least one of the recording clients emitted a
+    # ``set`` against the migrate OID with the kHz value. The
+    # migration path opens the client via ``_writable_client_factory``,
+    # which (in this test) is the same recording factory — so we
+    # aggregate ``set_calls`` across all clients the factory returned.
+    all_set_calls = [call for client in factory.clients for call in client.set_calls]
+    matching = [
+        (oid, value)
+        for oid, value in all_set_calls
+        if oid == migrate_oid and value == expected_khz
+    ]
+    assert matching, (
+        f"Expected at least one ``set({migrate_oid!r}, {expected_khz})`` on the wire; "
+        f"got set_calls={all_set_calls!r}. "
+        f"This is the issue #80 bug: production falls back to dry-run because "
+        f"the gate references a method that does not exist."
+    )
+
+
+def test_fetch_migrate_rollback_watchdog_uses_writable_client_and_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #80: rollback watchdog MUST use the writable factory too.
+
+    Pins two contracts:
+
+    1. The factory called inside ``_on_loss_of_management`` is the
+       WRITABLE factory (a fresh client is opened via
+       ``_writable_client_factory`` so the rollback SET actually
+       fires).
+    2. The rollback SET carries the prior-carrier value in kHz
+       (passthrough from the GET — the prior read is already in
+       kHz per Cambium WHISP-APS-MIB).
+
+    We capture the closure passed to ``_start_rollback_watchdog``
+    and invoke it manually so the test is deterministic (no real
+    timer is armed, no management-reachability race).
+    """
+    import json
+
+    from nora.drivers.snmp_pmp450i import migrate as migrate_mod
+    from nora.hitl.tokens import mint_token
+
+    inv = _build_inventory_with_sms(tmp_path, sm_luids=())
+    registry = _build_catalog(firmware="15.2.1")
+    factory = _RecordingFactory(
+        sysdescr_per_host={"192.0.2.10": "Cambium PMP 450i AP 15.2.1"},
+        # Issue #80: drive the prior_carrier GET response from the
+        # factory seam itself. Every client minted by ``__call__``
+        # (including the one opened by the rollback watchdog) will
+        # return 5785000 kHz for the carrier OID, so the
+        # ``prior_carrier`` capture inside `fetch_migrate` AND the
+        # subsequent rollback SET both carry the value the test
+        # asserts against. No post-hoc mutation is needed.
+        prior_carrier_khz=5785000,
+    )
+    settings = _settings(preflight_enabled=True)
+    driver = _build_driver(inventory=inv, registry=registry, factory=factory, settings=settings)
+
+    monkeypatch.setattr(
+        "nora.drivers.snmp_pmp450i.subscribers.search_intervention_history",
+        lambda *args, **kwargs: [],
+    )
+    monkeypatch.setattr(
+        migrate_mod,
+        "fetch_sm_table",
+        lambda **kw: _fake_sm_summary(online_luids=(), degraded_luids=()),
+    )
+
+    captured_closure: dict[str, Any] = {}
+
+    def _capture_rollback_closure(**kwargs: Any) -> Any:
+        # Capture the closure ``_on_loss_of_management`` so the test
+        # can invoke it deterministically. The timer token returned
+        # by the real function is unused here.
+        captured_closure["on_loss_of_management"] = kwargs["on_loss_of_management"]
+        return None
+
+    monkeypatch.setattr(
+        migrate_mod, "_start_rollback_watchdog", _capture_rollback_closure
+    )
+    monkeypatch.setattr(migrate_mod, "_cancel_rollback_watchdog", lambda *a, **kw: None)
+    monkeypatch.setattr(migrate_mod, "_wait_for_management_reachability", lambda **kw: True)
+    monkeypatch.setattr(migrate_mod, "save_intervention_record", lambda *a, **kw: {"status": "OK"})
+
+    token_obj = mint_token(
+        "tester",
+        ttl_seconds=900,
+        signing_key=SecretStr("test-snmp-migrate-wu4-hmac-key"),
+    )
+    valid_token = json.dumps(token_obj.model_dump(mode="json"))
+
+    prior_khz = 5785000  # starting carrier, in kHz (Cambium MIB unit)
+    migrate_oid = "1.3.6.1.4.1.161.19.3.1.10.1.1.1.1"
+
+    result = migrate_mod.fetch_migrate(
+        driver=driver,
+        device_id="ap-7400-01",
+        approval_token=valid_token,
+        target_frequency_mhz=5800.0,
+        settings=settings,
+    )
+
+    # The real-SET path ran (gate fires because the stub defines
+    # ``set``), the watchdog closure was captured, and the main SET
+    # was emitted on the wire.
+    assert result["dry_run"] is False
+    assert result["would_set"] == []
+
+    # Manually invoke the rollback closure. After the fix, this MUST
+    # open a fresh client via ``_writable_client_factory`` and emit
+    # ``set(migrate_oid, prior_khz)`` on it.
+    assert "on_loss_of_management" in captured_closure, (
+        "Watchdog closure was never captured — the SET path did not arm "
+        "the watchdog. Check the gate (``hasattr(client, 'set')``)."
+    )
+    captured_closure["on_loss_of_management"]()
+
+    # Look for the rollback SET across every factory-issued client.
+    rollback_set_calls = []
+    for client in factory.clients:
+        for oid, value in client.set_calls:
+            if oid == migrate_oid and value == prior_khz:
+                rollback_set_calls.append((oid, value))
+    assert rollback_set_calls, (
+        f"Expected at least one rollback ``set({migrate_oid!r}, {prior_khz})``; "
+        f"got set_calls={[(c.set_calls) for c in factory.clients]!r}. "
+        f"This is the issue #80 watchdog variant: the rollback falls back to "
+        f"dry-run because the gate references a non-existent method AND the "
+        f"rollback client is opened via the read-only factory."
+    )
+
+
+def test_fetch_migrate_dry_run_falls_back_when_client_lacks_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The dry-run seam stays: a client WITHOUT ``set`` falls back.
+
+    Issue #80: the fix preserves the WU-3 dry-run contract — a
+    client lacking the write verb (e.g. a thin read-only mock
+    used by upstream tests that do NOT want to exercise SET
+    frames) MUST still surface ``dry_run=True`` with the
+    would-be SET pair in ``would_set``. Only the GATE reference
+    changes from ``apply_oid`` (a non-existent verb) to ``set``
+    (the real WritableSnmpClient verb).
+    """
+    import json
+
+    from nora.drivers.snmp_pmp450i import migrate as migrate_mod
+    from nora.hitl.tokens import mint_token
+
+    class _ReadOnlyFactory:
+        """Returns a client that satisfies ``SnmpClient`` (read-only)."""
+
+        def __init__(self) -> None:
+            self.clients: list[_ReadOnlyClient] = []
+
+        def __call__(self, device: Any) -> Any:
+            client = _ReadOnlyClient(host=str(getattr(device, "host", "?")))
+            self.clients.append(client)
+            return client
+
+    class _ReadOnlyClient:
+        def __init__(self, *, host: str) -> None:
+            self._host = host
+            self.close_calls = 0
+
+        def get_oid(self, oid: str) -> str | int:
+            # Pre-flight sysDescr returns a string so AP reachability
+            # succeeds; the migration path's GET of prior_carrier
+            # returns an integer kHz.
+            if "1.3.6.1.4.1.161.19.3.1.10" in oid:
+                return 5785000
+            return "Cambium PMP 450i AP 15.2.1"
+
+        def walk(self, base_oid: str) -> list[tuple[str, str | int]]:
+            return []
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    ro_factory = _ReadOnlyFactory()
+    inv = _build_inventory_with_sms(tmp_path, sm_luids=())
+    registry = _build_catalog(firmware="15.2.1")
+    settings = _settings(preflight_enabled=True)
+    driver = _build_driver(inventory=inv, registry=registry, factory=ro_factory, settings=settings)
+
+    monkeypatch.setattr(
+        "nora.drivers.snmp_pmp450i.subscribers.search_intervention_history",
+        lambda *args, **kwargs: [],
+    )
+    monkeypatch.setattr(
+        migrate_mod,
+        "fetch_sm_table",
+        lambda **kw: _fake_sm_summary(online_luids=(), degraded_luids=()),
+    )
+    monkeypatch.setattr(migrate_mod, "save_intervention_record", lambda *a, **kw: {"status": "OK"})
+
+    token_obj = mint_token(
+        "tester",
+        ttl_seconds=900,
+        signing_key=SecretStr("test-snmp-migrate-wu4-hmac-key"),
+    )
+    valid_token = json.dumps(token_obj.model_dump(mode="json"))
+
+    target_mhz = 5800.0
+    # Issue #80: the ``_build_catalog`` helper now mirrors the
+    # production catalog, which points ``migrateCarrierFrequency``
+    # at the real Cambium WHISP-APS-MIB OID
+    # ``whispApsRFConfigRadioEntry.radioFreqCarrier`` (radioIndex=1):
+    # ``1.3.6.1.4.1.161.19.3.1.10.1.1.1.1``. The dry-run contract
+    # is what the helper WOULD have SET against the OID the catalog
+    # resolved at runtime.
+    migrate_oid = "1.3.6.1.4.1.161.19.3.1.10.1.1.1.1"
+
+    result = migrate_mod.fetch_migrate(
+        driver=driver,
+        device_id="ap-7400-01",
+        approval_token=valid_token,
+        target_frequency_mhz=target_mhz,
+        settings=settings,
+    )
+
+    # Dry-run fired; would_set carries the would-be SET pair.
+    # Pydantic v2 serializes the inner tuple as a list when the
+    # field is accessed via ``__getitem__``; we assert the list shape
+    # the runtime actually returns.
+    assert result["dry_run"] is True
+    assert result["would_set"] == [[migrate_oid, target_mhz]]
+    assert result["rolled_back"] is False
 
 
 __all__ = [
@@ -757,6 +1175,10 @@ __all__ = [
     "test_preflight_ip_priority_over_luid",
     "test_preflight_mixed_dict_overrides_count_reflects_matches_only",
     "test_preflight_invalid_override_key_falls_through_to_inventory",
-    # End-to-end test.
+    # End-to-end test (legacy WU-4 contract).
     "test_fetch_migrate_threads_sm_communities_to_migration_result",
+    # Issue #80 wire-path regression tests.
+    "test_fetch_migrate_emits_set_with_khz_unit_on_real_wire",
+    "test_fetch_migrate_rollback_watchdog_uses_writable_client_and_set",
+    "test_fetch_migrate_dry_run_falls_back_when_client_lacks_set",
 ]
