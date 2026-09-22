@@ -148,3 +148,10 @@ OPERATIONS.md. Out of scope for this branch — opens issue #82.
 - Pre-commit: `gga` is the local hook; signed commits are enforced on the
   remote side. Always `git commit -S`.
 - Tests: pytest with xdist; prefer in-process unit tests over subprocess boot.
+
+## Commit evidence
+
+- WU-1: `cb78e3a` — `fix(snmp_pmp450i): wire WritableSnmpClient in migrate and reboot (closes #80)`. 8 files changed, 1232 insertions, 77 deletions. SSH-signed (ED25519). Validated via `uv run pytest tests/snmp_pmp450i/ tests/test_snmp_reboot.py tests/test_snmp_migrate.py tests/test_driver_snmp450i_readonly.py` → 76/76 pass.
+- WU-2: `6cf32d9` — `docs(operations): document carrier-frequency unit convention (issue #80)`. 1 file changed, 20 insertions. SSH-signed.
+- WU-3: [#81](https://github.com/alexandervazquez98/nora/issues/81) — band-limit follow-up issue opened (out-of-scope for this PR).
+- WU-4: [#82](https://github.com/alexandervazquez98/nora/issues/82) — E2E smoke + dry-run semantics issue opened (out-of-scope for this PR).
