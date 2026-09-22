@@ -255,10 +255,17 @@ Useful flags:
 Always run `verify-install.sh` afterwards:
 
 ```bash
-sudo scripts/verify-install.sh
-# or, machine-readable for CI:
-sudo scripts/verify-install.sh --json --strict
+# Recommended (human-readable table):
+sudo nora doctor
+
+# Or machine-readable for CI:
+sudo nora doctor --json --strict
 ```
+
+`nora doctor` is a thin wrapper over `scripts/verify-install.sh --json`
+plus a `net.ipv4.ping_group_range` persistence cross-check (issue #60 /
+PR-3); the script is still available for advanced operators / direct
+shell use.
 
 `verify-install.sh` checks binary versions, paths, file modes (signing_key
 must be `0600`, `nora.env` must be `0640` or `0600`), the systemd unit

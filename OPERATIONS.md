@@ -205,7 +205,7 @@ Phases (run in order; rollback fires on any failure):
 4. **`uv sync`** to refresh dependencies.
 5. **Re-sign catalogs** under `<prefix>/data/oid-catalogs/` so the HMAC envelope matches the new tree.
 6. **`systemctl restart nora-mcp`** (skippable via `--no-restart`).
-7. **Smoke test** — `scripts/verify-install.sh --json --strict` against the upgraded install. Any FAIL or WARN aborts and triggers rollback.
+7. **Smoke test** — `scripts/verify-install.sh --json --strict` against the upgraded install. Any FAIL or WARN aborts and triggers rollback. Operators can also run `sudo nora doctor --strict` after a successful upgrade to see the same checks rendered as a human-readable table.
 
 Rollback restores the backup, restarts `nora-mcp`, and exits non-zero with a stderr line naming the failing phase + backup path.
 
@@ -224,6 +224,50 @@ sudo journalctl -u nora-mcp -n 20
 If `uv.lock` changed (new dependency pins), `uv sync` resolves and
 installs in one step. If only the catalog changed, `sign_catalog.py` is
 the only post-pull action needed.
+
+## Doctor / health check
+
+`sudo nora doctor` is the canonical operator-facing health-check command
+(issue #60 / PR-3). It reuses `scripts/verify-install.sh --json` as its
+check engine (D4: no re-implementation of the 678 lines of existing
+checks) and adds a `net.ipv4.ping_group_range` persistence cross-check
+(D10) that warns when `/etc/sysctl.d/99-nora.conf` is missing or the
+runtime sysctl still reports the distro default `1 0`.
+
+```bash
+sudo nora doctor              # human-readable table on stderr
+sudo nora doctor --json       # machine-readable JSON on stdout
+sudo nora doctor --strict     # exit 2 on any WARN (CI-friendly)
+sudo nora doctor --no-systemd # skip the systemd listener check
+sudo nora doctor --http       # also probe the MCP HTTP transport
+```
+
+| Flag | Default | Effect |
+|---|---|---|
+| `--json` | off | Emit machine-readable JSON to stdout. |
+| `--strict` | off | Exit 2 on any WARN (in addition to default exit 1 on FAIL). |
+| `--no-systemd` | off | Pass `--no-systemd` through to `verify-install.sh`. |
+| `--http` | off | Pass `--check-http` to `verify-install.sh`. |
+| `--prefix` | `/opt/nora` | Install prefix (matches install.sh). |
+| `--config-dir` | `/etc/nora` | Runtime config dir. |
+| `--state-dir` | `/var/lib/nora` | Mutable state dir. |
+| `--log-dir` | `/var/log/nora` | Log dir. |
+| `--user` | `nora` | Service-account username. |
+
+Exit codes mirror `verify-install.sh`: `0` = OK (WARN alone does not
+trip exit 1), `1` = at least one FAIL, `2` = `--strict` with any WARN.
+Output (the sysctl row is always last):
+
+```
+  CHECK                                STATUS  DETAIL
+  -----------------------------------  ------  ----------------------------------------
+  verify_install.binaries.python3      OK      Python 3.12.14
+  verify_install.binaries.uv           OK      uv 0.4.18
+  ...
+  sysctl_persistence                   OK      /etc/sysctl.d/99-nora.conf + runtime agree on `0 2147483647`
+
+  ok=N warn=N fail=N
+```
 
 ## Log interpretation
 
@@ -374,6 +418,7 @@ for the deployment guide.
 
 | Symptom (stderr)                                                                    | Likely cause                                                                | Fix                                                                                                  |
 |--------------------------------------------------------------------------------------|-----------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------|
+| Install health-check failed (any FAIL row, or exit 1 from `nora doctor`)            | `verify-install.sh` reported a degraded install (binary missing, file modes wrong, daemon unreachable, etc.) | Run `sudo nora doctor` (or `sudo nora doctor --json --strict` for CI) to drill into the failing check; fix the underlying cause (binary / file mode / systemd unit) and re-run. |
 | `nora upgrade` failed mid-flight (exit 1 with `phase=<name>` on stderr)              | NORA restored the backup automatically. Inspect the failing phase's stderr in `/var/log/nora/` and check `/var/lib/nora/upgrades/<timestamp>/MANIFEST.txt` for the SHA/ref that was active before the upgrade. | Re-run `sudo nora upgrade --ref <known-good-sha>` to land on the previous version. |
 | `CatalogVerificationError: missing signing key (NORA_OID_CATALOG_SIGNING_KEY is empty)` | `.env` not loaded, or key variable is empty                                | Confirm `/etc/nora/nora.env` contains the line; reload systemd: `systemctl daemon-reload && systemctl restart nora-mcp` |
 | `CatalogVerificationError: ... HMAC-SHA256 signature mismatch`                        | Key changed; catalog not re-signed, OR catalog was tampered                | Re-sign: `sudo -u nora -E .venv/bin/python scripts/sign_catalog.py`. If `git diff data/oid-catalogs/` shows unexpected changes, the file was modified — restore from a known-good source. |
