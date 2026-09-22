@@ -53,8 +53,11 @@ def _build_dispatch_parser() -> argparse.ArgumentParser:
             "`nora hitl mint ...` to mint a HITL approval token, "
             "`nora prompt sync ...` to push versioned system prompts "
             "to an Open WebUI instance, "
-            "or `nora upgrade ...` to safely upgrade an existing NORA "
-            "install with automatic rollback."
+            "`nora upgrade ...` to safely upgrade an existing NORA "
+            "install with automatic rollback, "
+            "or `nora doctor ...` to render the install health summary "
+            "(re-uses `scripts/verify-install.sh --json` plus a sysctl "
+            "persistence cross-check)."
         ),
     )
     subparsers = parser.add_subparsers(dest="subcommand", metavar="SUBCOMMAND")
@@ -206,6 +209,66 @@ def _build_dispatch_parser() -> argparse.ArgumentParser:
         help="Log dir (matches install.sh; default: /var/log/nora).",
     )
     upgrade_parser.add_argument(
+        "--user",
+        default="nora",
+        help="Service-account username (matches install.sh; default: nora).",
+    )
+
+    # `nora doctor` — issue #60 / PR-3 — render the install health
+    # check. Mirrors `nora prompt sync` + `nora upgrade` arg pattern
+    # (D4 / D8): headless-only (D9), explicit exit codes (0/1/2),
+    # thin renderer over `scripts/verify-install.sh --json` + a
+    # `net.ipv4.ping_group_range` persistence cross-check (D10).
+    doctor_parser = subparsers.add_parser(
+        "doctor",
+        help=(
+            "Render the install health summary as a human-readable "
+            "table (or JSON with `--json`). Reuses "
+            "`scripts/verify-install.sh --json` and adds a sysctl "
+            "persistence cross-check."
+        ),
+    )
+    doctor_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable JSON to stdout.",
+    )
+    doctor_parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="Exit 2 on any WARN (in addition to the default exit 1 on FAIL).",
+    )
+    doctor_parser.add_argument(
+        "--no-systemd",
+        action="store_true",
+        help="Pass `--no-systemd` to `verify-install.sh` (skip the systemd listener check).",
+    )
+    doctor_parser.add_argument(
+        "--http",
+        action="store_true",
+        help="Pass `--check-http` to `verify-install.sh` (probe the MCP HTTP listener).",
+    )
+    doctor_parser.add_argument(
+        "--prefix",
+        default="/opt/nora",
+        help="Install prefix (matches install.sh; default: /opt/nora).",
+    )
+    doctor_parser.add_argument(
+        "--config-dir",
+        default="/etc/nora",
+        help="Runtime config dir (matches install.sh; default: /etc/nora).",
+    )
+    doctor_parser.add_argument(
+        "--state-dir",
+        default="/var/lib/nora",
+        help="Mutable state dir (matches install.sh; default: /var/lib/nora).",
+    )
+    doctor_parser.add_argument(
+        "--log-dir",
+        default="/var/log/nora",
+        help="Log dir (matches install.sh; default: /var/log/nora).",
+    )
+    doctor_parser.add_argument(
         "--user",
         default="nora",
         help="Service-account username (matches install.sh; default: nora).",
@@ -464,6 +527,79 @@ def _dispatch_upgrade(args: argparse.Namespace) -> int:
     return 0
 
 
+def _doctor_exit_code(*, fail_count: int, warn_count: int, strict: bool) -> int:
+    """Map a doctor report's counts to the dispatcher's exit code.
+
+    Mirrors the exit-code contract in ``scripts/verify-install.sh``:
+
+    * ``0`` — every check is ``ok`` (WARN alone does NOT trip exit 1
+      unless ``--strict`` was passed).
+    * ``1`` — at least one FAIL.
+    * ``2`` — ``--strict`` AND at least one WARN (no FAIL).
+
+    Kept as a free function so the dispatcher's exit-code logic is
+    unit-testable without spinning up the whole dispatcher.
+    """
+    if fail_count > 0:
+        return 1
+    if strict and warn_count > 0:
+        return 2
+    return 0
+
+
+def _dispatch_doctor(args: argparse.Namespace) -> int:
+    """Handle ``nora doctor`` — render the install health summary.
+
+    Behaviour (mirrors the ``nora prompt sync`` dispatcher pattern):
+
+    1. Call ``doctor.run_doctor(...)`` with the kwargs from
+       ``args``. Catch ``doctor.VerifyInstallFailed`` and emit a
+       clear stderr line; return 1 (the dispatcher still prints the
+       partial report that ``run_doctor`` built so the operator
+       sees SOMETHING).
+    2. If ``args.json``: print ``doctor.render_json(report)`` to
+       stdout. Otherwise: print ``doctor.render_human(report)`` to
+       stderr (stdout stays clean for piping).
+    3. Exit code: 0 on a clean report, 1 on any FAIL, 2 on
+       ``--strict`` with any WARN.
+    """
+    # Lazy imports — keep the dispatcher's import cost paid only
+    # when `nora doctor` is invoked.
+    from nora import doctor as doctor_mod
+
+    try:
+        report = doctor_mod.run_doctor(
+            prefix=Path(args.prefix),
+            config_dir=Path(args.config_dir),
+            state_dir=Path(args.state_dir),
+            log_dir=Path(args.log_dir),
+            user=args.user,
+            skip_systemd=args.no_systemd,
+            check_http=args.http,
+        )
+    except doctor_mod.VerifyInstallFailed as exc:
+        sys.stderr.write(f"nora: doctor failed: {exc}\n")
+        if exc.stderr:
+            sys.stderr.write(f"nora: verify-install.sh stderr:\n{exc.stderr}\n")
+        return 1
+
+    # The human-render ALWAYS goes to stderr so operators running
+    # interactively (with or without `--json`) see a readable
+    # summary. CI scripts ignore stderr and consume stdout JSON.
+    sys.stderr.write(doctor_mod.render_human(report))
+    sys.stderr.flush()
+
+    if args.json:
+        sys.stdout.write(doctor_mod.render_json(report) + "\n")
+        sys.stdout.flush()
+
+    return _doctor_exit_code(
+        fail_count=report.fail_count,
+        warn_count=report.warn_count,
+        strict=args.strict,
+    )
+
+
 def _deprecation_alias_boots_mcp() -> int:
     """`nora` (no args) — emit deprecation warning then delegate to cli.main.
 
@@ -532,6 +668,12 @@ def main(argv: list[str] | None = None) -> int:
     # update procedure with pre-flight backup + automatic rollback.
     if args.subcommand == "upgrade":
         return _dispatch_upgrade(args)
+
+    # `nora doctor` → issue #60 / PR-3 — render the install health
+    # summary (re-uses `scripts/verify-install.sh --json` + a sysctl
+    # persistence cross-check).
+    if args.subcommand == "doctor":
+        return _dispatch_doctor(args)
 
     # argparse should have rejected unknown sub-commands, but if we
     # get here defensively exit non-zero.
