@@ -1210,9 +1210,7 @@ def test_fetch_migrate_real_set_still_works_via_set(
     )
 
     # Real SET path: NOT a dry-run; ``would_set`` is empty.
-    assert result["dry_run"] is False, (
-        f"set-bearing client MUST NOT enter dry-run; got {result!r}"
-    )
+    assert result["dry_run"] is False, f"set-bearing client MUST NOT enter dry-run; got {result!r}"
     assert result["would_set"] == [], (
         f"Real-SET path MUST NOT populate would_set; got {result['would_set']!r}"
     )
@@ -1224,8 +1222,7 @@ def test_fetch_migrate_real_set_still_works_via_set(
     # unit on ``radioFreqCarrier``), NOT MHz. Production converts
     # via ``int(round(target_frequency_mhz * 1000))``.
     assert canned._set_calls[0] == f"{migration_freq_oid}={target_freq_khz}", (
-        f"Real-SET path MUST emit the carrier-frequency SET in kHz; "
-        f"got {canned._set_calls[0]!r}"
+        f"Real-SET path MUST emit the carrier-frequency SET in kHz; got {canned._set_calls[0]!r}"
     )
 
 

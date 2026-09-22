@@ -15,8 +15,6 @@ of once per test.
 
 from __future__ import annotations
 
-import pytest
-
 from tests.conftest import McpStdioClient
 
 

@@ -386,8 +386,7 @@ class McpStdioClient:
     ) -> dict[str, Any]:
         if id is None:
             raise ValueError(
-                "request() is for JSON-RPC requests only; "
-                "use send_notification() for notifications"
+                "request() is for JSON-RPC requests only; use send_notification() for notifications"
             )
         frame: dict[str, Any] = {"jsonrpc": "2.0", "method": method, "id": id}
         if params is not None:
@@ -402,9 +401,7 @@ class McpStdioClient:
             assert self._proc.stdout is not None
             response_line = self._proc.stdout.readline()
             if not response_line:
-                raise RuntimeError(
-                    f"server closed stdout (no response) after method={method!r}"
-                )
+                raise RuntimeError(f"server closed stdout (no response) after method={method!r}")
             return json.loads(response_line.decode("utf-8"))
 
     def send_notification(

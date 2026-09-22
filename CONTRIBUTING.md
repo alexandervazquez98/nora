@@ -122,12 +122,11 @@ Two markers are defined in [`pyproject.toml`](pyproject.toml):
 
 ```python
 @pytest.mark.slow
-def test_my_long_running_thing():
-    ...
+def test_my_long_running_thing(): ...
+
 
 @pytest.mark.no_xdist
-def test_my_flaky_under_xdist():
-    ...
+def test_my_flaky_under_xdist(): ...
 ```
 
 - `@pytest.mark.slow` — tests that take >1 s for a non-subprocess reason

@@ -325,9 +325,7 @@ def test_subprocess_handles_malformed_json_gracefully(mcp_stdio_server) -> None:
 
     # The server must still be alive after the malformed frame.
     # A crashed server would have a non-None `poll()` returncode.
-    assert proc.poll() is None, (
-        f"Server crashed on malformed input; returncode={proc.returncode}"
-    )
+    assert proc.poll() is None, f"Server crashed on malformed input; returncode={proc.returncode}"
 
 
 def test_subprocess_silently_ignores_legacy_llm_env_keys(tmp_path: Path) -> None:

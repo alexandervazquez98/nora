@@ -252,9 +252,7 @@ def test_fetch_reboot_emits_set_on_reboot_oid(
     # The factory mints a WritableSnmpClient-shaped stub. The
     # ``rebootIfRequired`` GET returns 1 (``rebootRequired``) so
     # the firmware-vote branch fires and the SET path is reached.
-    factory = _RecordingFactory(
-        sysdescr_per_host={"192.0.2.10": "Cambium PMP 450i AP 15.2.1"}
-    )
+    factory = _RecordingFactory(sysdescr_per_host={"192.0.2.10": "Cambium PMP 450i AP 15.2.1"})
     settings = _settings()
     driver = _build_driver(inventory=inv, registry=registry, factory=factory, settings=settings)
 
@@ -358,9 +356,7 @@ def test_fetch_reboot_dry_run_falls_back_when_client_lacks_set(
     inv = _build_inventory(tmp_path)
     registry = _build_catalog(firmware="15.2.1")
     settings = _settings()
-    driver = _build_driver(
-        inventory=inv, registry=registry, factory=ro_factory, settings=settings
-    )
+    driver = _build_driver(inventory=inv, registry=registry, factory=ro_factory, settings=settings)
 
     monkeypatch.setattr(reboot_mod, "save_intervention_record", lambda *a, **kw: {"status": "OK"})
 
