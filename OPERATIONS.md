@@ -341,7 +341,7 @@ for the deployment guide.
 | `correlate_sector_interference` returns zero conflicts for a tower you know has carriers | OpenChat POST_MIGRATION records are missing `carrier_frequency_mhz`     | Re-run OpenChat's `deploy_v7_intervention_memory.py` against the production `webui.db` so the new shape overwrites old records. |
 | systemd unit fails with `status=203/EXEC`                                             | The venv path in `ExecStart=` is wrong                                     | `ls -l /opt/nora/.venv/bin/nora-mcp`; if missing, re-run `uv sync`.                                 |
 | `DeprecationWarning: python -m nora is deprecated`                                    | Something invoked the legacy alias                                         | Use `nora-mcp` instead. The alias is kept only for backward compatibility.                            |
-| `probes.persist.ok: zero samples after 60s` | `net.ipv4.ping_group_range` does not cover the `nora` gid. Verify with `sysctl net.ipv4.ping_group_range`. See INSTALL.md "Unprivileged ICMP". |
+| `probes.persist.ok: zero samples after 60s` | `net.ipv4.ping_group_range` does not cover the `nora` gid. Verify with `sysctl -n net.ipv4.ping_group_range` (must print `0 2147483647`) AND that `/etc/sysctl.d/99-nora.conf` is present and readable (`sudo scripts/install.sh` writes both). See INSTALL.md "Persistent sysctl for the ICMP probe". |
 | `icmp_run_sector_stability_probe → samples_count: 0` | Same root cause as above. The daemon loop exits with all samples received=False because the kernel rejected every sendto on the unprivileged ICMP datagram socket. |
 
 ## Tier-1 operator-clearance gate (issue #43)

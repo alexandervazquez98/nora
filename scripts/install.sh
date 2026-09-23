@@ -465,7 +465,9 @@ phase_unprivileged_icmp() {
     # socket.SOCK_DGRAM, which only requires the sender's gid to be in
     # `net.ipv4.ping_group_range`. Mirror the existing "skip when already
     # configured" pattern of phase_signing_key above so a re-run is a
-    # no-op on already-configured hosts.
+    # no-op on already-configured hosts. Durability across reboots is the
+    # job of the NEXT phase (`phase_persist_sysctl`); this phase only
+    # touches the running kernel.
     if ! command -v sysctl >/dev/null 2>&1; then
         warn "sysctl not on PATH; skipping net.ipv4.ping_group_range wire-up"
         return 0
@@ -481,6 +483,59 @@ phase_unprivileged_icmp() {
             log "ping_group_range already set to '${current_range}'; leaving unchanged"
             ;;
     esac
+}
+
+phase_persist_sysctl() {
+    # PR-1 / installer-upgrade-and-doctor.md: persist
+    # `net.ipv4.ping_group_range` across reboots so the unprivileged ICMP
+    # sysctl that `phase_unprivileged_icmp` applies at runtime survives a
+    # restart. `/etc/sysctl.d/99-nora.conf` is the canonical sysctl
+    # drop-in directory on Debian/Ubuntu/RHEL; systemd-sysctl reads it on
+    # boot and on `sysctl --system`. Without this file, a reboot silently
+    # reverts the runtime sysctl to the distro default (`1 0`) and the
+    # ICMP probe stops working until `nora doctor` (or a manual
+    # `sysctl -w`) is run again.
+    #
+    # Idempotent: when the file already carries the correct key/value
+    # pair, log `[SKIP]` and still re-run `sysctl --system` so a host
+    # that booted before this script landed still gets the value applied
+    # (e.g. legacy installs where the sysctl service didn't pick up the
+    # drop-in on the previous boot).
+    local conf="/etc/sysctl.d/99-nora.conf"
+    local expected_pattern='^net\.ipv4\.ping_group_range[[:space:]]*=[[:space:]]*0[[:space:]]+2147483647[[:space:]]*$'
+
+    if [ -f "${conf}" ] && grep -E "${expected_pattern}" "${conf}" >/dev/null 2>&1; then
+        printf '[SKIP] %s already persists net.ipv4.ping_group_range = 0 2147483647\n' "${conf}" >&2
+        if command -v sysctl >/dev/null 2>&1; then
+            run "sysctl --system (re-apply persisted drop-ins)" "sysctl --system"
+        fi
+        return 0
+    fi
+
+    # File present with a DIFFERENT value for the key — refuse to
+    # overwrite silently. The operator may have placed the file
+    # intentionally (multi-tenant host, narrower range, audit policy).
+    if [ -f "${conf}" ] && grep -E '^net\.ipv4\.ping_group_range[[:space:]]*=' "${conf}" >/dev/null 2>&1; then
+        local existing
+        existing="$(grep -E '^net\.ipv4\.ping_group_range[[:space:]]*=' "${conf}" || true)"
+        fail "${conf} has '${existing}' — refusing to overwrite. Set 'net.ipv4.ping_group_range = 0 2147483647' manually or remove the file and re-run."
+        return 1
+    fi
+
+    # Write the file. `install -m 0644 /dev/null FILE` creates an empty
+    # FILE with the distro-canonical perms for sysctl drop-ins. We then
+    # append the key/value pair. Ownership falls out from the caller
+    # (install.sh is documented to run via `sudo`, so the file lands
+    # root-owned on Debian/Ubuntu/RHEL). This pattern matches the
+    # `phase_systemd` unit-file install above and avoids the `tee`
+    # alternative (which can leak content to a world-readable pipe on
+    # older bash).
+    run "write /etc/sysctl.d/99-nora.conf" \
+        "install -m 0644 /dev/null '${conf}' && printf '%s\n' 'net.ipv4.ping_group_range = 0 2147483647' >> '${conf}'"
+
+    if command -v sysctl >/dev/null 2>&1; then
+        run "sysctl --system (apply new persisted drop-in)" "sysctl --system"
+    fi
 }
 
 phase_summary() {
@@ -502,6 +557,7 @@ phase_summary() {
   Log dir        : ${LOG_DIR}
   Service user   : ${USER_NAME}
   Signing key    : ${masked}
+  Sysctl drop-in : /etc/sysctl.d/99-nora.conf
 
   Next step: sudo scripts/verify-install.sh
 SUMMARY
@@ -541,6 +597,7 @@ main() {
     fi
 
     phase_unprivileged_icmp || { fail "phase_unprivileged_icmp failed"; exit 1; }
+    phase_persist_sysctl   || { fail "phase_persist_sysctl failed"; exit 1; }
 
     phase_summary
     return 0

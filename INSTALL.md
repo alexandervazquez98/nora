@@ -130,6 +130,27 @@ sudo systemctl status nora-mcp           # should be "active (running)"
 sudo journalctl -u nora-mcp -n 50        # should show "nora-mcp boot complete"
 ```
 
+### Persistent sysctl for the ICMP probe (automatic under `install.sh`)
+
+The unprivileged ICMP probe (`issue #61` — sector stability) needs
+`net.ipv4.ping_group_range` to cover the `nora` user. `sudo scripts/install.sh`
+writes `/etc/sysctl.d/99-nora.conf` and runs `sysctl --system` so the
+value survives a reboot without any further operator action. Verify
+with:
+
+```bash
+sysctl -n net.ipv4.ping_group_range      # must print "0 2147483647"
+cat /etc/sysctl.d/99-nora.conf           # must show the matching key/value
+```
+
+Manual operators (no `install.sh`) can do the same by hand — see the
+[sysctl wire-up](#sysctl-wire-up) recipe further down. The script
+path is idempotent: a re-run on a host where `/etc/sysctl.d/99-nora.conf`
+already carries the correct value emits `[SKIP]`. If the file is
+present with a different `net.ipv4.ping_group_range` value, the
+script refuses to overwrite and prints `[FAIL]` with the existing
+line so the operator can decide manually.
+
 ## 6. Synchronise prompts to Open WebUI (recommended for chat-front-end deployments)
 
 System prompts are versioned in Git and exported to Open WebUI as
@@ -222,7 +243,9 @@ correlate_sector_interference
 
 ## Automated install
 
-Steps 1–5 above are reproducible from a single shell script:
+Steps 1–5 above plus the persistent `ping_group_range` sysctl
+(see step 5's *Persistent sysctl for the ICMP probe* sub-section) are
+reproducible from a single shell script:
 
 ```bash
 sudo scripts/install.sh
@@ -363,6 +386,13 @@ hardening (`PrivateDevices=true`, `NoNewPrivileges=true`) shipped
 with NORA.
 
 ### sysctl wire-up
+
+> **If you used `sudo scripts/install.sh`, this is already done.** The
+> installer writes `/etc/sysctl.d/99-nora.conf`, runs `sysctl --system`,
+> and surfaces `Sysctl drop-in : /etc/sysctl.d/99-nora.conf` in its
+> summary block. The recipe below is the manual fallback for operators
+> who bypass `install.sh` (containers, custom packagers, air-gapped
+> minimal hosts).
 
 Set the host's `ping_group_range` to cover the `nora` group:
 

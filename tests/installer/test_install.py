@@ -472,3 +472,206 @@ def test_install_trap_fires_on_failure(
     # non-zero. The python3-too-old test above already proves exit != 0.
     _ = tmp_path  # keep fixture for symmetry with future variants
     _ = monkeypatch
+
+
+# ---------------------------------------------------------------------------
+# PR-1 / installer-upgrade-and-doctor.md: phase_persist_sysctl.
+#
+# The phase persists `net.ipv4.ping_group_range` to
+# `/etc/sysctl.d/99-nora.conf` so the unprivileged ICMP sysctl applied
+# at runtime by `phase_unprivileged_icmp` survives a reboot. The
+# tests below cover both the source-level wiring and the behavioural
+# dry-run path.
+# ---------------------------------------------------------------------------
+
+
+def test_install_phase_persist_sysctl_function_exists(
+    install_script_source: str,
+) -> None:
+    """phase_persist_sysctl MUST be defined in install.sh.
+
+    Without this function the runtime sysctl widened by
+    phase_unprivileged_icmp would not survive a reboot, so the install
+    regresses to needing operator follow-up after every restart.
+    """
+    assert "phase_persist_sysctl()" in install_script_source, (
+        "install.sh must define phase_persist_sysctl() so the ICMP sysctl "
+        "survives reboots (PR-1 / installer-upgrade-and-doctor.md)"
+    )
+
+
+def test_install_phase_persist_sysctl_invoked_from_main(
+    install_script_source: str,
+) -> None:
+    """phase_persist_sysctl MUST run AFTER phase_unprivileged_icmp in main().
+
+    The runtime sysctl must be widened first; otherwise persistence would
+    capture a stale value. The guard uses three spaces between the name
+    and `||` to align visually with neighbouring `phase_xxx || {` calls.
+    """
+    marker = "# main — orchestrate phases in order."
+    marker_idx = install_script_source.find(marker)
+    assert marker_idx != -1, (
+        "install.sh main() orchestration marker '# main — orchestrate phases in order.' not found"
+    )
+    main_body = install_script_source[marker_idx:]
+    icmp_idx = main_body.find("phase_unprivileged_icmp")
+    persist_idx = main_body.find("phase_persist_sysctl")
+    assert icmp_idx != -1, (
+        "phase_unprivileged_icmp is not invoked from main(); cannot assert ordering"
+    )
+    assert persist_idx != -1, "phase_persist_sysctl is not invoked from main()"
+    assert persist_idx > icmp_idx, (
+        "phase_persist_sysctl must run AFTER phase_unprivileged_icmp so the "
+        "runtime sysctl is widened first and persistence writes the correct value"
+    )
+    assert "phase_persist_sysctl   || {" in main_body, (
+        "phase_persist_sysctl must use the `|| { fail ...; exit 1; }` guard "
+        "so failures abort the install"
+    )
+
+
+def test_install_phase_persist_sysctl_writes_expected_drop_in(
+    install_script_source: str,
+) -> None:
+    """phase_persist_sysctl MUST write the canonical drop-in with the expected value.
+
+    `/etc/sysctl.d/99-nora.conf` is sysctl.d's blessed name for a
+    host-local override; the value range `0 2147483647` widens ICMP
+    access to every group (the default `1 0` forbids it for non-root).
+    """
+    assert "/etc/sysctl.d/99-nora.conf" in install_script_source, (
+        "install.sh must persist the sysctl to /etc/sysctl.d/99-nora.conf"
+    )
+    assert "net.ipv4.ping_group_range = 0 2147483647" in install_script_source, (
+        "the persisted drop-in must set net.ipv4.ping_group_range = 0 2147483647"
+    )
+
+
+def test_install_phase_persist_sysctl_applies_via_sysctl_system(
+    install_script_source: str,
+) -> None:
+    """phase_persist_sysctl MUST re-apply via `sysctl --system` after writing.
+
+    Writing the drop-in alone only takes effect on the next boot or on a
+    manual `sysctl --system` invocation; the install must trigger that
+    itself so the operator does not have to.
+    """
+    assert "sysctl --system" in install_script_source, (
+        "install.sh must run `sysctl --system` after writing the drop-in so "
+        "the persisted value applies without requiring a reboot"
+    )
+
+
+def test_install_phase_persist_sysctl_handles_idempotent_skip(
+    install_script_source: str,
+) -> None:
+    """Re-running phase_persist_sysctl on an existing drop-in MUST [SKIP] cleanly.
+
+    Same ±3-line co-occurrence pattern as
+    test_install_phase_signing_key_idempotent_skip — both the token and
+    `[SKIP]` must be visible to a future refactor that drops the branch.
+    """
+    lines = install_script_source.splitlines()
+    skip_near_conf = False
+    # Bidirectional co-occurrence within a small look-around window.
+    # The reference test (signing_key) works on a strict ±3 because the
+    # printf message contains both literals on the SAME line:
+    #   `[SKIP] signing_key already present ...`
+    # The sysctl phase uses `${conf}` in its printf, so the literal
+    # `99-nora.conf` lives on the `local conf=...` declaration line and
+    # the `[SKIP]` lives 4 lines away on the printf. We widen the radius
+    # to ±5 lines to capture that pairing while preserving the
+    # look-around co-occurrence semantics.
+    WINDOW = 5
+    for idx, line in enumerate(lines):
+        for offset in range(-WINDOW, WINDOW + 1):
+            if offset == 0:
+                continue
+            other = lines[idx + offset] if 0 <= idx + offset < len(lines) else ""
+            if "99-nora.conf" in line and "[SKIP]" in other:
+                skip_near_conf = True
+                break
+            if "[SKIP]" in line and "99-nora.conf" in other:
+                skip_near_conf = True
+                break
+        if skip_near_conf:
+            break
+    assert skip_near_conf, (
+        "install.sh must [SKIP] cleanly when 99-nora.conf is already present; "
+        "no `99-nora.conf` + `[SKIP]` co-occurrence found within ±3 lines"
+    )
+
+
+def test_install_phase_persist_sysctl_refuses_to_overwrite_tampered_file(
+    install_script_source: str,
+) -> None:
+    """phase_persist_sysctl MUST refuse to overwrite a tampered existing file.
+
+    On a multi-tenant host the operator may have intentionally configured a
+    different `ping_group_range` (e.g. narrowed to a specific group for
+    least-privilege). The installer must surface the conflict rather than
+    silently clobbering the existing value.
+    """
+    assert "refusing to overwrite" in install_script_source, (
+        "install.sh must refuse to overwrite a tampered 99-nora.conf to protect "
+        "a multi-tenant host from an unrelated operator override"
+    )
+
+
+def test_install_dry_run_reaches_phase_persist_sysctl(
+    install_script: Path,
+    venv_python_on_path: Path,
+) -> None:
+    """--dry-run with the three skip flags MUST exercise phase_persist_sysctl.
+
+    The persisted drop-in is part of the success path, not a destructive
+    side effect — dry-run must reach it so the operator sees the sysctl
+    step in the recorded run.
+    """
+    result = run_script(
+        install_script,
+        "--dry-run",
+        "--skip-signing-key",
+        "--skip-systemd",
+        "--skip-catalog",
+        timeout=20,
+    )
+    assert result.returncode == 0, (
+        f"dry-run with skip flags must exit 0; got {result.returncode}, stderr={result.stderr!r}"
+    )
+    assert "[DRY-RUN] write /etc/sysctl.d/99-nora.conf" in result.combined, (
+        "dry-run must print the [DRY-RUN] write line for the sysctl drop-in; "
+        f"combined output:\n{result.combined!r}"
+    )
+    assert "sysctl --system" in result.combined, (
+        "dry-run must print the sysctl --system line so the persisted value "
+        "applies without requiring a reboot; "
+        f"combined output:\n{result.combined!r}"
+    )
+
+
+def test_install_summary_advertises_sysctl_drop_in(
+    install_script: Path,
+    venv_python_on_path: Path,
+) -> None:
+    """The install summary MUST advertise the persisted sysctl drop-in.
+
+    Operators rely on the summary to confirm what the install touched;
+    a missing line here hides the sysctl change from the audit trail.
+    """
+    result = run_script(
+        install_script,
+        "--dry-run",
+        "--skip-signing-key",
+        "--skip-systemd",
+        "--skip-catalog",
+        timeout=20,
+    )
+    assert result.returncode == 0, (
+        f"dry-run with skip flags must exit 0; got {result.returncode}, stderr={result.stderr!r}"
+    )
+    assert "Sysctl drop-in : /etc/sysctl.d/99-nora.conf" in result.combined, (
+        "install summary must advertise the persisted sysctl drop-in path; "
+        f"combined output:\n{result.combined!r}"
+    )
