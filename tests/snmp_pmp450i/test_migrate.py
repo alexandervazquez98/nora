@@ -871,9 +871,7 @@ def test_fetch_migrate_emits_set_with_khz_unit_on_real_wire(
 
     inv = _build_inventory_with_sms(tmp_path, sm_luids=())
     registry = _build_catalog(firmware="15.2.1")
-    factory = _RecordingFactory(
-        sysdescr_per_host={"192.0.2.10": "Cambium PMP 450i AP 15.2.1"}
-    )
+    factory = _RecordingFactory(sysdescr_per_host={"192.0.2.10": "Cambium PMP 450i AP 15.2.1"})
     settings = _settings(preflight_enabled=True)
     driver = _build_driver(inventory=inv, registry=registry, factory=factory, settings=settings)
 
@@ -927,9 +925,7 @@ def test_fetch_migrate_emits_set_with_khz_unit_on_real_wire(
     # aggregate ``set_calls`` across all clients the factory returned.
     all_set_calls = [call for client in factory.clients for call in client.set_calls]
     matching = [
-        (oid, value)
-        for oid, value in all_set_calls
-        if oid == migrate_oid and value == expected_khz
+        (oid, value) for oid, value in all_set_calls if oid == migrate_oid and value == expected_khz
     ]
     assert matching, (
         f"Expected at least one ``set({migrate_oid!r}, {expected_khz})`` on the wire; "
@@ -998,9 +994,7 @@ def test_fetch_migrate_rollback_watchdog_uses_writable_client_and_set(
         captured_closure["on_loss_of_management"] = kwargs["on_loss_of_management"]
         return None
 
-    monkeypatch.setattr(
-        migrate_mod, "_start_rollback_watchdog", _capture_rollback_closure
-    )
+    monkeypatch.setattr(migrate_mod, "_start_rollback_watchdog", _capture_rollback_closure)
     monkeypatch.setattr(migrate_mod, "_cancel_rollback_watchdog", lambda *a, **kw: None)
     monkeypatch.setattr(migrate_mod, "_wait_for_management_reachability", lambda **kw: True)
     monkeypatch.setattr(migrate_mod, "save_intervention_record", lambda *a, **kw: {"status": "OK"})

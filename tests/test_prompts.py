@@ -563,7 +563,6 @@ def test_tool_specs_keep_tier_based_schema(tmp_path: Path) -> None:
     fields. This is the regression test that proves WU-1 did NOT touch
     the tool-spec code path.
     """
-    import nora  # local import — keeps module-level imports tight.
 
     tool_specs_dir = tmp_path / "tool_specs"
     tool_specs_dir.mkdir()

@@ -386,8 +386,7 @@ class McpStdioClient:
     ) -> dict[str, Any]:
         if id is None:
             raise ValueError(
-                "request() is for JSON-RPC requests only; "
-                "use send_notification() for notifications"
+                "request() is for JSON-RPC requests only; use send_notification() for notifications"
             )
         frame: dict[str, Any] = {"jsonrpc": "2.0", "method": method, "id": id}
         if params is not None:
@@ -402,9 +401,7 @@ class McpStdioClient:
             assert self._proc.stdout is not None
             response_line = self._proc.stdout.readline()
             if not response_line:
-                raise RuntimeError(
-                    f"server closed stdout (no response) after method={method!r}"
-                )
+                raise RuntimeError(f"server closed stdout (no response) after method={method!r}")
             return json.loads(response_line.decode("utf-8"))
 
     def send_notification(
@@ -620,7 +617,16 @@ def mcp_stdio_server(
     # Wait for the server to be ready by probing `initialize`. FastMCP's
     # stdio server is "ready" the moment the subprocess boots; we just
     # need to make sure it didn't crash on startup. Poll briefly with
-    # `initialize`; if it responds, the server is up.
+    # `initialize`; if it responds with id=1 (the request id we sent),
+    # the server is up.
+    #
+    # NOTE: if `initialize` returns a JSON-RPC NOTIFICATION (no `id`
+    # field) instead of a response, the server crashed mid-handshake.
+    # The FastMCP ``exception_handler`` middleware emits
+    # ``{"method": "notifications/message", "params": {"level": "error",
+    # "data": "Internal Server Error"}}`` and the actual traceback lives
+    # in the subprocess stderr. Reading that stderr in the failure path
+    # is the only way the operator/CI sees the real cause.
     ready_deadline = time.monotonic() + 10.0
     while time.monotonic() < ready_deadline:
         if proc.poll() is not None:
@@ -636,7 +642,23 @@ def mcp_stdio_server(
             )
         try:
             client = McpStdioClient(proc)
-            client.initialize()
+            init_reply = client.initialize()
+            if "id" not in init_reply:
+                # Server emitted a notification instead of a reply.
+                # Drain stderr to surface the traceback.
+                err = b""
+                try:
+                    assert proc.stderr is not None
+                    err = proc.stderr.read() or b""
+                except Exception:
+                    pass
+                proc.kill()
+                proc.wait()
+                pytest.fail(
+                    f"nora-mcp boot returned an error notification instead of "
+                    f"an initialize reply: {init_reply!r}; "
+                    f"stderr: {err.decode(errors='replace')!r}"
+                )
             break
         except Exception:
             time.sleep(0.1)

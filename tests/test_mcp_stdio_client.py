@@ -14,13 +14,11 @@ paying the cost of booting `nora-mcp` (~1.3 s) per assertion.
 
 from __future__ import annotations
 
-import json
 import subprocess
 import sys
 import textwrap
 
 from tests.conftest import McpStdioClient
-
 
 _ECHO_SERVER = textwrap.dedent(
     """
