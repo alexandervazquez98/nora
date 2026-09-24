@@ -494,6 +494,232 @@ def test_resolve_sm_community_luid_override_when_no_device() -> None:
 
 
 # ---------------------------------------------------------------------------
+# WU-1 (issue #92) — ``_resolve_sm_device`` resolves by IP, not by
+# substring scan over ``device_id``. Ad-hoc registered SMs (whose
+# ``device_id`` is ``adhoc-{host}-{hex6}`` and contains no LUID
+# substring) MUST resolve when the AP reports the SM's IP. The
+# legacy substring fallback is preserved as a last-resort tier for
+# YAML inventories where the AP may not report ``ip_address``.
+# ---------------------------------------------------------------------------
+
+
+def _build_driver_with_inventory(
+    *,
+    tmp_path: Path,
+    inventory: Inventory,
+) -> Any:
+    """Build a driver wrapping the given ``inventory`` (frozen or mutable).
+
+    Issue #92: the WU-1 tests need to register ad-hoc devices via
+    ``MutableInventory`` so the IP-based resolver can find them. The
+    factory only cares about ``inventory``; the catalog and client
+    factory are placeholders because the helper does not touch them.
+    """
+    registry = _build_catalog(firmware="15.2.1")
+    factory = _RecordingFactory()
+    settings = _settings(preflight_enabled=True)
+    return _build_driver(inventory=inventory, registry=registry, factory=factory, settings=settings)
+
+
+def _build_ap_only_inventory(tmp_path: Path) -> Inventory:
+    """Hermetic inventory with ONLY the AP — no SMs.
+
+    Issue #92: the WU-1 resolver tests register SMs dynamically
+    via ``MutableInventory`` so the tests do not have to re-seed
+    a YAML for every permutation.
+    """
+    payload = {
+        "devices": [
+            {
+                "device_id": "ap-7400-01",
+                "vendor": "cambium",
+                "model": "pmp450i",
+                "firmware": "15.2.1",
+                "host": "192.0.2.10",
+                "snmp_version": "v2c",
+                "community": "change-me-v2c",
+            },
+        ]
+    }
+    inv_path = tmp_path / "devices.yaml"
+    inv_path.write_text(yaml.safe_dump(payload))
+    return Inventory.from_yaml(inv_path)
+
+
+def _make_adhoc_device(host: str, device_id_suffix: str = "aabbcc") -> Device:
+    """Return a frozen ``Device`` shaped like ``DeviceResolver.build`` output.
+
+    Mirrors ``tests/test_mutable_inventory.py::_sample_device`` but
+    parameterises the host so each test pins its own IP.
+    """
+    from nora.drivers.resolver import DeviceResolver, SnmpCredentials
+
+    creds = SnmpCredentials(community=SecretStr("change-me-v2c"))
+    # ``DeviceResolver.build`` injects ``secrets.token_hex(3)``; we
+    # override the device_id deterministically for the test so the
+    # assertion is stable.
+    built = DeviceResolver.build(host, "v2c", creds)
+    expected_prefix = f"adhoc-{host}-"
+    assert built.device_id.startswith(expected_prefix), (
+        f"DeviceResolver contract changed: device_id={built.device_id!r}"
+    )
+    # Replace the random suffix with a deterministic one so the test
+    # does not flake if the resolver changes its entropy source.
+    return built.model_copy(update={"device_id": expected_prefix + device_id_suffix})
+
+
+def test_resolve_sm_device_by_ip_when_adhoc_registered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #92 — ad-hoc registered SM resolves by IP, not by LUID substring.
+
+    The bug: ``DeviceResolver.build`` produces a ``device_id`` of
+    ``adhoc-{host}-{hex6}`` which contains no LUID substring, so the
+    legacy resolver returns ``None`` and the orchestrator reports
+    ``MISSING_INVENTORY_ENTRY`` even after a successful
+    ``register_device`` call. The fix: resolve by IP using the value
+    the AP reports in its SM-table subtree walk.
+    """
+    from nora.drivers.mutable_inventory import MutableInventory
+    from nora.drivers.snmp_pmp450i.migrate import _resolve_sm_device
+
+    base = _build_ap_only_inventory(tmp_path)
+    inv = MutableInventory(base=base)
+    adhoc = _make_adhoc_device(host="192.0.2.20", device_id_suffix="deadbe")
+    inv.register(adhoc)
+
+    monkeypatch.setattr(
+        "nora.drivers.snmp_pmp450i.subscribers.search_intervention_history",
+        lambda *args, **kwargs: [],
+    )
+    driver = _build_driver_with_inventory(tmp_path=tmp_path, inventory=inv)
+
+    # The AP reports LUID "18" at IP 192.0.2.20 (the IP we registered).
+    resolved = _resolve_sm_device(driver, "18", sm_ip="192.0.2.20")
+    assert resolved is not None, (
+        "Ad-hoc registered SM MUST resolve when the AP reports its IP; "
+        "this is the core regression for issue #92."
+    )
+    assert resolved.device_id == "adhoc-192.0.2.20-deadbe"
+    assert resolved.host == "192.0.2.20"
+
+
+def test_resolve_sm_device_returns_none_for_unknown_ip_and_no_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unknown IP + no inventory entry + no override → ``None``.
+
+    The pre-flight surfaces ``MISSING_INVENTORY_ENTRY`` for this
+    case; the helper itself stays narrow (does not consult
+    ``sm_communities`` — the caller does).
+    """
+    from nora.drivers.mutable_inventory import MutableInventory
+    from nora.drivers.snmp_pmp450i.migrate import _resolve_sm_device
+
+    inv = MutableInventory(base=_build_ap_only_inventory(tmp_path))
+    monkeypatch.setattr(
+        "nora.drivers.snmp_pmp450i.subscribers.search_intervention_history",
+        lambda *args, **kwargs: [],
+    )
+    driver = _build_driver_with_inventory(tmp_path=tmp_path, inventory=inv)
+
+    # No device at 192.0.2.99; AP reports LUID "99" at that IP.
+    resolved = _resolve_sm_device(driver, "99", sm_ip="192.0.2.99")
+    assert resolved is None
+
+
+def test_resolve_sm_device_no_substring_collision_single_digit_luid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Single-digit LUID must NOT collide via substring against ad-hoc device_ids.
+
+    The legacy fallback ``if luid in device_id`` matched any
+    device_id containing the LUID digit as a substring — the bug.
+    For LUID ``"2"`` and an ad-hoc device at host ``192.0.2.20`` the
+    substring matches on both the host IP and the hex suffix. With
+    IP-based resolution, the LUID digit never enters the matching
+    logic.
+    """
+    from nora.drivers.mutable_inventory import MutableInventory
+    from nora.drivers.snmp_pmp450i.migrate import _resolve_sm_device
+
+    inv = MutableInventory(base=_build_ap_only_inventory(tmp_path))
+    adhoc = _make_adhoc_device(host="192.0.2.20", device_id_suffix="2badba")
+    inv.register(adhoc)
+
+    monkeypatch.setattr(
+        "nora.drivers.snmp_pmp450i.subscribers.search_intervention_history",
+        lambda *args, **kwargs: [],
+    )
+    driver = _build_driver_with_inventory(tmp_path=tmp_path, inventory=inv)
+
+    # AP reports LUID "2" at IP 192.0.2.20. The IP tier matches
+    # correctly; the helper must NOT return None just because the
+    # LUID digit is a substring of the device_id.
+    resolved = _resolve_sm_device(driver, "2", sm_ip="192.0.2.20")
+    assert resolved is not None
+    assert resolved.host == "192.0.2.20"
+
+
+def test_resolve_sm_device_legacy_luid_lookup_still_works(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Legacy YAML inventory (``sm-7400-<luid>``) with NO AP-reported IP.
+
+    Per decision #1 the substring fallback is preserved as tier 3.
+    When the AP does not report ``ip_address`` (legacy radios) and
+    the inventory uses the ``sm-7400-<luid>`` convention, the helper
+    must STILL find the device.
+    """
+    from nora.drivers.mutable_inventory import MutableInventory
+    from nora.drivers.snmp_pmp450i.migrate import _resolve_sm_device
+
+    inv = MutableInventory(base=_build_inventory_with_sms(tmp_path, sm_luids=("001",)))
+
+    monkeypatch.setattr(
+        "nora.drivers.snmp_pmp450i.subscribers.search_intervention_history",
+        lambda *args, **kwargs: [],
+    )
+    driver = _build_driver_with_inventory(tmp_path=tmp_path, inventory=inv)
+
+    # AP reports LUID "001" with an EMPTY ip_address (legacy radio).
+    resolved = _resolve_sm_device(driver, "001", sm_ip="")
+    assert resolved is not None
+    assert resolved.device_id == "sm-7400-001"
+
+
+def test_resolve_sm_device_by_ip_prefers_ip_over_legacy_match(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When two devices COULD match, IP wins.
+
+    A YAML device ``sm-7400-018`` at ``192.0.2.30`` (substring
+    would match LUID ``"018"``) AND an ad-hoc device at
+    ``192.0.2.20`` coexist. The AP reports LUID ``"018"`` at IP
+    ``192.0.2.20``. The IP tier wins; the helper returns the
+    ad-hoc device, NOT the YAML one.
+    """
+    from nora.drivers.mutable_inventory import MutableInventory
+    from nora.drivers.snmp_pmp450i.migrate import _resolve_sm_device
+
+    inv = MutableInventory(base=_build_inventory_with_sms(tmp_path, sm_luids=("018",)))
+    adhoc = _make_adhoc_device(host="192.0.2.20", device_id_suffix="beef01")
+    inv.register(adhoc)
+
+    monkeypatch.setattr(
+        "nora.drivers.snmp_pmp450i.subscribers.search_intervention_history",
+        lambda *args, **kwargs: [],
+    )
+    driver = _build_driver_with_inventory(tmp_path=tmp_path, inventory=inv)
+
+    resolved = _resolve_sm_device(driver, "018", sm_ip="192.0.2.20")
+    assert resolved is not None
+    assert resolved.device_id == "adhoc-192.0.2.20-beef01", (
+        f"IP tier MUST win over substring tier; got {resolved.device_id!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Pre-flight integration tests — thread overrides through
 # ``_validate_sm_communities`` and inspect the resulting report.
 # ---------------------------------------------------------------------------
@@ -503,14 +729,21 @@ def _run_preflight(
     *,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    sm_luids: tuple[str, ...],
+    sm_entries: list[tuple[str, str]],
     sm_communities: dict[str, str] | None,
     factory: _RecordingFactory,
 ) -> Any:
-    """Run the WU-A pre-flight with ``sm_communities`` and return the report."""
+    """Run the WU-A pre-flight with ``sm_communities`` and return the report.
+
+    Issue #92: ``sm_entries`` carries ``(luid, ip)`` pairs sourced from
+    the AP's SM-table subtree walk. The IP is the canonical identifier
+    for ad-hoc registered SMs whose ``device_id`` is
+    ``adhoc-{host}-{hex6}``. The IP defaults to ``""`` for tests that
+    only exercise the legacy inventory-keyed path.
+    """
     from nora.drivers.snmp_pmp450i.migrate import _validate_sm_communities
 
-    inv = _build_inventory_with_sms(tmp_path, sm_luids=sm_luids)
+    inv = _build_inventory_with_sms(tmp_path, sm_luids=tuple(luid for luid, _ in sm_entries))
     registry = _build_catalog(firmware="15.2.1")
     settings = _settings(preflight_enabled=True)
     device = inv.get("ap-7400-01")
@@ -526,7 +759,7 @@ def _run_preflight(
     return _validate_sm_communities(
         driver=driver,
         device=device,
-        sm_luids=list(sm_luids),
+        sm_entries=sm_entries,
         client_factory=factory,
         sm_communities=sm_communities,
     )
@@ -546,7 +779,7 @@ def test_preflight_legacy_behaviour_preserved_when_no_overrides(
         report = _run_preflight(
             tmp_path=tmp_path,
             monkeypatch=monkeypatch,
-            sm_luids=("001", "002"),
+            sm_entries=[("001", "192.0.2.20"), ("002", "192.0.2.21")],
             sm_communities=overrides,
             factory=factory,
         )
@@ -578,7 +811,7 @@ def test_preflight_ip_override_threads_override_community(
     report = _run_preflight(
         tmp_path=tmp_path,
         monkeypatch=monkeypatch,
-        sm_luids=("001", "002"),
+        sm_entries=[("001", "192.0.2.20"), ("002", "192.0.2.21")],
         sm_communities={"192.0.2.20": "override-A"},
         factory=factory,
     )
@@ -609,7 +842,7 @@ def test_preflight_luid_override_threads_override_community(
     report = _run_preflight(
         tmp_path=tmp_path,
         monkeypatch=monkeypatch,
-        sm_luids=("001", "002"),
+        sm_entries=[("001", "192.0.2.20"), ("002", "192.0.2.21")],
         sm_communities={"001": "override-B"},
         factory=factory,
     )
@@ -629,7 +862,7 @@ def test_preflight_ip_priority_over_luid(tmp_path: Path, monkeypatch: pytest.Mon
     report = _run_preflight(
         tmp_path=tmp_path,
         monkeypatch=monkeypatch,
-        sm_luids=("001",),
+        sm_entries=[("001", "192.0.2.20")],
         sm_communities={
             "192.0.2.20": "override-A",  # IP key (matches SM 001)
             "001": "override-B",  # LUID key (would lose to IP)
@@ -671,7 +904,7 @@ def test_preflight_mixed_dict_overrides_count_reflects_matches_only(
     report = _validate_sm_communities(
         driver=driver,
         device=device,
-        sm_luids=["001", "002", "003"],
+        sm_entries=[("001", "192.0.2.20"), ("002", "192.0.2.21"), ("003", "192.0.2.22")],
         client_factory=factory,
         sm_communities={
             "192.0.2.20": "override-A",  # SM 001 → IP match
@@ -703,7 +936,7 @@ def test_preflight_invalid_override_key_falls_through_to_inventory(
     report = _run_preflight(
         tmp_path=tmp_path,
         monkeypatch=monkeypatch,
-        sm_luids=("001", "002"),
+        sm_entries=[("001", "192.0.2.20"), ("002", "192.0.2.21")],
         sm_communities={
             "10.0.0.1": "irrelevant-override",  # no SM matches this IP
             "001-typo": "irrelevant-override",  # no SM matches this LUID
