@@ -260,7 +260,7 @@ def _validate_sm_communities(
     *,
     driver: Any,
     device: Any,
-    sm_luids: list[str],
+    sm_entries: list[tuple[str, str]],
     client_factory: Callable[[Any], "SnmpClient"],
     sysdescr_oid: str = "1.3.6.1.2.1.1.1.0",
     sm_communities: "dict[str, str] | None" = None,
@@ -270,7 +270,15 @@ def _validate_sm_communities(
     Args:
         driver: ``Pmp450iSnmpDriver`` (carries inventory + client factory).
         device: AP ``Device`` resolved from the inventory.
-        sm_luids: List of LUIDs reported by the AP's SM-table subtree.
+        sm_entries: List of ``(luid, ip)`` pairs sourced from the AP's
+            SM-table subtree walk (``SubscriberRecord.ip_address``
+            is the IP). The IP is required to resolve ad-hoc
+            registered SMs whose ``device_id`` is
+            ``adhoc-{host}-{hex6}`` and contains no LUID substring
+            (issue #92, 2026-09-24). An empty IP string falls
+            through to the legacy LUID-keyed path for backward
+            compatibility with tests / radios that do not report
+            ``linkIpAddress``.
         client_factory: Driver's client factory — produces a fresh
             ``SnmpClient`` per SM so the per-SM community is used.
         sysdescr_oid: RFC 1213 ``sysDescr`` OID; default
@@ -292,9 +300,18 @@ def _validate_sm_communities(
 
     Per-SM resolution:
 
-    * If the SM's LUID has no matching ``device_id`` in the inventory,
-      the result carries ``error_class='MISSING_INVENTORY_ENTRY'`` and
+    * If the SM's LUID has no matching inventory entry AND
+      ``sm_communities`` has no override for the IP or LUID, the
+      result carries ``error_class='MISSING_INVENTORY_ENTRY'`` and
       the LUID is also collected into ``missing_inventory_luids``.
+      The ``error_message`` carries the IP the AP reported so the
+      operator can copy-paste it into ``register_device``.
+    * If the SM is absent from inventory BUT the operator supplied
+      an override (IP or LUID keyed), the override unlocks the
+      gate: the pre-flight probes the SM with the override
+      credential and labels the result ``OVERRIDE_IP`` /
+      ``OVERRIDE_LUID`` instead of raising ``MISSING_INVENTORY_ENTRY``
+      (issue #92 decision #3).
     * If the resolved community string is ``None`` (no inventory
       community and no override), the result carries
       ``error_class='InvalidCommunity'`` and ``community_source='INVENTORY'``
@@ -350,59 +367,96 @@ def _validate_sm_communities(
             missing_inventory_luids=[],
         )
 
-    for luid in sm_luids:
-        # Resolve the inventory entry for this SM by LUID. We walk
-        # ``driver._inventory.device_ids`` (sorted) and look up by
-        # ``device_id == luid`` — a future change can add a
-        # ``luid -> device_id`` map to Inventory; for now the simple
-        # identity-keyed lookup is enough.
-        sm_device = _resolve_sm_device(driver, luid)
+    for luid, sm_ip in sm_entries:
+        # Resolve the inventory entry for this SM by LUID with the IP
+        # as the primary correlation key (issue #92). The 3-tier
+        # resolver in ``_resolve_sm_device`` finds ad-hoc registered
+        # SMs by host IP first, then by exact ``device_id == luid``,
+        # then by the legacy ``sm-7400-<luid>`` substring fallback.
+        sm_device = _resolve_sm_device(driver, luid, sm_ip=sm_ip or None)
+        # Pre-declare so mypy widens the type once at the top of the
+        # loop and the two branches below can both assign without a
+        # cross-branch ``str`` vs ``str | None`` clash.
+        community: str | None
+        community_source: CommunitySource
+        host: str
         if sm_device is None:
-            missing_luids.append(luid)
-            sm_results.append(
-                SmPreFlightResult(
-                    luid=luid,
-                    host=None,
-                    reachable=False,
-                    community_accepted=False,
-                    error_class="MISSING_INVENTORY_ENTRY",
-                    error_message=(
-                        f"LUID {luid!r} reported by AP SM-table but absent "
-                        f"from inventory; register via register_device first"
-                    ),
-                    community_source="INVENTORY",
-                )
+            # WU-2 (issue #92) — override unlock path. If the
+            # operator supplied a ``sm_communities`` entry keyed by
+            # the IP or LUID the AP reported, the SM has usable
+            # credentials even though it is absent from inventory.
+            # We construct a synthetic ``Device`` so the wire probe
+            # can run with the override community and label the
+            # result with the override source.
+            override_community, override_source = _resolve_sm_community(
+                sm_device=None,
+                sm_luid=luid,
+                sm_communities=sm_communities,
+                sm_ip=sm_ip or None,
             )
-            continue
+            if override_community is not None and sm_ip:
+                from nora.drivers.inventory import Device
 
-        host = str(getattr(sm_device, "host", None) or "")
-
-        # WU-4 (issue #62) — resolve the SM community via IP / LUID /
-        # inventory precedence. The resolver returns ``(None,
-        # "INVENTORY")`` when no credentials are available, in which
-        # case we surface an ``InvalidCommunity`` result instead of
-        # issuing an SNMP frame the agent would reject anyway.
-        community, community_source = _resolve_sm_community(
-            sm_device=sm_device,
-            sm_luid=luid,
-            sm_communities=sm_communities,
-        )
-        if community is None:
-            sm_results.append(
-                SmPreFlightResult(
-                    luid=luid,
-                    host=host,
-                    reachable=False,
-                    community_accepted=False,
-                    error_class="InvalidCommunity",
-                    error_message=(
-                        f"no community available for {host} (LUID {luid}); "
-                        "supply via sm_communities or inventory"
-                    ),
-                    community_source=community_source,
+                sm_device = Device(
+                    device_id=f"override-{luid}",
+                    vendor="cambium",
+                    model="pmp450i",
+                    firmware="(override)",
+                    host=sm_ip,
+                    snmp_version="v2c",
+                    community=SecretStr(override_community),
                 )
+                host = sm_ip
+                community = override_community
+                community_source = override_source
+            else:
+                missing_luids.append(luid)
+                ip_for_msg = sm_ip or "<unknown>"
+                sm_results.append(
+                    SmPreFlightResult(
+                        luid=luid,
+                        host=sm_ip or None,
+                        reachable=False,
+                        community_accepted=False,
+                        error_class="MISSING_INVENTORY_ENTRY",
+                        error_message=(
+                            f"LUID {luid!r} reported by AP SM-table (IP "
+                            f"{ip_for_msg}) but absent from inventory; "
+                            f"register via register_device(host={ip_for_msg!r}, "
+                            f"community=...)"
+                        ),
+                        community_source="INVENTORY",
+                    )
+                )
+                continue
+        else:
+            host = str(getattr(sm_device, "host", None) or "")
+            # WU-4 (issue #62) — resolve the SM community via IP / LUID /
+            # inventory precedence. The resolver returns ``(None,
+            # "INVENTORY")`` when no credentials are available, in which
+            # case we surface an ``InvalidCommunity`` result instead of
+            # issuing an SNMP frame the agent would reject anyway.
+            community, community_source = _resolve_sm_community(
+                sm_device=sm_device,
+                sm_luid=luid,
+                sm_communities=sm_communities,
             )
-            continue
+            if community is None:
+                sm_results.append(
+                    SmPreFlightResult(
+                        luid=luid,
+                        host=host,
+                        reachable=False,
+                        community_accepted=False,
+                        error_class="InvalidCommunity",
+                        error_message=(
+                            f"no community available for {host} (LUID {luid}); "
+                            "supply via sm_communities or inventory"
+                        ),
+                        community_source=community_source,
+                    )
+                )
+                continue
 
         # When the resolver picked an override, build a synthetic
         # ``Device`` carrying the override community so the SNMP
@@ -497,26 +551,106 @@ def _validate_sm_communities(
     )
 
 
-def _resolve_sm_device(driver: Any, luid: str) -> Any | None:
-    """Return the inventory ``Device`` for ``luid`` or ``None``.
+def _resolve_sm_device_by_ip(driver: Any, ip: str) -> Any | None:
+    """Return the inventory ``Device`` whose ``host`` equals ``ip`` or ``None``.
 
-    The inventory model keys devices by ``device_id`` (an operator
-    choice), so the helper first tries the identity match (most
-    operators name the SM ``sm-<luid>`` or similar) and then falls
-    back to a linear scan over the configured devices. A future
-    change can introduce a dedicated ``luid -> device_id`` map on
-    ``Inventory``; the current helper is intentionally narrow.
+    Issue #92 (2026-09-24): the helper is the **tier 1** resolution
+    path for ``_resolve_sm_device``. Ad-hoc registered SMs (those
+    inserted via ``register_device``) carry a ``device_id`` shaped
+    ``adhoc-{host}-{hex6}`` which contains no LUID substring; they
+    MUST be resolved by IP because that is the only stable
+    identifier they expose. The AP reports the SM's IP in its
+    SM-table subtree via ``whispLinkEntry.69 = linkIpAddress``
+    (captured on ``SubscriberRecord.ip_address``).
+
+    The helper iterates every device_id in the inventory (overlay
+    + base when a :class:`MutableInventory` is wired), compares
+    each device's ``host`` against ``ip``, and returns the first
+    match. ``ip`` is matched verbatim — the AP returns a dotted-quad
+    string and the inventory carries the same shape, so no
+    normalisation is needed.
+
+    Parameters
+    ----------
+    driver
+        ``Pmp450iSnmpDriver`` instance (carries ``_inventory``).
+    ip
+        Dotted-quad IP the AP reported for the SM. ``None`` or an
+        empty string short-circuit to ``None`` so the caller can
+        pass ``SubscriberRecord.ip_address`` (which defaults to
+        ``""`` on partial walks) without a guard.
+    """
+    if not ip:
+        return None
+    inventory = getattr(driver, "_inventory", None)
+    if inventory is None:
+        return None
+    for device_id in getattr(inventory, "device_ids", []):
+        try:
+            device = inventory.get(device_id)
+        except Exception:  # noqa: BLE001 - defensive; never raise from the lookup
+            continue
+        if str(getattr(device, "host", None) or "") == ip:
+            return device
+    return None
+
+
+def _resolve_sm_device(driver: Any, luid: str, *, sm_ip: str | None = None) -> Any | None:
+    """Return the inventory ``Device`` for ``luid`` (or ``None``) using 3-tier resolution.
+
+    Issue #92 (2026-09-24): the pre-flight could not find
+    ad-hoc registered SMs because their ``device_id`` is
+    ``adhoc-{host}-{hex6}`` and contains no LUID substring. The
+    fix: resolve by IP first (which the AP reports for every
+    on-line SM), then by exact ``device_id == luid`` (the
+    operator-loaded path), then by substring fallback (the
+    legacy ``sm-7400-<luid>`` convention).
+
+    Resolution order:
+
+    1. **IP match** (``sm_ip`` non-empty) via
+       :func:`_resolve_sm_device_by_ip`. Resolves ad-hoc
+       registered SMs whose ``device_id`` does not contain the
+       LUID. Wins over the legacy substring path so single-digit
+       LUIDs cannot collide with random host-IP / hex substrings.
+    2. **Exact-key match** via ``inventory.get(luid)``. Resolves
+       operator-named entries where ``device_id == luid`` (the
+       simplest convention).
+    3. **Substring fallback** ``if luid in device_id`` — preserved
+       as a last-resort safety net for legacy YAML inventories
+       that follow the ``sm-7400-<luid>`` convention when the AP
+       does not report ``ip_address``. The single-digit LUID
+       collision risk is mitigated by tier 1: collisions only
+       fire when the AP reports no IP, which is operationally
+       negligible.
+
+    Parameters
+    ----------
+    driver
+        ``Pmp450iSnmpDriver`` instance (carries ``_inventory``).
+    luid
+        The SM's logical unit ID as observed on the AP.
+    sm_ip
+        The SM's IP the AP reported in its SM-table subtree
+        (``SubscriberRecord.ip_address``). Defaults to ``None``;
+        the helper degrades to the legacy two-tier path.
     """
     inventory = getattr(driver, "_inventory", None)
     if inventory is None:
         return None
+    # Tier 1: IP match. Ad-hoc registered SMs live here.
+    if sm_ip:
+        device = _resolve_sm_device_by_ip(driver, sm_ip)
+        if device is not None:
+            return device
+    # Tier 2: exact device_id == luid.
     try:
         return inventory.get(luid)
     except Exception:  # noqa: BLE001 - DeviceNotFoundError is the expected path
-        # Linear scan fallback: look for any device whose ``device_id``
-        # contains ``luid`` (e.g. ``sm-7400-001`` matches LUID ``001``).
+        # Tier 3: substring fallback (legacy sm-7400-<luid> safety net).
         # Operators that need stricter matching must rename inventory
-        # entries to match the LUID exactly.
+        # entries so tier 2 hits or the AP must report ``ip_address``
+        # so tier 1 hits.
         for device_id in getattr(inventory, "device_ids", []):
             if luid in device_id:
                 try:
@@ -531,6 +665,7 @@ def _resolve_sm_community(
     sm_device: Any | None,
     sm_luid: str,
     sm_communities: "dict[str, str] | None",
+    sm_ip: str | None = None,
 ) -> tuple[str | None, CommunitySource]:
     """Resolve the community string for one SM.
 
@@ -540,10 +675,12 @@ def _resolve_sm_community(
     records which credential won. The community string itself
     NEVER travels in the audit record — only the label.
 
-    Resolution order (operator decision 2026-09-19):
+    Resolution order (operator decision 2026-09-19, extended for
+    issue #92 / 2026-09-24):
 
     1. If ``sm_communities`` is not ``None`` and ``str(sm_device.host)``
-       is a key, return ``(dict[ip], "OVERRIDE_IP")``.
+       (or the explicit ``sm_ip`` when ``sm_device is None``) is a
+       key, return ``(dict[ip], "OVERRIDE_IP")``.
     2. Else if ``sm_communities`` is not ``None`` and ``sm_luid`` is
        a key, return ``(dict[luid], "OVERRIDE_LUID")``.
     3. Else fall back to ``sm_device.community.get_secret_value()``;
@@ -553,14 +690,26 @@ def _resolve_sm_community(
        "no credentials available" and surfaces an
        :class:`InvalidCommunity` result.
 
+    The ``sm_ip`` parameter exists so the WU-2 override-unlock
+    path can resolve an IP-keyed override even when ``sm_device``
+    is ``None`` (no inventory match for an ad-hoc registered SM).
+    When ``sm_device`` is not ``None`` the host from the device
+    takes priority; ``sm_ip`` is only consulted when ``sm_device
+    is None`` or when ``sm_device.host`` does not match any key.
+
     The resolver is a pure function (no I/O, no side effects); it
     is also exercised directly by the WU-4 test suite so the
     precedence rules are pinned at the unit level.
     """
     if sm_communities is not None:
-        host = str(getattr(sm_device, "host", None) or "") if sm_device is not None else ""
-        if host and host in sm_communities:
-            return str(sm_communities[host]), "OVERRIDE_IP"
+        if sm_device is not None:
+            host = str(getattr(sm_device, "host", None) or "")
+            if host and host in sm_communities:
+                return str(sm_communities[host]), "OVERRIDE_IP"
+        elif sm_ip and sm_ip in sm_communities:
+            # WU-2 (issue #92) — override unlock for SMs absent from
+            # inventory. The IP the AP reported is the canonical key.
+            return str(sm_communities[sm_ip]), "OVERRIDE_IP"
         if sm_luid in sm_communities:
             return str(sm_communities[sm_luid]), "OVERRIDE_LUID"
 
@@ -786,14 +935,20 @@ def fetch_migrate(
     override_count = 0
     if preflight_enabled:
         sm_summary = fetch_sm_table(driver=driver, device_id=device_id, settings=settings)
-        candidate_luids = sorted(
-            {record.luid for record in sm_summary.online_active}
-            | {record.luid for record in sm_summary.active_degraded}
+        # WU-2 (issue #92) — build ``sm_entries: list[tuple[str, str]]``
+        # from the SM-table walk's ``ip_address`` so the IP-based
+        # resolver can find ad-hoc registered SMs whose ``device_id``
+        # contains no LUID substring. The IP defaults to ``""`` for
+        # legacy radios that omit ``linkIpAddress``; the resolver's
+        # tier 2/3 fallback covers that path.
+        sm_entries = sorted(
+            {(record.luid, record.ip_address) for record in sm_summary.online_active}
+            | {(record.luid, record.ip_address) for record in sm_summary.active_degraded}
         )
         preflight_report = _validate_sm_communities(
             driver=driver,
             device=device,
-            sm_luids=candidate_luids,
+            sm_entries=sm_entries,
             client_factory=driver._client_factory,  # noqa: SLF001 — internal API
             sm_communities=sm_communities,
         )
@@ -1093,6 +1248,12 @@ __all__ = [
     "SmPreFlightResult",
     "_validate_sm_communities",
     "_resolve_sm_device",
+    # WU-2 (issue #92) — IP-tier helper used by ``_resolve_sm_device``
+    # to find ad-hoc registered SMs whose ``device_id`` does not
+    # contain the LUID substring. Module-private; tests in
+    # ``tests/snmp_pmp450i/test_migrate.py`` exercise it indirectly
+    # through ``_resolve_sm_device``.
+    "_resolve_sm_device_by_ip",
     # WU-4 (issue #62) — per-SM community overrides. ``CommunitySource``
     # is the audit label carried on ``SmPreFlightResult.community_source``;
     # ``_resolve_sm_community`` is the pure helper that implements the

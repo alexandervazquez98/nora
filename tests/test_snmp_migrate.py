@@ -1953,8 +1953,8 @@ def test_preflight_missing_inventory_entry_message_includes_ip(
     copy-paste the IP directly from the failure. Without the IP,
     the operator would have to re-walk the SM-table by hand.
     """
-    from nora.drivers.mutable_inventory import MutableInventory
     from nora.drivers.exceptions import CommunityValidationFailed
+    from nora.drivers.mutable_inventory import MutableInventory
     from nora.drivers.snmp_pmp450i import migrate as migrate_mod
 
     base = _build_ap_only_inventory(tmp_path)
