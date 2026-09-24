@@ -1703,24 +1703,44 @@ def test_preflight_does_not_consume_hitl_token_on_failure(
     )
 
 
-def _fake_sm_summary(*, online_luids: tuple[str, ...], degraded_luids: tuple[str, ...]) -> Any:
+def _fake_sm_summary(
+    *,
+    online_luids: tuple[str, ...],
+    degraded_luids: tuple[str, ...],
+    online_ips: dict[str, str] | None = None,
+    degraded_ips: dict[str, str] | None = None,
+) -> Any:
     """Build a minimal ``SubscriberSummary``-shaped namespace for pre-flight tests.
 
     The WU-A pre-flight only reads ``.online_active`` and
     ``.active_degraded``; we model the rest as empty to keep the
-    fake hermetic.
+    fake hermetic. Issue #92: ``online_ips`` / ``degraded_ips`` let
+    tests pin the IP each SM reports so the IP-based resolver
+    (``_resolve_sm_device``) can locate ad-hoc registered devices.
+    Default to ``""`` per the legacy path (substrings fall through
+    to the legacy YAML-keyed inventory).
     """
     from nora.drivers.snmp_pmp450i.subscribers import SubscriberRecord, SubscriberSummary
 
     online = [
         SubscriberRecord(
-            luid=luid, session_uptime=86400, cinr_db=25, link_status="LINKED", modulation="8X"
+            luid=luid,
+            session_uptime=86400,
+            cinr_db=25,
+            link_status="LINKED",
+            modulation="8X",
+            ip_address=str((online_ips or {}).get(luid, "")),
         )
         for luid in online_luids
     ]
     degraded = [
         SubscriberRecord(
-            luid=luid, session_uptime=43200, cinr_db=12, link_status="LINKED", modulation="2X"
+            luid=luid,
+            session_uptime=43200,
+            cinr_db=12,
+            link_status="LINKED",
+            modulation="2X",
+            ip_address=str((degraded_ips or {}).get(luid, "")),
         )
         for luid in degraded_luids
     ]
@@ -1733,6 +1753,262 @@ def _fake_sm_summary(*, online_luids: tuple[str, ...], degraded_luids: tuple[str
         pre_existing_offline_count=0,
         fetched_at="2026-09-18T00:00:00+00:00",
     )
+
+
+# ---------------------------------------------------------------------------
+# WU-1 (issue #92) — pre-flight regression tests for ad-hoc registered SMs.
+#
+# The existing WU-A tests use the legacy YAML ``sm-7400-<luid>`` convention
+# where the substring fallback was the resolution path. Issue #92 changes
+# the pre-flight to take ``sm_entries: list[tuple[str, str]]`` (luid, ip)
+# so the IP-based resolver can find SMs whose ``device_id`` is
+# ``adhoc-{host}-{hex6}`` (no LUID substring). The three tests below pin
+# the new contract end-to-end through ``fetch_migrate``.
+# ---------------------------------------------------------------------------
+
+
+def _build_ap_only_inventory(tmp_path: Path) -> Any:
+    """Hermetic inventory with ONLY the AP — no SMs in the YAML.
+
+    Issue #92: the WU-1 integration tests register SMs via
+    ``MutableInventory`` so the test can mix YAML-loaded and
+    runtime-registered devices in the same driver without
+    rewriting the YAML fixture.
+    """
+    payload = {
+        "devices": [
+            {
+                "device_id": "ap-7400-01",
+                "vendor": "cambium",
+                "model": "pmp450i",
+                "firmware": "15.2.1",
+                "host": "192.0.2.10",
+                "snmp_version": "v2c",
+                "community": "change-me-v2c",
+            },
+        ]
+    }
+    inv_path = tmp_path / "devices.yaml"
+    inv_path.write_text(yaml.safe_dump(payload))
+    return Inventory.from_yaml(inv_path)
+
+
+def _make_adhoc_device(host: str, community: str = "change-me-v2c") -> Any:
+    """Return a frozen ``Device`` shaped like ``DeviceResolver.build`` output."""
+    from nora.drivers.resolver import DeviceResolver, SnmpCredentials
+
+    creds = SnmpCredentials(community=community)  # type: ignore[arg-type]
+    return DeviceResolver.build(host, "v2c", creds)
+
+
+def test_preflight_succeeds_with_adhoc_registered_sms(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End-to-end: 2 SMs registered via ``register_device`` flow through the pre-flight.
+
+    Repro for issue #92's orchestrator feedback loop: in the
+    current code the pre-flight raises ``MISSING_INVENTORY_ENTRY``
+    for every ad-hoc registered SM. After the fix, the pre-flight
+    MUST succeed because each SM's IP, carried on
+    ``SubscriberRecord.ip_address`` from the SM-table walk, resolves
+    the SM in the inventory via the IP tier of ``_resolve_sm_device``.
+    """
+    from nora.drivers.mutable_inventory import MutableInventory
+    from nora.drivers.snmp_pmp450i import migrate as migrate_mod
+
+    base = _build_ap_only_inventory(tmp_path)
+    inv = MutableInventory(base=base)
+    # Register 2 ad-hoc SMs at 192.0.2.20 and 192.0.2.21 (the same
+    # convention the production `register_device` MCP tool uses).
+    inv.register(_make_adhoc_device(host="192.0.2.20"))
+    inv.register(_make_adhoc_device(host="192.0.2.21"))
+
+    registry = _build_catalog(firmware="15.2.1")
+    routed = _RoutedFakeSnmpClient(
+        per_host_sysdescr={
+            "192.0.2.10": "Cambium PMP 450i AP 15.2.1",
+            "192.0.2.20": "Cambium PMP 450i SM 18 15.2.1",
+            "192.0.2.21": "Cambium PMP 450i SM 21 15.2.1",
+        },
+    )
+    settings = _settings_with_rollback_timeout(60, preflight_community_validation=True)
+    driver = _build_driver(
+        inventory=inv,
+        registry=registry,
+        canned=routed,
+        settings=settings,
+    )
+    monkeypatch.setattr(driver, "_client_factory", _routing_client_factory(routed))
+    monkeypatch.setattr(
+        "nora.drivers.snmp_pmp450i.subscribers.search_intervention_history",
+        lambda *args, **kwargs: [],
+    )
+    # AP SM-table reports LUIDs 18 / 21 with the IPs we registered.
+    monkeypatch.setattr(
+        migrate_mod,
+        "fetch_sm_table",
+        lambda **kw: _fake_sm_summary(
+            online_luids=("18", "21"),
+            degraded_luids=(),
+            online_ips={"18": "192.0.2.20", "21": "192.0.2.21"},
+        ),
+    )
+    # Stub the migration downstream so the test does not exercise
+    # the SET / watchdog / HITL gate.
+    monkeypatch.setattr(migrate_mod, "_start_rollback_watchdog", lambda **kw: None)
+    monkeypatch.setattr(migrate_mod, "_cancel_rollback_watchdog", lambda *a, **kw: None)
+    monkeypatch.setattr(migrate_mod, "_wait_for_management_reachability", lambda **kw: True)
+    monkeypatch.setattr(migrate_mod, "save_intervention_record", lambda *a, **kw: {"status": "OK"})
+
+    result = migrate_mod.fetch_migrate(
+        driver=driver,
+        device_id="ap-7400-01",
+        approval_token=_mint_valid_token(),
+        target_frequency_mhz=5800.0,
+        settings=settings,
+    )
+    # No CommunityValidationFailed was raised; the pre-flight succeeded.
+    assert "rolled_back" in result, f"Expected MigrationResult-shaped dict; got {result!r}"
+    assert result["rolled_back"] is False
+    assert result["online_active_migrated"] == 2
+
+
+def test_preflight_with_sm_communities_override_unlocks_missing_inventory_sms(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``sm_communities`` overrides unlock pre-flight when inventory lacks the SM.
+
+    Issue #92 decision #3: the override path is a first-class
+    credential source. If the operator supplied a community keyed
+    by IP or LUID, the SM has usable credentials — the pre-flight
+    MUST NOT raise ``MISSING_INVENTORY_ENTRY`` for that case. The
+    SM is validated via the override credential; the per-SM
+    ``community_source`` label records ``OVERRIDE_IP`` /
+    ``OVERRIDE_LUID``.
+    """
+    from nora.drivers.mutable_inventory import MutableInventory
+    from nora.drivers.snmp_pmp450i import migrate as migrate_mod
+
+    base = _build_ap_only_inventory(tmp_path)
+    inv = MutableInventory(base=base)
+
+    registry = _build_catalog(firmware="15.2.1")
+    routed = _RoutedFakeSnmpClient(
+        per_host_sysdescr={
+            "192.0.2.10": "Cambium PMP 450i AP 15.2.1",
+            "192.0.2.99": "Cambium PMP 450i SM 99 15.2.1",  # SM 99 reachable
+        },
+    )
+    settings = _settings_with_rollback_timeout(60, preflight_community_validation=True)
+    driver = _build_driver(
+        inventory=inv,
+        registry=registry,
+        canned=routed,
+        settings=settings,
+    )
+    monkeypatch.setattr(driver, "_client_factory", _routing_client_factory(routed))
+    monkeypatch.setattr(
+        "nora.drivers.snmp_pmp450i.subscribers.search_intervention_history",
+        lambda *args, **kwargs: [],
+    )
+    # AP SM-table reports LUID 99 at 192.0.2.99. No device exists in
+    # inventory for that IP — the only credential source is the
+    # ``sm_communities`` override keyed by IP.
+    monkeypatch.setattr(
+        migrate_mod,
+        "fetch_sm_table",
+        lambda **kw: _fake_sm_summary(
+            online_luids=("99",),
+            degraded_luids=(),
+            online_ips={"99": "192.0.2.99"},
+        ),
+    )
+    monkeypatch.setattr(migrate_mod, "_start_rollback_watchdog", lambda **kw: None)
+    monkeypatch.setattr(migrate_mod, "_cancel_rollback_watchdog", lambda *a, **kw: None)
+    monkeypatch.setattr(migrate_mod, "_wait_for_management_reachability", lambda **kw: True)
+    monkeypatch.setattr(migrate_mod, "save_intervention_record", lambda *a, **kw: {"status": "OK"})
+
+    # No ``CommunityValidationFailed`` raised because the override
+    # credential wins for SM 99 at IP 192.0.2.99.
+    result = migrate_mod.fetch_migrate(
+        driver=driver,
+        device_id="ap-7400-01",
+        approval_token=_mint_valid_token(),
+        target_frequency_mhz=5800.0,
+        settings=settings,
+        sm_communities={"192.0.2.99": "override-c"},  # IP override
+    )
+    assert "rolled_back" in result
+    assert result["rolled_back"] is False
+    assert result["sm_community_overrides_used"] == 1
+
+
+def test_preflight_missing_inventory_entry_message_includes_ip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``MISSING_INVENTORY_ENTRY`` error message includes the IP the AP reported.
+
+    Issue #92 decision #6: the message guides the operator to
+    ``register_device(host=<ip>, community=...)`` so they can
+    copy-paste the IP directly from the failure. Without the IP,
+    the operator would have to re-walk the SM-table by hand.
+    """
+    from nora.drivers.mutable_inventory import MutableInventory
+    from nora.drivers.exceptions import CommunityValidationFailed
+    from nora.drivers.snmp_pmp450i import migrate as migrate_mod
+
+    base = _build_ap_only_inventory(tmp_path)
+    inv = MutableInventory(base=base)
+
+    registry = _build_catalog(firmware="15.2.1")
+    routed = _RoutedFakeSnmpClient(
+        per_host_sysdescr={"192.0.2.10": "Cambium PMP 450i AP 15.2.1"},
+    )
+    settings = _settings_with_rollback_timeout(60, preflight_community_validation=True)
+    driver = _build_driver(
+        inventory=inv,
+        registry=registry,
+        canned=routed,
+        settings=settings,
+    )
+    monkeypatch.setattr(driver, "_client_factory", _routing_client_factory(routed))
+    monkeypatch.setattr(
+        "nora.drivers.snmp_pmp450i.subscribers.search_intervention_history",
+        lambda *args, **kwargs: [],
+    )
+    # AP SM-table reports LUID "77" at IP 192.0.2.77. No device at
+    # that IP in inventory; no override either.
+    monkeypatch.setattr(
+        migrate_mod,
+        "fetch_sm_table",
+        lambda **kw: _fake_sm_summary(
+            online_luids=("77",),
+            degraded_luids=(),
+            online_ips={"77": "192.0.2.77"},
+        ),
+    )
+
+    with pytest.raises(CommunityValidationFailed) as exc_info:
+        migrate_mod.fetch_migrate(
+            driver=driver,
+            device_id="ap-7400-01",
+            approval_token=_mint_valid_token(),
+            target_frequency_mhz=5800.0,
+            settings=settings,
+        )
+
+    report = exc_info.value.report
+    failed = [r for r in report.sm_results if r.luid == "77"]
+    assert len(failed) == 1
+    assert failed[0].error_class == "MISSING_INVENTORY_ENTRY"
+    msg = failed[0].error_message or ""
+    # IP from the AP table is in the message; operator can copy-paste it.
+    assert "192.0.2.77" in msg, (
+        f"MISSING_INVENTORY_ENTRY error_message MUST carry the IP from the AP "
+        f"report so operators can copy-paste it into ``register_device``; "
+        f"got: {msg!r}"
+    )
+    assert "register via register_device" in msg
 
 
 __all__ = [
@@ -1756,4 +2032,13 @@ __all__ = [
     "test_preflight_raises_when_sm_not_in_inventory",
     "test_preflight_raises_when_ap_unreachable",
     "test_preflight_does_not_consume_hitl_token_on_failure",
+    # WU-1 (issue #92) — ad-hoc registered SM regression tests.
+    # These three tests pin the new IP-based resolver contract:
+    # ad-hoc SMs succeed, ``sm_communities`` overrides unlock the
+    # gate when inventory lacks the SM, and the
+    # ``MISSING_INVENTORY_ENTRY`` message carries the IP the AP
+    # reported so operators can copy-paste it into ``register_device``.
+    "test_preflight_succeeds_with_adhoc_registered_sms",
+    "test_preflight_with_sm_communities_override_unlocks_missing_inventory_sms",
+    "test_preflight_missing_inventory_entry_message_includes_ip",
 ]
