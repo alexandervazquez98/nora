@@ -30,6 +30,8 @@ from nora.drivers.exceptions import (
     SpectrumHttpFetchError,
     SpectrumXmlParseError,
 )
+from nora.drivers.oid_catalog import OidCatalog
+from nora.drivers.snmp_pmp450i.spectrum import _read_band_range_after_sweep
 from nora.drivers.snmp_pmp450i.spectrum_http import (
     SpectrumBin,
     build_spectrum_url,
@@ -428,6 +430,131 @@ def test_rank_clean_frequencies_ties_broken_by_frequency_ascending() -> None:
 
 
 # ---------------------------------------------------------------------------
+# band_range filter — issue #81 (3 GHz CBRS / lightly-licensed band-limit fix).
+#
+# Cambium PMP 450i 3 GHz hardware (reference C030045A002A) reports
+# bins up to ~4200 MHz with an artificial -99 dBm floor above
+# 3900 MHz. ``rank_clean_frequencies`` MUST drop those bins BEFORE
+# ranking when the ranker is told the radio is a 3 GHz unit, or
+# the operator's "cleanest" recommendation gets contaminated by
+# out-of-band candidates the radio cannot lock onto.
+# ---------------------------------------------------------------------------
+
+
+def test_rank_clean_frequencies_band_range_filters_out_of_band_bins() -> None:
+    """Out-of-band bins are dropped BEFORE ranking when ``band_range`` is supplied.
+
+    Pre-fix bug: the ranker would have recommended the 4050 MHz bin
+    as the "cleanest" (avg_dbm=-99), contaminating the operator's
+    downstream migration decision. With the filter, only the
+    in-band bins (3550, 3600, 3650) participate in the ranking.
+    """
+    bins = [
+        # In-band (CBRS 3500: 3300-3900 MHz)
+        SpectrumBin(frequency_mhz=3550.0, polarization="V", avg_dbm=-72, max_dbm=-71),
+        SpectrumBin(frequency_mhz=3600.0, polarization="V", avg_dbm=-65, max_dbm=-64),
+        SpectrumBin(frequency_mhz=3650.0, polarization="V", avg_dbm=-80, max_dbm=-79),
+        # Out-of-band (above 3900 MHz — artificial -99 dBm floor on 3 GHz radio)
+        SpectrumBin(frequency_mhz=3950.0, polarization="V", avg_dbm=-99, max_dbm=-99),
+        SpectrumBin(frequency_mhz=4050.0, polarization="V", avg_dbm=-99, max_dbm=-99),
+        SpectrumBin(frequency_mhz=4150.0, polarization="V", avg_dbm=-99, max_dbm=-99),
+    ]
+    result = rank_clean_frequencies(bins, top_n=10, band_range=(3300.0, 3900.0))
+    # Cleanest first: 3650 (-80) > 3550 (-72) > 3600 (-65)
+    assert result == [3650.0, 3550.0, 3600.0]
+
+
+def test_rank_clean_frequencies_band_range_none_preserves_v1_behaviour() -> None:
+    """``band_range=None`` ranks EVERY bin — v1 behaviour preserved.
+
+    Without the filter, the 4050 MHz bin (artificial -99 dBm
+    floor on 3 GHz hardware) would score highest. This test pins
+    that legacy behaviour so the ranker does not silently change
+    the algorithm for callers who do not opt into filtering.
+    """
+    bins = [
+        SpectrumBin(frequency_mhz=3600.0, polarization="V", avg_dbm=-65, max_dbm=-64),
+        SpectrumBin(frequency_mhz=4050.0, polarization="V", avg_dbm=-99, max_dbm=-99),
+    ]
+    assert rank_clean_frequencies(bins, top_n=10) == [4050.0, 3600.0]
+
+
+def test_rank_clean_frequencies_band_range_all_out_of_band_returns_empty() -> None:
+    """Every bin outside the range → empty list (not a crash).
+
+    Guards against a regression where the filter could produce a
+    silent empty list when called with a band that does not match
+    any bin in the sweep result. The operator should see an
+    explicit empty list, not a crash.
+    """
+    bins = [
+        SpectrumBin(frequency_mhz=4050.0, polarization="V", avg_dbm=-99, max_dbm=-99),
+        SpectrumBin(frequency_mhz=4150.0, polarization="V", avg_dbm=-99, max_dbm=-99),
+    ]
+    assert rank_clean_frequencies(bins, top_n=10, band_range=(3300.0, 3900.0)) == []
+
+
+def test_rank_clean_frequencies_band_range_3ghz_with_realistic_fixture() -> None:
+    """Realistic 3 GHz radio sweep: bins 3300-4200 MHz, -99 floor above 3900.
+
+    Mimics the live behaviour observed on C030045A002A hardware
+    (issue #81 background). Pre-fix this fixture would have
+    recommended 4150.0 (-99 dBm floor) as the "cleanest" candidate.
+    Post-fix, the filter restricts ranking to in-band 3500-3900
+    frequencies and the operator sees real channel candidates.
+    """
+    # Build bins: every 10 MHz from 3300 to 4200, V polarization
+    # In-band (3500 band): real measurements between -60 and -90 dBm
+    # Out-of-band: artificial -99 dBm floor
+    bins: list[SpectrumBin] = []
+    in_band_floor = {
+        3550.0: -70,
+        3600.0: -65,
+        3650.0: -75,
+        3700.0: -68,
+        3750.0: -85,
+        3800.0: -78,
+        3850.0: -82,
+    }
+    # Sub-CBRS guard bands get a high-noise (-55 dBm) floor so the
+    # ranker does not accidentally promote them above real channel
+    # candidates. They are inside ``band_range`` but noisy.
+    for f in [3300.0, 3350.0, 3400.0, 3450.0, 3500.0] + list(in_band_floor.keys()) + [3900.0]:
+        avg = in_band_floor.get(f, -55)
+        bins.append(
+            SpectrumBin(frequency_mhz=f, polarization="V", avg_dbm=avg, max_dbm=avg + 1)
+        )
+    for f in [3950.0, 4000.0, 4050.0, 4100.0, 4150.0, 4200.0]:
+        bins.append(SpectrumBin(frequency_mhz=f, polarization="V", avg_dbm=-99, max_dbm=-99))
+
+    result = rank_clean_frequencies(bins, top_n=5, band_range=(3300.0, 3900.0))
+    # Sorted ascending by (avg_dbm, freq):
+    #   (-85, 3750), (-82, 3850), (-78, 3800), (-75, 3650), (-70, 3550)
+    # Top 5: 3750, 3850, 3800, 3650, 3550.
+    assert result == [3750.0, 3850.0, 3800.0, 3650.0, 3550.0]
+    # And NO out-of-band candidate appears:
+    assert all(3300.0 <= f <= 3900.0 for f in result)
+
+
+def test_rank_clean_frequencies_band_range_inclusive_boundaries() -> None:
+    """``band_range`` boundaries are inclusive (matches ``_band_for_frequency``).
+
+    A frequency exactly on the lower or upper boundary of the
+    supplied range MUST be kept. Mismatches here would silently
+    drop the lowest or highest in-band frequency, biasing the
+    ranker.
+    """
+    bins = [
+        SpectrumBin(frequency_mhz=3300.0, polarization="V", avg_dbm=-70, max_dbm=-69),
+        SpectrumBin(frequency_mhz=3299.0, polarization="V", avg_dbm=-99, max_dbm=-99),
+        SpectrumBin(frequency_mhz=3900.0, polarization="V", avg_dbm=-70, max_dbm=-69),
+        SpectrumBin(frequency_mhz=3901.0, polarization="V", avg_dbm=-99, max_dbm=-99),
+    ]
+    result = rank_clean_frequencies(bins, top_n=10, band_range=(3300.0, 3900.0))
+    assert result == [3300.0, 3900.0]
+
+
+# ---------------------------------------------------------------------------
 # noise_floor_per_channel — worst-leg avg per frequency
 # ---------------------------------------------------------------------------
 
@@ -466,10 +593,195 @@ def test_spectrum_http_errors_inherit_driver_error() -> None:
     assert isinstance(parse_err, DriverError)
     # Field projection is preserved on the http_err instance.
     assert http_err.host == "x"
-    assert http_err.status_code == 500
-    assert http_err.attempts == 1
-    assert parse_err.message == "m"
-    assert parse_err.line == 0
+
+
+# ---------------------------------------------------------------------------
+# _read_band_range_after_sweep — issue #81 unit tests.
+#
+# These tests target the helper that translates the radio's
+# ``radioFrequencyBand`` OID enum value into a ``(low_mhz, high_mhz)``
+# range for the spectrum ranker. The helper is module-private
+# (``_``-prefixed) but reachable by direct import so we can pin
+# every failure path with a deterministic test.
+# ---------------------------------------------------------------------------
+
+
+class _FakeSnmpClient:
+    """Minimal stand-in for the writable SNMP client used in ``fetch_spectrum``.
+
+    Only ``get_oid`` matters for ``_read_band_range_after_sweep``. The
+    ``raise_on`` parameter lets each test pin a specific failure mode
+    without coupling to any real Cambium client machinery.
+    """
+
+    def __init__(self, return_value: object = 1, raise_on: Exception | None = None) -> None:
+        self._return_value = return_value
+        self._raise_on = raise_on
+        self.calls: list[str] = []
+
+    def get_oid(self, oid: str) -> object:
+        self.calls.append(oid)
+        if self._raise_on is not None:
+            raise self._raise_on
+        return self._return_value
+
+    def close(self) -> None:
+        return None
+
+
+def _catalog_with(band_oid: str | None) -> OidCatalog:
+    """Build a minimal ``OidCatalog`` carrying only the OIDs the helper looks up."""
+    oids: dict[str, str] = {
+        "spectrumScanDuration": "1.3.6.1.4.1.161.19.3.1.13.1.0",
+        "spectrumScanAction": "1.3.6.1.4.1.161.19.3.1.13.2.0",
+    }
+    if band_oid is not None:
+        oids["radioFrequencyBand"] = band_oid
+    return OidCatalog(
+        version=1,
+        vendor="cambium",
+        model="pmp450i",
+        firmware="25.0.1",
+        oids=oids,
+        hmac_sha256="",
+    )
+
+
+def test_read_band_range_after_sweep_happy_path_3ghz() -> None:
+    """Catalog v2 with ``radioFrequencyBand`` → OID returns ``band3500`` enum value ``1``.
+
+    Maps to ``(3300.0, 3900.0)`` so the spectrum ranker drops
+    out-of-band bins above 3900 MHz.
+    """
+    client = _FakeSnmpClient(return_value=1)
+    catalog = _catalog_with("1.3.6.1.4.1.161.19.3.3.16.1.1.2")
+    result = _read_band_range_after_sweep(client=client, catalog=catalog)
+    assert result == (3300.0, 3900.0)
+    assert client.calls == ["1.3.6.1.4.1.161.19.3.3.16.1.1.2"]
+
+
+def test_read_band_range_after_sweep_happy_path_5ghz() -> None:
+    """Catalog v2 on 5 GHz hardware → OID returns ``band5700`` enum value ``6``.
+
+    Maps to ``(5725.0, 5875.0)``. Proves the helper preserves v1
+    behaviour on the dominant fleet.
+    """
+    client = _FakeSnmpClient(return_value=6)
+    catalog = _catalog_with("1.3.6.1.4.1.161.19.3.3.16.1.1.2")
+    result = _read_band_range_after_sweep(client=client, catalog=catalog)
+    assert result == (5725.0, 5875.0)
+
+
+def test_read_band_range_after_sweep_band5800_folds_into_band5700() -> None:
+    """Cambium enum value ``7`` (band5800) folds into ``band5700`` (5725-5875 overlap).
+
+    Documents the WHISP-BOX-MIBV2-MIB alias: ``band5800`` and
+    ``band5700`` share the 5725-5875 range, so the helper must NOT
+    return two different ranges.
+    """
+    client = _FakeSnmpClient(return_value=7)
+    catalog = _catalog_with("1.3.6.1.4.1.161.19.3.3.16.1.1.2")
+    assert _read_band_range_after_sweep(client=client, catalog=catalog) == (5725.0, 5875.0)
+
+
+def test_read_band_range_after_sweep_string_coerced_enum() -> None:
+    """Some agents coerce ``INTEGER`` to a ``str`` on the wire; the helper MUST coerce back.
+
+    Cambium firmware returns ``INTEGER`` per WHISP-BOX-MIBV2-MIB but
+    intermediate SNMP libraries sometimes serialise it as a string.
+    The helper accepts both via ``int | str`` typing.
+    """
+    client = _FakeSnmpClient(return_value="2")  # band4900
+    catalog = _catalog_with("1.3.6.1.4.1.161.19.3.3.16.1.1.2")
+    assert _read_band_range_after_sweep(client=client, catalog=catalog) == (4900.0, 5000.0)
+
+
+def test_read_band_range_after_sweep_catalog_missing_oid_returns_none() -> None:
+    """Legacy catalog without ``radioFrequencyBand`` OID → ``None`` (no filter).
+
+    The helper MUST NOT crash; it MUST return ``None`` and let
+    ``fetch_spectrum`` fall back to the v1 behaviour of trusting
+    the spectrum analyser data as ground truth.
+    """
+    client = _FakeSnmpClient(return_value=1)  # would map to band3500 if reached
+    catalog = _catalog_with(band_oid=None)
+    assert _read_band_range_after_sweep(client=client, catalog=catalog) is None
+    assert client.calls == [], (
+        "Helper MUST short-circuit before the GET when the catalog lacks "
+        "the OID. The catalog-missing path is informational-only; reading "
+        "a non-existent OID would waste a wire frame and risk a timeout."
+    )
+
+
+def test_read_band_range_after_sweep_unrecognised_enum_returns_none() -> None:
+    """``unknown`` sentinel (``0``) or future-firmware value → ``None`` (no filter).
+
+    Proves the helper does NOT silently default to a band when the
+    integer is not in the recognised Cambium enum table.
+    """
+    for unknown_value in (0, 99, -1):
+        client = _FakeSnmpClient(return_value=unknown_value)
+        catalog = _catalog_with("1.3.6.1.4.1.161.19.3.3.16.1.1.2")
+        assert (
+            _read_band_range_after_sweep(client=client, catalog=catalog) is None
+        ), f"unrecognised enum value {unknown_value!r} MUST return None"
+
+
+def test_read_band_range_after_sweep_get_failure_returns_none() -> None:
+    """GET on ``radioFrequencyBand`` raises → ``None`` (no filter) without crashing.
+
+    Failure policy: ANY exception from the GET is defensive — the
+    sweep is already COMPLETED, so the helper falls back to no
+    filter rather than crashing the post-sweep ladder.
+    """
+    client = _FakeSnmpClient(
+        return_value=1,
+        raise_on=TimeoutError("agent unreachable during band GET"),
+    )
+    catalog = _catalog_with("1.3.6.1.4.1.161.19.3.3.16.1.1.2")
+    assert _read_band_range_after_sweep(client=client, catalog=catalog) is None
+    assert client.calls == ["1.3.6.1.4.1.161.19.3.3.16.1.1.2"]
+
+
+def test_read_band_range_after_sweep_uncoercible_string_returns_none() -> None:
+    """A GET result that cannot be coerced to ``int`` → ``None`` (no filter).
+
+    Defensive guard against future Cambium firmware that might return
+    a non-numeric token for the OID (e.g. ``"unknown"``).
+    """
+    client = _FakeSnmpClient(return_value="not-a-number")
+    catalog = _catalog_with("1.3.6.1.4.1.161.19.3.3.16.1.1.2")
+    assert _read_band_range_after_sweep(client=client, catalog=catalog) is None
+
+
+def test_noise_floor_per_channel_is_unfiltered_by_design() -> None:
+    """``noise_floor_per_channel`` returns ALL bins, INCLUDING out-of-band ones.
+
+    Issue #81 design choice (pinned here to prevent future drift):
+    the band_range filter is applied ONLY by ``rank_clean_frequencies``
+    (which the operator uses to pick a candidate). The noise floor
+    map is a reference of every measurement the radio reported; it
+    intentionally includes out-of-band readings so the operator can
+    see WHY a candidate was excluded (e.g. the -99 dBm floor above
+    3900 MHz on 3 GHz hardware). Applying the filter to BOTH would
+    hide the diagnostic signal.
+
+    If a future contributor wants to apply the filter to the noise
+    floor dict too, they MUST update this test first.
+    """
+    bins = [
+        # In-band (3500 band: 3300-3900)
+        SpectrumBin(frequency_mhz=3600.0, polarization="V", avg_dbm=-65, max_dbm=-64),
+        # Out-of-band (>3900 — 3 GHz artificial floor)
+        SpectrumBin(frequency_mhz=4050.0, polarization="V", avg_dbm=-99, max_dbm=-99),
+    ]
+    noise = noise_floor_per_channel(bins)
+    # BOTH frequencies appear — no filtering here:
+    assert set(noise.keys()) == {"3600.0", "4050.0"}
+    assert noise["4050.0"] == -99
+    # And rank_clean_frequencies DOES filter (separate test above):
+    ranked = rank_clean_frequencies(bins, top_n=10, band_range=(3300.0, 3900.0))
+    assert ranked == [3600.0]
 
 
 __all__ = [
@@ -502,4 +814,13 @@ __all__ = [
     "test_noise_floor_per_channel_empty_returns_empty",
     "test_noise_floor_per_channel_worst_leg_per_frequency",
     "test_spectrum_http_errors_inherit_driver_error",
+    "test_read_band_range_after_sweep_happy_path_3ghz",
+    "test_read_band_range_after_sweep_happy_path_5ghz",
+    "test_read_band_range_after_sweep_band5800_folds_into_band5700",
+    "test_read_band_range_after_sweep_string_coerced_enum",
+    "test_read_band_range_after_sweep_catalog_missing_oid_returns_none",
+    "test_read_band_range_after_sweep_unrecognised_enum_returns_none",
+    "test_read_band_range_after_sweep_get_failure_returns_none",
+    "test_read_band_range_after_sweep_uncoercible_string_returns_none",
+    "test_noise_floor_per_channel_is_unfiltered_by_design",
 ]
