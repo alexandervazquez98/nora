@@ -303,6 +303,7 @@ def _fetch_and_populate_post_sweep(
     ap_host: str,
     sm_hosts: list[str] | None,
     settings: "Settings | None",
+    band_range: tuple[float, float] | None = None,
 ) -> tuple[list[float], dict[str, float], str]:
     """Run the post-sweep HTTP ladder and populate the RF bin fields.
 
@@ -318,7 +319,11 @@ def _fetch_and_populate_post_sweep(
          the bins across AP + SMs.
       4. Compute :func:`noise_floor_per_channel` (per-channel
          worst-leg avg_dbm) and :func:`rank_clean_frequencies`
-         (top-N worst-case-min-first).
+         (top-N worst-case-min-first). Issue #81: when
+         ``band_range`` is supplied, :func:`rank_clean_frequencies`
+         filters out-of-band bins BEFORE ranking so the 3 GHz
+         radio (C030045A002A) does not surface out-of-band 4 GHz
+         "cleanest" candidates.
 
     Failure policy: ANY exception raised by the HTTP fetch ladder OR
     the XML parser is NON-FATAL — the helper returns empty lists /
@@ -413,8 +418,93 @@ def _fetch_and_populate_post_sweep(
         return ([], {}, "")
 
     noise = noise_floor_per_channel(all_bins)
-    ranked = rank_clean_frequencies(all_bins, top_n=ranking_top_n)
+    ranked = rank_clean_frequencies(all_bins, top_n=ranking_top_n, band_range=band_range)
     return (ranked, noise, sm_error)
+
+
+def _read_band_range_after_sweep(
+    *,
+    client: Any,
+    catalog: Any,
+) -> tuple[float, float] | None:
+    """Read the radio's ``radioFrequencyBand`` OID after a successful sweep.
+
+    Issue #81. Maps the integer returned by the OID to a band-class
+    name via :func:`nora.drivers.snmp_pmp450i.band_plan._band_name_from_enum`
+    and then to a numeric range via
+    :func:`nora.drivers.snmp_pmp450i.band_plan._range_for_band`. The
+    resulting range is passed to :func:`rank_clean_frequencies` so
+    out-of-band bins are dropped before ranking.
+
+    Args:
+        client: The writable SNMP client that just completed the
+            sweep. Caller MUST NOT close it before this returns.
+        catalog: The resolved OID catalog (used to look up the
+            ``radioFrequencyBand`` OID string).
+
+    Returns:
+        ``(low_mhz, high_mhz)`` when the radio's band identity is
+        recognised AND maps to a known regulatory range. ``None``
+        when ANY of the following is true (preserves v1 behaviour
+        of trusting the spectrum analyser data as ground truth):
+
+        * The catalog does not carry a ``radioFrequencyBand`` OID
+          (legacy catalog, pre-v2).
+        * The GET raises (race, timeout, agent error).
+        * The integer value is not in the recognised Cambium enum
+          table (``unknown`` sentinel, future firmware).
+        * The mapped band name does not have a regulatory range
+          (shouldn't happen with current data).
+
+    Every failure path emits a structured ``logger.warning`` so an
+    operator scanning the post-sweep logs can see WHY the band
+    filter was skipped. Failures are NEVER fatal — the sweep
+    already completed and the operator still gets the bin data.
+    """
+    from nora.drivers.snmp_pmp450i.band_plan import (  # local import — avoid circular
+        _band_name_from_enum,
+        _range_for_band,
+    )
+
+    band_oid = catalog.oids.get("radioFrequencyBand")
+    if not band_oid:
+        logger.warning(
+            "post-sweep: catalog lacks radioFrequencyBand OID; "
+            "rank_clean_frequencies will use no band filter (v1 behaviour)."
+        )
+        return None
+    try:
+        raw = client.get_oid(band_oid)
+    except Exception as exc:  # noqa: BLE001 — defensive: any agent / wire failure
+        logger.warning(
+            "post-sweep: radioFrequencyBand GET failed; "
+            "rank_clean_frequencies will use no band filter. error=%r",
+            exc,
+        )
+        return None
+    band_name = _band_name_from_enum(raw)
+    if band_name is None:
+        logger.warning(
+            "post-sweep: radioFrequencyBand returned unrecognised value %r; "
+            "rank_clean_frequencies will use no band filter.",
+            raw,
+        )
+        return None
+    band_range = _range_for_band(band_name)
+    if band_range is None:
+        logger.warning(
+            "post-sweep: radioFrequencyBand mapped to %r but no regulatory "
+            "range is modelled; rank_clean_frequencies will use no band filter.",
+            band_name,
+        )
+        return None
+    logger.info(
+        "post-sweep: radio band=%s range=(%.1f, %.1f) MHz — ranker filtered.",
+        band_name,
+        band_range[0],
+        band_range[1],
+    )
+    return band_range
 
 
 # ---------------------------------------------------------------------------
@@ -568,6 +658,7 @@ def fetch_spectrum(
     )
 
     client = driver._writable_client_factory(device)  # noqa: SLF001 — internal API
+    band_range: tuple[float, float] | None = None
     try:
         _arm_sweep(
             client=client,
@@ -582,6 +673,16 @@ def fetch_spectrum(
             timeout_seconds=timeout_default,
             sweep_duration_seconds=effective_duration,
         )
+        # Issue #81: after the sweep completes (and only when the
+        # sweep produced usable results, i.e. final_status == 4),
+        # read the radio's ``radioFrequencyBand`` OID so the
+        # post-sweep ladder can filter the ranker to the radio's
+        # actual regulatory band. This is the band-limit fix for
+        # 3 GHz Cambium hardware (C030045A002A) whose hardware
+        # spectrum sweep measures up to ~4200 MHz and returns
+        # artificial -99 dBm floor readings above 3900 MHz.
+        if last_status == 4:
+            band_range = _read_band_range_after_sweep(client=client, catalog=catalog)
     finally:
         try:
             client.close()
@@ -609,6 +710,7 @@ def fetch_spectrum(
             ap_host=ap_host,
             sm_hosts=sm_hosts,
             settings=settings,
+            band_range=band_range,
         )
 
     return SpectrumSweepResult(
