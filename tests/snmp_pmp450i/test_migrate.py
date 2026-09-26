@@ -1475,6 +1475,109 @@ def test_fetch_migrate_reboot_required_false_when_firmware_votes_0(
     assert result["reboot_required"] is False
 
 
+def test_fetch_migrate_intervention_record_payload_validates_against_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #89: the captured ``save_intervention_record`` payload MUST validate.
+
+    Pre-fix: ``fetch_migrate`` emitted ``stage="POST_MIGRATION"``, which is NOT
+    in the canonical ``Stage = Literal[...]`` enum declared in
+    ``src/nora/intervention_memory/models.py``. The writer's
+    ``InterventionMemoryRecord.model_validate(payload)`` raised
+    ``ValidationError`` on ``stage``; ``save_intervention_record`` swallowed
+    the error and returned ``{"status": "INVALID_PAYLOAD", "errors": [...]}``;
+    ``fetch_migrate`` ignored the return value, so no JSON file landed under
+    ``var/interventions/``. Operator-visible symptom: intervention records
+    silently missing for every successful migration.
+
+    Post-fix: the captured payload MUST validate cleanly against the model.
+    For a non-rolled-back migration the stage is ``POST_MIGRATION_VERIFIED``
+    (the only ``Stage`` literal that semantically matches a successful
+    migration); for a rolled-back path it is ``SAFETY_ABORT``. See
+    ``src/nora/intervention_memory/models.py`` for the canonical enum.
+    """
+    from nora.drivers.snmp_pmp450i import migrate as migrate_mod
+    from nora.intervention_memory.models import InterventionMemoryRecord
+
+    inv = _build_inventory_with_sms(tmp_path, sm_luids=())
+    registry = _build_catalog(firmware="15.2.1")
+    factory = _RecordingFactory(sysdescr_per_host={"192.0.2.10": "Cambium PMP 450i AP 15.2.1"})
+    settings = _settings(preflight_enabled=True)
+    driver = _build_driver(inventory=inv, registry=registry, factory=factory, settings=settings)
+
+    monkeypatch.setattr(
+        "nora.drivers.snmp_pmp450i.subscribers.search_intervention_history",
+        lambda *args, **kwargs: [],
+    )
+    monkeypatch.setattr(
+        migrate_mod,
+        "fetch_sm_table",
+        lambda **kw: _fake_sm_summary(online_luids=(), degraded_luids=()),
+    )
+    monkeypatch.setattr(migrate_mod, "_start_rollback_watchdog", lambda **kw: None)
+    monkeypatch.setattr(migrate_mod, "_cancel_rollback_watchdog", lambda *a, **kw: None)
+    monkeypatch.setattr(migrate_mod, "_wait_for_management_reachability", lambda **kw: True)
+
+    captured: list[dict[str, Any]] = []
+
+    def fake_save(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        # Args: (settings, payload). Capture ONLY the payload — settings
+        # carries the secrets config and must not leak into test logs.
+        captured.append(args[1])
+        return {"status": "OK", "intervention_id": "INT-test-issue-89"}
+
+    monkeypatch.setattr(migrate_mod, "save_intervention_record", fake_save)
+
+    import json
+
+    from nora.hitl.tokens import mint_token
+
+    token_obj = mint_token(
+        "tester",
+        ttl_seconds=900,
+        signing_key=SecretStr("test-snmp-migrate-wu4-hmac-key"),
+    )
+    valid_token = json.dumps(token_obj.model_dump(mode="json"))
+
+    result = migrate_mod.fetch_migrate(
+        driver=driver,
+        device_id="ap-7400-01",
+        approval_token=valid_token,
+        target_frequency_mhz=5800.0,
+        settings=settings,
+    )
+
+    assert result["rolled_back"] is False, (
+        "Test setup must reach the success path; "
+        f"got rolled_back=True (reason={result.get('reason')!r})"
+    )
+    assert len(captured) == 1, (
+        f"fetch_migrate MUST emit exactly one intervention record per completion; "
+        f"got {len(captured)}"
+    )
+    payload = captured[0]
+
+    # Whole-payload validation — this is what ``save_intervention_record``
+    # does internally. Pre-fix this raises ValidationError on ``stage``.
+    try:
+        InterventionMemoryRecord.model_validate(payload)
+    except Exception as exc:
+        pytest.fail(
+            "migrate payload fails Pydantic validation against "
+            f"InterventionMemoryRecord (issue #89). Exception: {exc!r}. "
+            f"Captured payload['stage']={payload.get('stage')!r}."
+        )
+
+    # Pin the literal: success path must use POST_MIGRATION_VERIFIED, not
+    # SAFETY_ABORT (which is reserved for the rolled-back path).
+    assert payload["stage"] == "POST_MIGRATION_VERIFIED", (
+        f"Expected stage='POST_MIGRATION_VERIFIED' on the success path; "
+        f"got {payload['stage']!r}. Valid Stage literals are: "
+        "PRE_DIAGNOSTIC, SPECTRUM_ANALYSIS, PRE_MIGRATION, SAFETY_ABORT, "
+        "POST_MIGRATION_VERIFIED, POST_INTERVENTION."
+    )
+
+
 __all__ = [
     # Pure-helper tests — precedence rules.
     "test_resolve_sm_community_inventory_when_overrides_none",
@@ -1501,4 +1604,6 @@ __all__ = [
     # Issue #84 reboot_required regression tests.
     "test_fetch_migrate_reboot_required_when_firmware_votes_1",
     "test_fetch_migrate_reboot_required_false_when_firmware_votes_0",
+    # Issue #89 stage-literal regression test.
+    "test_fetch_migrate_intervention_record_payload_validates_against_model",
 ]
