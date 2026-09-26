@@ -13,7 +13,7 @@ These tests pin the public contract for the slice-4
   :func:`categorize_subscribers` helper.
 * Rollback watchdog — a ``threading.Timer`` armed after the AP SET
   frame reverts the carrier frequency on loss-of-management and
-  emits a ``POST_MIGRATION`` intervention record with
+  emits a ``SAFETY_ABORT`` intervention record with
   ``rolled_back: true``.
 * Intervention record emission — the tool emits exactly one
   ``save_intervention_record`` call per completion (success or
@@ -784,9 +784,15 @@ def test_migrate_emits_intervention_record_on_completion(
 
     Per `pmp450i-radio-tools/spec.md` sub-cluster 3 requirement
     "Intervention Record Emission On Migration Completion": the
-    tool MUST emit one ``POST_MIGRATION`` record per completion
-    (rolled back or not). The test spies on
-    :func:`save_intervention_record` and asserts the call shape.
+    tool MUST emit one post-migration record per completion
+    (rolled back or not). The literal ``stage`` MUST match the
+    canonical ``Stage = Literal[...]`` enum in
+    ``src/nora/intervention_memory/models.py``:
+    ``POST_MIGRATION_VERIFIED`` on the success path, ``SAFETY_ABORT``
+    on the rollback path. ``"POST_MIGRATION"`` is NOT a valid literal
+    (issue #89 — pinning it here would silently drop the audit record).
+    The test spies on :func:`save_intervention_record` and asserts the
+    call shape.
     """
     inv = _build_inventory(tmp_path)
     registry = _build_catalog(firmware="15.2.1")
@@ -842,8 +848,13 @@ def test_migrate_emits_intervention_record_on_completion(
     # signature is ``save_intervention_record(settings, payload)`` —
     # payload is the second positional arg.
     record = captured_calls[0]["args"][1]
-    assert record["stage"] == "POST_MIGRATION", (
-        f"intervention record MUST carry stage=POST_MIGRATION; got {record!r}"
+    # Issue #89: the stage MUST be a valid ``Stage`` literal. Pre-fix
+    # this test pinned the buggy ``"POST_MIGRATION"`` (not in the enum),
+    # which made the writer's Pydantic schema reject the payload and
+    # silently drop the audit record. Pin the CORRECT literal here.
+    assert record["stage"] == "POST_MIGRATION_VERIFIED", (
+        f"intervention record MUST carry stage=POST_MIGRATION_VERIFIED "
+        f"on the success path; got {record!r}"
     )
     # ``target_frequency_mhz`` lands in ``network_equipment.carrier_frequency_mhz``
     # per the InterventionMemoryRecord schema (target_frequency_mhz is a

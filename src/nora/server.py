@@ -447,8 +447,12 @@ def snmp_migrate_radio_frequency(
     "Intervention Record Emission On Migration Completion": the
     tool requires an HITL approval token, follows make-before-break
     (ONLINE_ACTIVE → ACTIVE_DEGRADED → AP carrier), and emits one
-    ``POST_MIGRATION`` intervention record per completion (success
-    or rollback).
+    ``POST_MIGRATION_VERIFIED`` (success) or ``SAFETY_ABORT``
+    (rollback) intervention record per completion. The ``stage``
+    literal MUST match the canonical ``Stage`` enum in
+    ``src/nora/intervention_memory/models.py`` — issue #89 fixed a
+    previous mismatch where ``stage="POST_MIGRATION"`` was silently
+    rejected by the writer's Pydantic schema.
 
     WU-4 (issue #62) — per-SM community overrides. The optional
     ``sm_communities`` parameter is a ``dict[str, str]`` keyed by
