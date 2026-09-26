@@ -20,11 +20,11 @@ sub-cluster 3:
    for ``Settings.nora_hitl_rollback_timeout_seconds`` (default
    300). On loss-of-management the watchdog reverts the SET frame
    to the prior carrier frequency AND the migration emits a
-   ``POST_MIGRATION`` intervention record with
+   ``SAFETY_ABORT`` intervention record with
    ``rolled_back: true, reason: "loss_of_management"``.
 4. On successful reachability check within the timeout the tool
    cancels the watchdog and emits the intervention record with
-   ``rolled_back: false``.
+   ``stage="POST_MIGRATION_VERIFIED"`` and ``rolled_back: false``.
 5. Issue #80 (PR #80 follow-up): when the SNMP client lacks the
    ``set`` verb — e.g. a thin read-only mock used by upstream
    tests that do NOT want to exercise SET frames — the tool
@@ -1158,6 +1158,17 @@ def fetch_migrate(
         # trail is unambiguous.
         record_status = "DRY_RUN" if dry_run else ("ABORTED" if rolled_back else "COMPLETED")
         record_name_prefix = "[DRY-RUN] " if dry_run else ""
+        # Stage must match the canonical ``Stage = Literal[...]`` enum in
+        # ``src/nora/intervention_memory/models.py``. Pre-fix this line
+        # emitted ``"POST_MIGRATION"`` (NOT in the enum), causing the
+        # writer's Pydantic schema to reject the payload and silently
+        # drop the audit record (issue #89). The two valid post-migration
+        # literals are:
+        #   - ``SAFETY_ABORT``            — rollback path (safety-triggered).
+        #   - ``POST_MIGRATION_VERIFIED`` — success or dry-run (the operator
+        #                                   verified a would-set / did-set
+        #                                   carrier move).
+        record_stage = "SAFETY_ABORT" if rolled_back else "POST_MIGRATION_VERIFIED"
         findings_and_dictamen = (
             f"dry_run={dry_run}; would_set={would_set!r}; no SET frames emitted"
             if dry_run
@@ -1169,7 +1180,7 @@ def fetch_migrate(
         try:
             if settings is None:
                 raise RuntimeError("migrate.fetch_migrate requires an explicit Settings instance")
-            save_intervention_record(
+            save_status = save_intervention_record(
                 settings,
                 {
                     "intervention_id": "INT-MIGRATE-{ts}".format(ts=int(time.time())),
@@ -1177,7 +1188,7 @@ def fetch_migrate(
                     "timestamp_unix": int(time.time()),
                     "ticket_number": "MIGRATE-7400",
                     "target_ip": str(getattr(device, "host", device_id)),
-                    "stage": "POST_MIGRATION",
+                    "stage": record_stage,
                     "record_name": (
                         f"{record_name_prefix}RF migration of {device_id} "
                         f"to {target_frequency_mhz} MHz"
@@ -1204,6 +1215,18 @@ def fetch_migrate(
                     "sm_community_overrides_used": override_count,
                 },
             )
+            # ``save_intervention_record`` NEVER raises (per its contract)
+            # — it returns a status dict on every failure mode. Surface
+            # non-OK statuses with a structured warning so silent payload
+            # rejections (e.g. ``INVALID_PAYLOAD`` from a typo'd ``stage``
+            # literal, issue #89) become visible in operator logs instead
+            # of being swallowed by the surrounding try/except.
+            if isinstance(save_status, dict) and save_status.get("status") != "OK":
+                logger.warning(
+                    "migrate: save_intervention_record returned non-OK status for device=%s: %s",
+                    device_id,
+                    save_status,
+                )
         except Exception:  # pragma: no cover - writer has its own status codes
             logger.exception("migrate: save_intervention_record failed for device=%s", device_id)
 
