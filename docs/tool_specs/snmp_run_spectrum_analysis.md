@@ -112,6 +112,40 @@ Runs ONLY when `final_status == 4` (the success sentinel that implies results ar
 | `nora_spectrum_sm_reassociation_timeout_seconds` | 15.0 | `[1.0, 60.0]` | Wait between AP completion and SM XML fetch. |
 | `nora_spectrum_ranking_top_n` | 10 | `[1, 100]` | Top-N for `ranked_clean_frequencies`. |
 
+## Band-range filter (issue #81)
+
+The Cambium PMP 450i 3 GHz radio module (reference `C030045A002A`,
+FCC CBRS / lightly-licensed 3 GHz block 3300.0-3900.0 MHz) measures
+the spectrum sweep up to ~4200 MHz and reports an artificial
+`-99 dBm` floor for everything above 3900 MHz. Without a band-range
+filter, `rank_clean_frequencies` would recommend those out-of-band
+4 GHz bins as the "cleanest" candidates (the floor is the lowest
+noise reading), contaminating the operator's downstream migration
+decision.
+
+When the catalog carries `radioFrequencyBand` (catalog v2 +
+`1.3.6.1.4.1.161.19.3.3.16.1.1.2`), the helper reads the OID after
+the sweep completes (only when `final_status == 4`), maps the
+integer enum value to a Cambium band-class name via
+`_band_name_from_enum`, then to a `(low_mhz, high_mhz)` range via
+`_range_for_band`, and threads that range into
+`rank_clean_frequencies(band_range=...)`. Out-of-band bins are
+dropped **before** ranking, so the ranker never sees the artificial
+floor.
+
+| Radio hardware | Catalog band | Filter range (MHz) | Floor artifact? |
+|---|---|---|---|
+| PMP 450i 5.x (firmware 25.x) | `band5100` / `band5200` / `band5400` / `band5700` | 5150-5875 | No |
+| PMP 450i 3 GHz (`C030045A002A`) | `band3500` | 3300-3900 | Yes (`-99 dBm` above 3900) |
+| Public Safety | `band4900` | 4900-5000 | No |
+
+**Failure policy.** Every step of the band-resolution chain (catalog
+missing the OID, GET raises, integer unrecognised, mapped name
+unmodelled) falls back to **no filter** (v1 behaviour preserved) and
+emits a structured `logger.warning`. The sweep itself is unaffected;
+the operator still gets the bin data, just without the band-range
+pre-filter.
+
 ## Notes
 
 - The post-sweep ladder is **sequential** for v1; concurrent SM fan-out is tracked as a follow-up.

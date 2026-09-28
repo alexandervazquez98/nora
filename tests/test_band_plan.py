@@ -37,6 +37,10 @@ from __future__ import annotations
 # MHz low / high boundaries (inclusive). The order matters: the
 # detector picks the FIRST matching band in this list.
 _CAMBIUM_BAND_RANGES_MHZ: tuple[tuple[str, float, float], ...] = (
+    # CBRS / lightly-licensed 3 GHz. Cambium documents `band3500` in
+    # the `radioFrequencyBand` enum on the 3 GHz radio module
+    # (reference C030045A002A). Added in issue #81.
+    ("3500", 3300.0, 3900.0),
     # Public Safety (4.9 GHz). Cambium documents `band4900` in the
     # `radioFrequencyBand` enum.
     ("4900", 4900.0, 5000.0),
@@ -110,8 +114,42 @@ def test_band_for_frequency_4_9_ghz_returns_4900() -> None:
 
 
 def test_band_for_frequency_outside_cambium_bands_returns_none() -> None:
-    """A 3500 MHz carrier is OUTSIDE the Cambium PMP 450i 4.9/5.x bands."""
-    assert _band_for_frequency(3500.0) is None
+    """A 2400 MHz carrier (sub-3.3 GHz ISM) is OUTSIDE the Cambium PMP 450i bands.
+
+    Note: the 3 GHz band ``3500`` (3300.0 - 3900.0 MHz) was added in
+    issue #81 for the Cambium 3 GHz radio module. A 3500 MHz
+    carrier now maps to that band, NOT to ``None``. Sub-3.3 GHz
+    carriers (e.g. 2400 MHz ISM, 2700 MHz Wi-Fi 6E lower) remain
+    outside the Cambium regulatory table.
+    """
+    assert _band_for_frequency(2400.0) is None
+
+
+def test_band_for_frequency_3_5_ghz_returns_3500() -> None:
+    """A 3600 MHz carrier maps to the 3500 CBRS / lightly-licensed band.
+
+    Issue #81 regression: this band was missing from the table
+    pre-fix, causing ``_band_for_frequency(3600.0)`` to return
+    ``None`` and breaking the band-crossing detector on 3 GHz
+    sectors. The fix adds the band so the 3 GHz radio module
+    (``C030045A002A``) is properly recognised.
+    """
+    assert _band_for_frequency(3600.0) == "3500"
+
+
+def test_band_for_frequency_3_5_ghz_lower_boundary_3300() -> None:
+    """The 3500 band starts at 3300 MHz inclusive (CBRS lower edge)."""
+    assert _band_for_frequency(3300.0) == "3500"
+
+
+def test_band_for_frequency_3_5_ghz_upper_boundary_3900() -> None:
+    """The 3500 band ends at 3900 MHz inclusive (CBRS upper edge)."""
+    assert _band_for_frequency(3900.0) == "3500"
+
+
+def test_band_for_frequency_just_above_3500_band_returns_none() -> None:
+    """A 3901 MHz carrier is OUTSIDE the 3500 band (post-CBRS gap)."""
+    assert _band_for_frequency(3901.0) is None
 
 
 def test_band_for_frequency_boundary_5_25_ghz() -> None:

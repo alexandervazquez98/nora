@@ -443,25 +443,45 @@ def rank_clean_frequencies(
     bins: list[SpectrumBin],
     *,
     top_n: int = 10,
+    band_range: tuple[float, float] | None = None,
 ) -> list[float]:
     """Rank frequencies by worst-leg avg_dbm; return the top ``n`` cleanest.
 
     Algorithm ("worst-case min first"):
 
-    1. For each unique frequency ``f``, compute
-       ``worst_avg = max(avg_dbm across all bins at f)`` — the channel's
-       worst-leg noise proxy.
-    2. Sort unique frequencies ascending by ``worst_avg`` (most
+    1. **Filter** (optional, issue #81). When ``band_range`` is a
+       ``(low_mhz, high_mhz)`` tuple, drop every bin whose
+       ``frequency_mhz`` falls outside the range BEFORE ranking.
+       This is the band-limit fix for 3 GHz Cambium hardware
+       (C030045A002A) whose spectrum sweep returns artificial
+       -99 dBm floor readings above 3900 MHz. Without the filter
+       the ranker would recommend out-of-band 4 GHz candidates as
+       the "cleanest" because they have the lowest noise floor.
+       ``band_range=None`` preserves the v1 behaviour of trusting
+       the spectrum analyser data as ground truth.
+    2. For each REMAINING unique frequency ``f``, compute
+       ``worst_avg = max(avg_dbm across all bins at f)`` — the
+       channel's worst-leg noise proxy.
+    3. Sort unique frequencies ascending by ``worst_avg`` (most
        negative = cleanest first; ties broken by frequency ascending).
-    3. Return the top ``n`` frequency values (MHz) as a flat list.
+    4. Return the top ``n`` frequency values (MHz) as a flat list.
 
     ``top_n`` defaults to 10; callers (the spectrum helper) override
     via ``Settings.nora_spectrum_ranking_top_n``.
 
-    Empty input → empty list.
+    Empty input (or empty after filtering) → empty list.
     """
     if not bins or top_n <= 0:
         return []
+    if band_range is not None:
+        low, high = band_range
+        bins = [
+            bin_
+            for bin_ in bins
+            if low <= bin_.frequency_mhz <= high
+        ]
+        if not bins:
+            return []
     worst_per_freq: dict[float, int] = {}
     for bin_ in bins:
         freq = bin_.frequency_mhz
