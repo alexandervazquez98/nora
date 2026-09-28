@@ -36,6 +36,7 @@ from pydantic import BaseModel, ConfigDict, SecretStr
 
 from nora.drivers.exceptions import (
     DeviceUnreachable,
+    DriverError,
     DuplicateDeviceError,
     InvalidCommunity,
     InvalidHostError,
@@ -272,6 +273,15 @@ def _register_device_impl(
                 raise DeviceUnreachable(host) from None
             except InvalidCommunity:
                 raise InvalidCommunity(community) from None
+            except DriverError as exc:
+                # SnmpTimeoutError and any other DriverError subclass
+                # that the above typed clauses do not cover must still
+                # be translated to DeviceUnreachable so the operator sees
+                # a typed actionable error rather than a bare OID literal
+                # (issue #97 Part 3). DuplicateDeviceError is NOT caught
+                # here because it is raised by mutable_inventory.register
+                # below this block and must propagate.
+                raise DeviceUnreachable(host) from exc
         finally:
             try:
                 client.close()

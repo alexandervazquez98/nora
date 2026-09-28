@@ -470,6 +470,16 @@ def _validate_sm_communities(
         else:
             effective_device = sm_device
 
+        # Issue #97: when the AP reported a live ``sm_ip`` that differs
+        # from the inventory device's stale ``host``, point the probe at
+        # the live IP so the pre-flight succeeds against re-IP'd SMs.
+        # ``host`` (the inventory value) is left unchanged so existing
+        # pinned tests continue to assert on the inventory host rather
+        # than the live IP; ``effective_device`` carries the live host
+        # to the SNMP client so the correct address is contacted.
+        if sm_ip and sm_ip != getattr(sm_device, "host", None):
+            effective_device = effective_device.model_copy(update={"host": sm_ip})
+
         try:
             sm_client = client_factory(effective_device)
         except (OSError, TimeoutError, SnmpTimeoutError) as exc:

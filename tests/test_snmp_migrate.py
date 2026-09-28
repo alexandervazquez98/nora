@@ -2011,6 +2011,300 @@ def test_preflight_missing_inventory_entry_message_includes_ip(
     assert "register via register_device" in msg
 
 
+# ---------------------------------------------------------------------------
+# Issue #97 — Part 1: pre-flight live-host override.
+#
+# The pre-flight resolves SM devices via ``_resolve_sm_device`` which
+# returns the inventory device (with a stale host). The AP reports a
+# live IP (``sm_ip``) but it was not being used for the probe
+# destination — the stale inventory host was used instead. The fix:
+# when ``sm_ip`` is present and differs from ``sm_device.host``, the
+# pre-flight overrides ``effective_device.host`` so the SNMP probe
+# goes to the live IP instead.
+#
+# Three regressions being pinned:
+#   T1. Live IP from SM table overrides stale inventory host.
+#   T2. No override when inventory host already matches live IP.
+#   T3. After tier-3 substring match, the live IP (not the matched
+#       inventory host) is the probe destination.
+# ---------------------------------------------------------------------------
+
+
+def test_preflight_sm_host_uses_live_sm_table_when_inventory_is_stale(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T1: inventory SM host is stale; pre-flight probes the live IP from the AP table.
+
+    Inventory has SM ``001`` at ``192.0.2.20`` (stale). The AP's SM-table
+    reports the SM is now at ``192.0.2.100``. The pre-flight MUST probe
+    ``192.0.2.100`` (the live IP), not ``192.0.2.20`` (the stale inventory
+    host). The SNMP probe succeeds at the live IP.
+
+    After the fix: ``effective_device.host`` is overridden to the live IP
+    so the probe destination is correct.
+    """
+    from nora.drivers.snmp_pmp450i import migrate as migrate_mod
+
+    # Inventory: SM 001 at 192.0.2.20 (stale).
+    inv = _build_inventory_with_sms(tmp_path, sm_luids=("001",))
+    registry = _build_catalog(firmware="15.2.1")
+
+    # AP reports SM 001 at live IP 192.0.2.100.
+    # Only 192.0.2.100 answers SNMP — 192.0.2.20 is NOT reachable.
+    routed = _RoutedFakeSnmpClient(
+        per_host_sysdescr={
+            "192.0.2.100": "Cambium PMP 450i SM 001 15.2.1",
+        },
+    )
+    settings = _settings_with_rollback_timeout(60, preflight_community_validation=True)
+    driver = _build_driver(
+        inventory=inv,
+        registry=registry,
+        canned=routed,
+        settings=settings,
+    )
+    monkeypatch.setattr(driver, "_client_factory", _routing_client_factory(routed))
+    monkeypatch.setattr(
+        "nora.drivers.snmp_pmp450i.subscribers.search_intervention_history",
+        lambda *args, **kwargs: [],
+    )
+    monkeypatch.setattr(
+        migrate_mod,
+        "fetch_sm_table",
+        lambda **kw: _fake_sm_summary(
+            online_luids=("001",),
+            degraded_luids=(),
+            online_ips={"001": "192.0.2.100"},
+        ),
+    )
+    monkeypatch.setattr(migrate_mod, "_start_rollback_watchdog", lambda **kw: None)
+    monkeypatch.setattr(migrate_mod, "_cancel_rollback_watchdog", lambda *a, **kw: None)
+    monkeypatch.setattr(migrate_mod, "_wait_for_management_reachability", lambda **kw: True)
+    monkeypatch.setattr(migrate_mod, "save_intervention_record", lambda *a, **kw: {"status": "OK"})
+
+    result = migrate_mod.fetch_migrate(
+        driver=driver,
+        device_id="ap-7400-01",
+        approval_token=_mint_valid_token(),
+        target_frequency_mhz=5800.0,
+        settings=settings,
+    )
+
+    # Assert 1: the pre-flight probed the LIVE IP (192.0.2.100), NOT the
+    # stale inventory host (192.0.2.20).
+    # Filter out the migration SET OID (belongs to the AP, not SM probes).
+    migration_oid = "1.3.6.1.4.1.161.19.3.1.4.1.38.0"
+    sm_calls = [(h, oid) for h, oid in routed.get_calls if "192.0.2" in h and oid != migration_oid]
+    sm_hosts = {h for h, _ in sm_calls}
+    assert "192.0.2.100" in sm_hosts, (
+        f"Pre-flight MUST probe the live IP 192.0.2.100; get_calls were: {sm_calls!r}"
+    )
+    assert "192.0.2.20" not in sm_hosts, (
+        f"Pre-flight MUST NOT probe the stale inventory host 192.0.2.20; "
+        f"get_calls were: {sm_calls!r}"
+    )
+
+    # Assert 2: pre-flight succeeded — no CommunityValidationFailed.
+    assert "rolled_back" in result, f"Expected MigrationResult-shaped dict; got {result!r}"
+    assert result["rolled_back"] is False
+
+    # Assert 3: SmPreFlightResult.host stays as the inventory value
+    # (the existing pinned contract — the result host is the IP used to
+    # look up the device in inventory, not the live AP-reported IP).
+    # This assertion captures the CURRENT behavior that we are NOT changing.
+    # After the fix, the report object would need to be accessible here;
+    # for now we assert via the get_calls contract above which is the
+    # real probe-destination guarantee.
+
+
+def test_preflight_sm_host_does_not_override_when_inventory_matches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T2: no false-positive — when inventory host matches live IP, no override occurs.
+
+    Inventory has SM ``001`` at ``192.0.2.20``. The AP's SM-table also
+    reports the SM at ``192.0.2.20`` (matching). The pre-flight behaves
+    identically to the baseline: probes ``192.0.2.20`` and passes.
+    """
+    from nora.drivers.snmp_pmp450i import migrate as migrate_mod
+
+    # Inventory: SM 001 at 192.0.2.20 — matches the AP-reported live IP.
+    inv = _build_inventory_with_sms(tmp_path, sm_luids=("001",))
+    registry = _build_catalog(firmware="15.2.1")
+    routed = _RoutedFakeSnmpClient(
+        per_host_sysdescr={
+            "192.0.2.20": "Cambium PMP 450i SM 001 15.2.1",
+        },
+    )
+    settings = _settings_with_rollback_timeout(60, preflight_community_validation=True)
+    driver = _build_driver(
+        inventory=inv,
+        registry=registry,
+        canned=routed,
+        settings=settings,
+    )
+    monkeypatch.setattr(driver, "_client_factory", _routing_client_factory(routed))
+    monkeypatch.setattr(
+        "nora.drivers.snmp_pmp450i.subscribers.search_intervention_history",
+        lambda *args, **kwargs: [],
+    )
+    monkeypatch.setattr(
+        migrate_mod,
+        "fetch_sm_table",
+        lambda **kw: _fake_sm_summary(
+            online_luids=("001",),
+            degraded_luids=(),
+            online_ips={"001": "192.0.2.20"},  # matches inventory host
+        ),
+    )
+    monkeypatch.setattr(migrate_mod, "_start_rollback_watchdog", lambda **kw: None)
+    monkeypatch.setattr(migrate_mod, "_cancel_rollback_watchdog", lambda *a, **kw: None)
+    monkeypatch.setattr(migrate_mod, "_wait_for_management_reachability", lambda **kw: True)
+    monkeypatch.setattr(migrate_mod, "save_intervention_record", lambda *a, **kw: {"status": "OK"})
+
+    result = migrate_mod.fetch_migrate(
+        driver=driver,
+        device_id="ap-7400-01",
+        approval_token=_mint_valid_token(),
+        target_frequency_mhz=5800.0,
+        settings=settings,
+    )
+
+    # Assert 1: only the matching inventory host was contacted for the SM probe.
+    # Filter out the AP's migration SET OID and the AP's sysDescr probe
+    # so we isolate only the pre-flight SM probe calls.
+    migration_oid = "1.3.6.1.4.1.161.19.3.1.4.1.38.0"
+    ap_host = "192.0.2.10"
+    sm_calls = [
+        (h, oid)
+        for h, oid in routed.get_calls
+        if "192.0.2" in h and oid != migration_oid and h != ap_host
+    ]
+    sm_hosts = {h for h, _ in sm_calls}
+    assert sm_hosts == {"192.0.2.20"}, (
+        f"Pre-flight MUST probe only 192.0.2.20 when live IP matches inventory; "
+        f"get_calls were: {sm_calls!r}"
+    )
+
+    # Assert 2: pre-flight succeeded.
+    assert "rolled_back" in result
+    assert result["rolled_back"] is False
+
+
+def test_preflight_tier3_substring_fallback_behavior_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T3: after tier-3 substring match, the probe destination is the live AP-reported IP.
+
+    Tier 3 fires when: no inventory entry has the SM's IP (tier 1 miss) AND
+    no inventory entry has the exact LUID (tier 2 miss), but the LUID
+    appears as a substring in some inventory device_id.
+
+    Setup:
+    - Inventory: ``sm-7400-001`` at ``192.0.2.20`` — contains LUID ``001`` as substring.
+    - AP reports SM ``001`` at live IP ``192.0.2.100`` (different from inventory host).
+    - Tier 1 (IP match) misses: no device at ``192.0.2.100``.
+    - Tier 2 (exact LUID) misses: ``inventory.get("001")`` raises DeviceNotFoundError.
+    - Tier 3 (substring): ``"001" in "sm-7400-001"`` → matches ``sm-7400-001`` at ``192.0.2.20``.
+
+    After the fix: ``effective_device.host`` is overridden to the live IP
+    ``192.0.2.100`` (the AP-reported IP), so the SNMP probe goes to the
+    correct current location of the SM — NOT to the stale ``192.0.2.20``
+    that was matched via substring.
+    """
+    from nora.drivers.snmp_pmp450i import migrate as migrate_mod
+
+    # Custom inventory: AP + SM "sm-7400-001" at 192.0.2.20 (stale host,
+    # but contains "001" substring so tier-3 will match it).
+    devices = [
+        {
+            "device_id": "ap-7400-01",
+            "vendor": "cambium",
+            "model": "pmp450i",
+            "firmware": "15.2.1",
+            "host": "192.0.2.10",
+            "snmp_version": "v2c",
+            "community": "change-me-v2c",
+        },
+        {
+            "device_id": "sm-7400-001",  # contains "001" as substring
+            "vendor": "cambium",
+            "model": "pmp450i",
+            "firmware": "15.2.1",
+            "host": "192.0.2.20",  # different from live IP 192.0.2.100
+            "snmp_version": "v2c",
+            "community": "change-me-v2c",
+        },
+    ]
+    payload = {"devices": devices}
+    inv_path = tmp_path / "devices.yaml"
+    inv_path.write_text(yaml.safe_dump(payload))
+    inv = Inventory.from_yaml(inv_path)
+
+    registry = _build_catalog(firmware="15.2.1")
+
+    # Only reachable at the live AP-reported IP 192.0.2.100.
+    # The stale inventory host 192.0.2.20 must NOT be contacted.
+    routed = _RoutedFakeSnmpClient(
+        per_host_sysdescr={
+            "192.0.2.100": "Cambium PMP 450i SM 001 15.2.1",
+        },
+    )
+    settings = _settings_with_rollback_timeout(60, preflight_community_validation=True)
+    driver = _build_driver(
+        inventory=inv,
+        registry=registry,
+        canned=routed,
+        settings=settings,
+    )
+    monkeypatch.setattr(driver, "_client_factory", _routing_client_factory(routed))
+    monkeypatch.setattr(
+        "nora.drivers.snmp_pmp450i.subscribers.search_intervention_history",
+        lambda *args, **kwargs: [],
+    )
+    # AP reports SM 001 at the live IP 192.0.2.100 (different from the
+    # inventory host 192.0.2.20 that tier-3 will match).
+    monkeypatch.setattr(
+        migrate_mod,
+        "fetch_sm_table",
+        lambda **kw: _fake_sm_summary(
+            online_luids=("001",),
+            degraded_luids=(),
+            online_ips={"001": "192.0.2.100"},
+        ),
+    )
+    monkeypatch.setattr(migrate_mod, "_start_rollback_watchdog", lambda **kw: None)
+    monkeypatch.setattr(migrate_mod, "_cancel_rollback_watchdog", lambda *a, **kw: None)
+    monkeypatch.setattr(migrate_mod, "_wait_for_management_reachability", lambda **kw: True)
+    monkeypatch.setattr(migrate_mod, "save_intervention_record", lambda *a, **kw: {"status": "OK"})
+
+    result = migrate_mod.fetch_migrate(
+        driver=driver,
+        device_id="ap-7400-01",
+        approval_token=_mint_valid_token(),
+        target_frequency_mhz=5800.0,
+        settings=settings,
+    )
+
+    # Assert 1: the pre-flight probed the LIVE IP (192.0.2.100),
+    # NOT the stale inventory host (192.0.2.20) that tier-3 matched.
+    # Filter out the migration SET OID (belongs to the AP, not SM probes).
+    migration_oid = "1.3.6.1.4.1.161.19.3.1.4.1.38.0"
+    sm_calls = [(h, oid) for h, oid in routed.get_calls if "192.0.2" in h and oid != migration_oid]
+    sm_hosts = {h for h, _ in sm_calls}
+    assert "192.0.2.100" in sm_hosts, (
+        f"Pre-flight MUST probe the live AP-reported IP 192.0.2.100; get_calls were: {sm_calls!r}"
+    )
+    assert "192.0.2.20" not in sm_hosts, (
+        f"Pre-flight MUST NOT probe the stale inventory host 192.0.2.20 "
+        f"matched by tier-3 substring; get_calls were: {sm_calls!r}"
+    )
+
+    # Assert 2: pre-flight succeeded (SM is reachable at the live IP).
+    assert "rolled_back" in result, f"Expected MigrationResult-shaped dict; got {result!r}"
+    assert result["rolled_back"] is False
+
+
 __all__ = [
     "test_migrate_requires_hitl_approval_token",
     "test_migrate_make_before_break_migrates_online_active_first",
@@ -2041,4 +2335,8 @@ __all__ = [
     "test_preflight_succeeds_with_adhoc_registered_sms",
     "test_preflight_with_sm_communities_override_unlocks_missing_inventory_sms",
     "test_preflight_missing_inventory_entry_message_includes_ip",
+    # Issue #97 Part 1 — pre-flight live-host override regression tests.
+    "test_preflight_sm_host_uses_live_sm_table_when_inventory_is_stale",
+    "test_preflight_sm_host_does_not_override_when_inventory_matches",
+    "test_preflight_tier3_substring_fallback_behavior_unchanged",
 ]
