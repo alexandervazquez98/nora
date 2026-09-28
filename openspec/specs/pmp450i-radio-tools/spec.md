@@ -156,13 +156,13 @@ The tool SHALL trigger a spectrum sweep inside the configured maintenance window
 
 ### Requirement: Intervention Record Emission On Migration Completion
 
-On successful migration (with or without rollback), the tool SHALL emit one `save_intervention_record` payload via `nora.intervention_writer.writer.save_intervention_record`. The payload MUST include `stage == "POST_MIGRATION"`, requested + actual frequencies, and per-category SM counts.
+On successful migration (with or without rollback), the tool SHALL emit one `save_intervention_record` payload via `nora.intervention_writer.writer.save_intervention_record`. The payload MUST include `stage == "POST_MIGRATION_VERIFIED"`, requested + actual frequencies, and per-category SM counts.
 
-#### Scenario: completed migration writes a POST_MIGRATION record (rolled back or not)
+#### Scenario: completed migration writes a POST_MIGRATION_VERIFIED record (rolled back or not)
 
 - GIVEN the migration completes with `rolled_back in {false, true}`
 - WHEN the tool body executes
-- THEN `save_intervention_record` is called exactly once with `stage="POST_MIGRATION"` AND the on-disk file is `INT-<ticket>-<ip>-<unix>-<6hex>.json`
+- THEN `save_intervention_record` is called exactly once with `stage="POST_MIGRATION_VERIFIED"` AND the on-disk file is `INT-<ticket>-<ip>-<unix>-<6hex>.json`
 
 ### Requirement: `snmp_run_spectrum_analysis` Operator Clearance Gate
 
