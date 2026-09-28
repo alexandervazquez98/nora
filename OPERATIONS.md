@@ -516,6 +516,77 @@ than inside the `WritableSnmpClient.set()` wrapper because the
 conventions. A future change introducing other kHz-encoded OIDs
 should follow the same pattern.
 
+## Dry-run semantics (issue #82)
+
+Both `snmp_migrate_radio_frequency` and `snmp_reboot_radio` ship a
+**dry-run seam** that fires when the SNMP client passed to the helper does
+NOT implement the `WritableSnmpClient.set` verb (the write-capable protocol
+extension over `SnmpClient`). The seam is **intentional**, not a fallback
+for accidents — it is how the helpers degrade gracefully against thin
+read-only mocks used by upstream tests that do not want to exercise SET
+frames.
+
+### When dry-run fires
+
+The helpers consult `hasattr(client, "set")` immediately before emitting
+the carrier-frequency or reboot SET. When the check returns `False`:
+
+1. **Zero SNMP frames are sent.** No SET, no auxiliary GET.
+2. The helper returns a typed result whose `dry_run` flag is `True` and
+   whose `would_set` field carries the exact `(oid, value)` pairs the SET
+   WOULD have emitted — operators and orchestrators can render or diff
+   them without parsing free-text logs.
+3. An intervention record IS written with `status="DRY_RUN"` and
+   `record_name="[DRY-RUN] …"`. The audit trail stays unambiguous: a
+   downstream reader can tell a dry-run from a real completion without
+   guessing from the `would_set` field.
+
+### When dry-run does NOT fire (production)
+
+Production wires `_writable_client_factory` (see
+`src/nora/drivers/snmp_pmp450i/__init__.py` for `default_writable_client_factory`).
+The factory hands back a `WritableSnmpClient` (real `V2CClient`/`V3Client`
+instances via the `WritableV2CClient` / `WritableV3Client` adapter), so
+`hasattr(client, "set")` is `True` and the helper emits the SET frame.
+**Operators should never observe `dry_run=True` from a production
+dispatch.** A non-`None` dry-run result in production means either (a) a
+fixture is wired incorrectly, or (b) the Driver-R2 carve-out allow-list
+(`tests/test_driver_snmp450i_readonly.py`) is missing the file that just
+acquired a write path — both are regressions worth paging on.
+
+### Why this is bounded, not accidental
+
+The seam is bounded by the `WritableSnmpClient.set` verb and the writable
+factory — there is no other code path that decides dry-run vs write. This
+is the Driver-R2 carve-out tracked in
+[issue #62](https://github.com/alexandervazquez98/nora/issues/62); the
+policy enforcement test (`tests/test_driver_snmp450i_readonly.py`) fails
+the build if a new file in `src/nora/drivers/snmp_pmp450i/` is not
+classified as read-only or write-capable. New write-capable files MUST be
+added to the write side of that allow-list.
+
+### Operator-facing example
+
+A successful dry-run dispatch through the MCP transport returns:
+
+```json
+{
+  "rolled_back": false,
+  "reason": null,
+  "pre_existing_offline_excluded": 0,
+  "online_active_migrated": 0,
+  "active_degraded_migrated": 0,
+  "target_frequency_mhz": 5800.0,
+  "device_id": "192.0.2.1",
+  "dry_run": true,
+  "would_set": [["1.3.6.1.4.1.161.19.3.1.4.2.0", 5800000]]
+}
+```
+
+The `dry_run: true` flag is the only contract the orchestrator needs to
+branch on. Everything else in the response follows the same shape as a
+real completion so downstream rendering code does not need a special case.
+
 ## PromptOps Workflow (issue #45)
 
 System prompts (`src/nora/prompts/*.md`) are versioned and synchronised
