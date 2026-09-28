@@ -2,7 +2,7 @@
 
 **Branch:** `fix/issue-97-preflight-live-host` (from `origin/main` @ `15b426b`)
 **Issue:** https://github.com/alexandervazquez98/nora/issues/97
-**Status:** In progress
+**Status:** Shipped — PR #99 merged (`aff9cd2`), released as v0.3.11
 
 ## Objective
 
@@ -81,7 +81,7 @@ is not evidence that the host came from inventory. It is evidence that *no
 - [x] **T6** — GREEN: implement Part 3 `except DriverError`; T5 green
 - [x] **T7** — Part 2 prompt-conformance step in `netops_orchestrator.md`
 - [x] **T8** — Full applicable checks + work-unit commit
-- [ ] **T9** — PR with the operations note (below)
+- [x] **T9** — PR with the operations note (below)
 
 ## Route per task
 
@@ -147,5 +147,17 @@ suite. Formatted; suite then green.
 
 ## Next step
 
-T9 — open the PR with the operations note.
+None. T9 complete: PR #99 squash-merged to `main` as `aff9cd2` on
+2026-09-28, CI `test` job SUCCESS. Released as **v0.3.11**.
+
+Delivery was `disabled/unmanaged` — receipt-driven development is off at
+clone-local scope and was not enabled. Merge and release were the user's
+explicit decision.
+
+Two out-of-scope items surfaced during delivery, neither acted on:
+- `feat/issue-80-migrate-writable-wiring` (unpushed, 91-line `migrate.py` diff)
+  and `fix/issue-89-stage-literal` both touch `migrate.py` and will conflict
+  at merge time.
+- The `branch-pr` skill's `status:approved` / `type:*` label requirements do
+  not exist in this repo; CI is lint/format/mypy/test only.
 
