@@ -473,3 +473,94 @@ def test_register_device_tools_list_schema() -> None:
     assert props["community"]["type"] == "string"
     assert props["validate"]["type"] == "boolean"
     assert props["validate"].get("default") is True
+
+
+# ---------------------------------------------------------------------------
+# T5 — `SnmpTimeoutError` (DriverError) must surface as `DeviceUnreachable`.
+# ---------------------------------------------------------------------------
+
+
+def test_register_device_translates_all_wire_failures_to_typed() -> None:
+    """SnmpTimeoutError from the client surfaces as DeviceUnreachable(host).
+
+    Part 3 of issue #97: the wrapper previously only caught OSError/TimeoutError
+    (DeviceUnreachable) and puresnmp.exc.SnmpError (InvalidCommunity). SnmpTimeoutError
+    (a DriverError subclass) escaped bare and rendered as a bare OID literal.
+    The fix catches DriverError and translates it to DeviceUnreachable.
+
+    Additionally, DuplicateDeviceError (also a DriverError subclass from
+    mutable_inventory.register) must still propagate untranslated.
+    """
+    from nora.drivers.exceptions import DeviceUnreachable, DuplicateDeviceError, SnmpTimeoutError
+    from nora.drivers.inventory import Device, Inventory
+    from nora.drivers.mutable_inventory import MutableInventory
+    from nora.drivers.snmp_pmp450i.register_device import _register_device_impl
+
+    # Part 1: SnmpTimeoutError -> DeviceUnreachable(host)
+    wrapper = MutableInventory(base=Inventory(devices={}))
+
+    class _SnmpTimeoutClient:
+        """Fake client that raises SnmpTimeoutError (a DriverError) on get_oid."""
+
+        def get_oid(self, oid: str) -> str | int:
+            raise SnmpTimeoutError("1.3.6.1.2.1.1.1.0")  # the OID, not a host
+
+        def walk(self, base_oid: str) -> list[tuple[str, str | int]]:
+            return []
+
+        def close(self) -> None:
+            pass
+
+    canned = _SnmpTimeoutClient()
+
+    def client_factory(_dev: object) -> object:
+        return canned
+
+    with pytest.raises(DeviceUnreachable) as exc_info:
+        _register_device_impl(
+            driver=None,
+            host="192.0.2.50",
+            community="test-community",
+            validate=True,
+            sanitizer=None,
+            mutable_inventory=wrapper,
+            client_factory=client_factory,
+        )
+    # The host the operator typed must be in the exception
+    assert "192.0.2.50" in str(exc_info.value)
+    # The OID literal must NOT appear (that's the bug this fixes)
+    assert "1.3.6.1.2.1.1.1.0" not in str(exc_info.value)
+
+    # Part 2: DuplicateDeviceError still propagates (must NOT be caught as DeviceUnreachable).
+    # DuplicateDeviceError fires when MutableInventory.register finds the same device_id.
+    # Since _register_device_impl calls _build_device which generates a random
+    # device_id via secrets.token_hex(3), we mock DeviceResolver.build to return a
+    # fixed device_id so the second call collides with the first.
+    from nora.drivers.resolver import DeviceResolver
+
+    fixed_device = Device(
+        device_id="duplicate-test-device",
+        vendor="cambium",
+        model="pmp450i",
+        firmware="15.2.1",
+        host="192.0.2.50",
+        snmp_version="v2c",
+        community="first-community",
+    )
+    wrapper.register(fixed_device)
+
+    # Patch DeviceResolver.build so _build_device returns the same device_id,
+    # causing a DuplicateDeviceError on the second call.
+    import unittest.mock
+
+    with unittest.mock.patch.object(DeviceResolver, "build", return_value=fixed_device):
+        with pytest.raises(DuplicateDeviceError):
+            _register_device_impl(
+                driver=None,
+                host="192.0.2.50",
+                community="second-community",
+                validate=False,
+                sanitizer=None,
+                mutable_inventory=wrapper,
+                client_factory=client_factory,
+            )
