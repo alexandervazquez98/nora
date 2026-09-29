@@ -30,7 +30,7 @@ WU-C contract per `odd/tasks/multi-community-migration-and-band-reboot.md`:
 4. After the SET the helper does NOT poll for re-establishment —
    the orchestrator is responsible for re-running the pre-flight
    once the firmware reports the reboot complete. The
-   ``POST_REBOOT`` intervention record carries the reboot metadata
+   ``POST_INTERVENTION`` intervention record carries the reboot metadata
    (timestamp, firmware vote, dry-run flag) so the audit trail is
    unambiguous.
 5. Issue #80 (PR #80 follow-up): when the SNMP client lacks the
@@ -360,7 +360,7 @@ def fetch_reboot(
     try:
         if settings is None:
             raise RuntimeError("reboot.fetch_reboot requires an explicit Settings instance")
-        save_intervention_record(
+        save_status = save_intervention_record(
             settings,
             {
                 "intervention_id": "INT-REBOOT-{ts}".format(ts=int(time.time())),
@@ -368,7 +368,7 @@ def fetch_reboot(
                 "timestamp_unix": int(time.time()),
                 "ticket_number": "REBOOT-7400",
                 "target_ip": str(getattr(device, "host", device_id)),
-                "stage": "POST_REBOOT",
+                "stage": "POST_INTERVENTION",
                 "record_name": (f"{record_name_prefix}RF reboot of {device_id}"),
                 "status": record_status,
                 "agent_name": "nora-mcp",
@@ -385,6 +385,18 @@ def fetch_reboot(
                 "would_set": [list(item) for item in result.would_set],
             },
         )
+        # ``save_intervention_record`` NEVER raises (per its contract)
+        # — it returns a status dict on every failure mode. Surface
+        # non-OK statuses with a structured warning so silent payload
+        # rejections (e.g. ``INVALID_PAYLOAD`` from a typo'd ``stage``
+        # literal, issue #89) become visible in operator logs instead
+        # of being swallowed by the surrounding try/except.
+        if isinstance(save_status, dict) and save_status.get("status") != "OK":
+            logger.warning(
+                "reboot: save_intervention_record returned non-OK status for device=%s: %s",
+                device_id,
+                save_status,
+            )
     except Exception:  # pragma: no cover - writer has its own status codes
         logger.exception("reboot: save_intervention_record failed for device=%s", device_id)
 

@@ -22,7 +22,7 @@ MCP tool:
   be read (wire failure), the helper default-fires the SET
   (``reason='vote_unreadable_fail_closed'``).
 * Intervention record emission — the tool emits exactly one
-  ``POST_REBOOT`` intervention record per completion (rebooted /
+  ``POST_INTERVENTION`` intervention record per completion (rebooted /
   skipped / dry-run).
 
 Zero-Leakage: only TEST-NET-1 (``192.0.2.x``) host literals; no real
@@ -502,7 +502,7 @@ def test_reboot_missing_oid_raises_lookup_error(
 def test_reboot_emits_post_reboot_intervention_record(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Every reboot path emits exactly one POST_REBOOT record.
+    """Every reboot path emits exactly one POST_INTERVENTION record.
 
     Mirrors the slice-4 contract for ``MigrationResult`` /
     ``POST_MIGRATION``. The tool body uses the existing
@@ -510,6 +510,7 @@ def test_reboot_emits_post_reboot_intervention_record(
     record-writing rules are uniform across tools.
     """
     from nora.drivers.snmp_pmp450i import reboot as reboot_mod
+    from nora.intervention_memory.models import InterventionMemoryRecord
 
     inv = _build_inventory(tmp_path)
     registry = _build_catalog(firmware="15.2.1")
@@ -524,6 +525,11 @@ def test_reboot_emits_post_reboot_intervention_record(
     record_calls: list[dict[str, Any]] = []
 
     def spy_save(settings: Any, payload: dict[str, Any]) -> dict[str, Any]:
+        # Issue #89: validate the payload against the model — this is
+        # exactly what save_intervention_record does internally. Pre-fix
+        # the payload contained stage="POST_REBOOT" which is NOT a valid
+        # Stage literal, so model_validate would raise ValidationError.
+        InterventionMemoryRecord.model_validate(payload)
         record_calls.append(payload)
         return {"status": "OK", "intervention_id": "INT-REBOOT-test"}
 
@@ -538,11 +544,70 @@ def test_reboot_emits_post_reboot_intervention_record(
     )
 
     assert len(record_calls) == 1, (
-        f"Expected exactly one POST_REBOOT record; got {len(record_calls)}"
+        f"Expected exactly one POST_INTERVENTION record; got {len(record_calls)}"
     )
     payload = record_calls[0]
-    assert payload["stage"] == "POST_REBOOT"
+    assert payload["stage"] == "POST_INTERVENTION"
     assert payload["target_ip"] == "192.0.2.10"
     assert payload["status"] == "COMPLETED"
     assert "RF reboot of" in payload["record_name"]
     assert payload["rebooted"] is True
+
+
+def test_fetch_reboot_intervention_record_payload_validates_against_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #89: the captured ``save_intervention_record`` payload MUST validate.
+
+    Pre-fix ``fetch_reboot`` emitted ``stage="POST_REBOOT"``, which is NOT
+    in the canonical ``Stage = Literal[...]`` enum declared in
+    ``src/nora/intervention_memory/models.py``. The writer's
+    ``InterventionMemoryRecord.model_validate(payload)`` raised
+    ``ValidationError`` on ``stage``; ``save_intervention_record`` swallowed
+    the error and returned ``{"status": "INVALID_PAYLOAD", "errors": [...]}``;
+    ``fetch_reboot`` ignored the return value, so no JSON file landed under
+    ``var/interventions/``. Operator-visible symptom: intervention records
+    silently missing for every successful reboot.
+
+    Post-fix: the captured payload MUST validate cleanly against the model.
+    The stage for a reboot is ``POST_INTERVENTION`` (the only ``Stage``
+    literal that semantically matches a post-intervention reboot event). See
+    ``src/nora/intervention_memory/models.py`` for the canonical enum.
+    """
+    from nora.drivers.snmp_pmp450i import reboot as reboot_mod
+    from nora.intervention_memory.models import InterventionMemoryRecord
+
+    inv = _build_inventory(tmp_path)
+    registry = _build_catalog(firmware="15.2.1")
+    canned = _FakeSnmpClient(
+        values={
+            "1.3.6.1.4.1.161.19.3.3.3.4.0": 1,
+        },
+    )
+    settings = _settings_with_signing_key()
+    driver = _build_driver(inventory=inv, registry=registry, canned=canned, settings=settings)
+
+    captured: list[dict[str, Any]] = []
+
+    def fake_save(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        # Args: (settings, payload). Capture the payload for model validation.
+        captured.append(args[1])
+        return {"status": "OK", "intervention_id": "INT-REBOOT-test-issue-89"}
+
+    monkeypatch.setattr(reboot_mod, "save_intervention_record", fake_save)
+
+    valid_token = _mint_valid_token()
+    reboot_mod.fetch_reboot(
+        driver=driver,
+        device_id="ap-7400-01",
+        approval_token=valid_token,
+        settings=settings,
+    )
+
+    assert len(captured) == 1, (
+        f"fetch_reboot MUST emit exactly one intervention record per completion; "
+        f"got {len(captured)}"
+    )
+    # Issue #89: the payload MUST validate cleanly against the model.
+    # This is exactly what save_intervention_record does internally.
+    InterventionMemoryRecord.model_validate(captured[0])

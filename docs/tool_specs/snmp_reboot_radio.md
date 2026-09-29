@@ -21,7 +21,7 @@ When the firmware votes `rebootRequired(1)` (or the read fails — fail-closed) 
 
 Per the WU-3 (`pr44-followups.md`) pattern: when the SNMP client lacks `apply_oid` — e.g. the production `V2CClient` whose read-only `SnmpClient` Protocol is deliberate — the tool short-circuits before any wire frame and returns a typed dry-run result (`dry_run=True, would_set=[(reboot_oid, 2)]`) so operators see what WOULD have happened, instead of raising `AttributeError`. Write mutations stay out of scope.
 
-The tool emits exactly one `POST_REBOOT` intervention record per completion (rebooted / skipped / dry-run), mirroring the slice-4 contract for `MigrationResult` / `POST_MIGRATION`.
+The tool emits exactly one `POST_INTERVENTION` intervention record per completion (rebooted / skipped / dry-run), mirroring the slice-4 contract for `MigrationResult` / `POST_MIGRATION_VERIFIED`.
 
 ## HITL token contract
 
