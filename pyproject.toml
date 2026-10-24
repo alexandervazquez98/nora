@@ -22,7 +22,7 @@ classifiers = [
     "Topic :: System :: Networking :: Monitoring",
 ]
 dependencies = [
-    "fastmcp>=3.2,<4",
+    "fastmcp>=3.4.10,<4",
     "pydantic-settings>=2",
     "puresnmp==2.0.1",
     "puresnmp-crypto>=1.0",
